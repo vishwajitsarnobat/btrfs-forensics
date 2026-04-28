@@ -81,10 +81,10 @@ All commercial tools focus on **active tree parsing** or generic **data carving*
 
 | Paper | Key Contribution |
 |---|---|
-| **Bhat & Wani (2018)** "Forensic analysis of B-tree file system" | 6-stage evidence extraction procedure. Defined "Orphan-Items" — items beyond `nritems` left by B-tree balancing. Showed redistribution preserves more artifacts than merging. |
-| **Wani et al. (2020)** "Anti-forensic capabilities of Btrfs" | Analyzed CoW's effect on data residue. Showed inline data persists in leaf nodes. Regular extent data recoverable if not overwritten. Filesystem "age" increases recovery probability. |
-| **Rodeh, Bacik & Mason (2013)** "BTRFS: The Linux B-Tree Filesystem" | Authoritative description of CoW-friendly B-trees, reference counting, clone/snapshot mechanics, top-down update procedure. |
-| **Hilgert et al. (2018)** "Forensic analysis of multiple device BTRFS using TSK" | Added Btrfs to TSK. Focused on multi-device/RAID configurations. DFRWS 2018. |
+| **Bhat & Wani (2018)** "Forensic analysis of B-tree file system" | 6-stage evidence extraction procedure. Defined "Orphan-Items" — items beyond `nritems` left by B-tree balancing. Showed redistribution preserves more artifacts than merging. Also: internal nodes may contain residual leaf data in their slack; CRC32c (Castagnoli) is the specific checksum algorithm; `otime` is the file **creation/birth time**. |
+| **Wani et al. (2020)** "Anti-forensic capabilities of Btrfs" | Systematically enumerated every slack space: **leaf slack** (gap between item pointer array and item data), **internal-node slack** (unused space after key-ptr pairs), **file slack** (bytes between file end and block end), **volume slack** (trailing sectors not aligned to block size), and the **boot sector** (first 64 KiB never written by Btrfs). |
+| **Rodeh, Bacik & Mason (2013)** "BTRFS: The Linux B-Tree Filesystem" | Authoritative description of CoW-friendly B-trees, reference counting, clone/snapshot mechanics, top-down update procedure. Key forensic additions: every deleted file's back-pointer in the **extent tree** is itself CoW'd, leaving orphaned extent-tree nodes containing `EXTENT_DATA_REF` items; online **defragmentation** (`btrfs defrag`) is the primary mechanism that actively destroys forensic evidence. |
+| **Hilgert et al. (2018)** "Forensic analysis of multiple device BTRFS using TSK" | Added Btrfs to TSK. Focused on multi-device/RAID configurations. DFRWS 2018. Device tree provides physical→logical reverse mapping and device pool membership. |
 
 ---
 
@@ -217,25 +217,58 @@ A block is only truly "freed" when its reference count drops to 0 in the extent 
 
 ## 3. Gap Analysis: What's Missing?
 
+### 3.1 Tool Capability Comparison
+
 | Capability | btrfs-restore | btrfs-find-root | TSK | Our Brute-Force | Needed |
 |---|:---:|:---:|:---:|:---:|:---:|
 | Parse active tree | ✅ | ❌ | ✅ | ❌ | ✅ |
 | Find old root candidates | ❌ | ✅ | ❌ | ✅ (partial) | ✅ |
 | Walk old tree from root | ✅ (manual `-t`) | ❌ | ❌ | ❌ | ✅ |
 | Linear scan for orphaned nodes | ❌ | ✅ | ❌ | ✅ | ✅ |
-| Parse Orphan-Items (beyond nritems) | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Parse Orphan-Items in leaf nodes (beyond nritems) | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Parse Orphan-Items in internal nodes (key-ptrs beyond nritems) | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Extract inline data | ✅ | ❌ | ✅ | ✅ | ✅ |
 | Extract regular extents | ✅ | ❌ | ✅ | ✅ | ✅ |
+| CRC32c node checksum validation | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Leaf slack extraction | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Internal node slack mining | ❌ | ❌ | ❌ | ❌ | ✅ |
+| File slack reporting | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Boot sector extraction | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Orphaned extent-tree node scanning (EXTENT_DATA_REF) | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Defragmentation hazard detection | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Move/rename artifact tagging | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Snapshot presence indicator | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Superblock backup roots (4x history) | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Generation-sorted tree reconstruction | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Extent tree backref analysis | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Full extent tree backref analysis | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Cross-generation file timeline | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Checksum validation | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Multi-device / RAID | ✅ | ❌ | ✅ | ❌ | Later |
 | Compression support | ✅ | ❌ | ✅ | Stub | Later |
 
 > [!CAUTION]
 > **No existing tool combines all these capabilities.** Each tool does one thing — our opportunity is to build the first tool that integrates ALL of these into a unified, intelligent recovery engine.
+
+### 3.2 Brute-Force Stage Specific Gaps
+
+The items below are gaps within the **current brute-force stage** (not the future optimized engine).
+Detailed implementation notes are in [`gap.md`](gap.md).
+
+| ID | Gap | Source |
+|---|---|---|
+| B1 | CRC32c (Castagnoli) node checksum validation | Bhat & Wani 2018 |
+| B2 | Internal node key-ptr Orphan-Item scanning | Bhat & Wani 2018 |
+| B3 | Internal node slack mining (residual leaf data) | Bhat & Wani 2018, Wani 2020 |
+| B4 | Move/rename artifact tagging | Bhat & Wani 2018 |
+| B5 | Fix `otime` docs: it is creation/birth time, not reserved | Bhat & Wani 2018 |
+| W1 | Leaf slack extraction | Wani 2020 |
+| W2 | File slack reporting | Wani 2020 |
+| W3 | Boot sector extraction (pre-filesystem data) | Wani 2020 |
+| W4 | Volume slack extraction | Wani 2020 |
+| W5 | `btrfs_root_item` reserved field inspection | Wani 2020 |
+| R1 | Orphaned extent-tree node scanning for `EXTENT_DATA_REF` | Rodeh 2013 |
+| R2 | Defragmentation hazard detection & warning | Rodeh 2013 |
+| R3 | Snapshot presence indicator in report | Rodeh 2013 |
+| H1 | Device tree parsing (device UUID, pool membership) | Hilgert 2018 |
 
 ---
 
@@ -476,20 +509,64 @@ Btrfs stores checksums for all data in the checksum tree. By parsing old checksu
 - Determine if recovered data is complete and unmodified
 - Assign a **confidence score** to each recovery
 
+### 6.6 Slack Space Corpus
+
+From the full paper review (Wani 2020), Btrfs exposes multiple forensically interesting slack regions that no existing tool extracts:
+
+| Slack Type | Location | Forensic Value |
+|---|---|---|
+| **Leaf slack** | Gap between item pointer array and item data in every leaf node | Residual bytes from compacted-out deleted inline items |
+| **Internal node slack** | Bytes after key-ptr array to end of block | Residual leaf data from before block was promoted to internal node |
+| **File slack** | `disk_num_bytes − (offset + num_bytes)` at end of regular extents | Data from files that previously occupied the same blocks |
+| **Volume slack** | Trailing sectors beyond last aligned block | Untouched by Btrfs; may contain data from before filesystem creation |
+| **Boot sector** | First 64 KiB (`0x0000`–`0xFFFF`) | Never written by Btrfs; may contain data from a prior filesystem |
+
+Extraction of all five types is a unique contribution — no other forensic tool touches these.
+
+### 6.7 Defragmentation Forensic Timeline
+
+Online defragmentation (`btrfs defrag`) is the primary mechanism that actively destroys forensic evidence on Btrfs. It rewrites extents to new physical locations, freeing old locations for reuse. No existing tool detects whether defrag has run.
+
+By comparing the density of orphaned FS-tree nodes to the overall node count and the distribution of extent physical addresses, a heuristic defrag detector could:
+- Warn the investigator that recovery probability is reduced
+- Estimate the approximate time defrag ran (from generation numbers of affected nodes)
+- Flag the most recently rewritten extents as highest risk
+
 ---
 
 ## 7. Recommended Implementation Order
 
+### Phase A — Complete the Brute-Force Stage (do before moving to optimized engine)
+
+See [`gap.md`](gap.md) for detailed notes on each item.
+
+| Priority | Item | Effort | Impact |
+|---|---|---|---|
+| 🔴 A1 | **CRC32c checksum validation** (B1) — eliminates false-positive FSID matches | Low | High |
+| 🔴 A2 | **Leaf slack extraction** (W1) — new evidence source in every leaf | Low | High |
+| 🔴 A3 | **Boot sector extraction** (W3) — trivial, may reveal pre-filesystem data | Trivial | Medium |
+| 🔴 A4 | **Orphaned extent-tree node scanning** (R1) — second recovery path for large files | Medium | High |
+| 🔴 A5 | **Internal node key-ptr Orphan-Item scanning** (B2) — follow orphaned subtrees | Medium | High |
+| 🟡 A6 | **Move/rename artifact tagging** (B4) — richer report, no new code paths | Low | Medium |
+| 🟡 A7 | **File slack reporting** (W2) — quantify unextracted residue | Low | Medium |
+| 🟡 A8 | **Defragmentation hazard detection** (R2) — warn investigator | Low | Medium |
+| 🟡 A9 | **Snapshot presence indicator** (R3) — recovery probability estimate | Low | Low |
+| 🟢 A10 | **Internal node slack mining** (B3) — heuristic scan of unused space | Medium | Medium |
+| 🟢 A11 | **Volume slack extraction** (W4) | Trivial | Low |
+| 🟢 A12 | **`btrfs_root_item` reserved field inspection** (W5) | Low | Low |
+| 🟢 A13 | **Device tree parsing** (H1) | Low | Low |
+
+### Phase B — Optimized Engine (future stages)
+
 | Priority | Strategy | Effort | Impact |
 |---|---|---|---|
 | 🔴 P0 | **Superblock backup roots** → walk 4 historical trees | Low | High — immediate access to last 4 transaction states |
-| 🔴 P0 | **Checksum verification** (CRC32c) for scanned nodes | Low | High — eliminates false positives |
 | 🟡 P1 | **Node cataloging** → build generation-indexed database | Medium | High — enables all subsequent strategies |
 | 🟡 P1 | **Root tree walk** → discover all subvolume roots | Medium | High — find files without full-disk scan |
 | 🟢 P2 | **Generation diff engine** → identify deleted files | Medium | Very High — the core innovation |
-| 🟢 P2 | **Extent tree backref** → reverse-map extents to files | Medium | High — large file recovery |
+| 🟢 P2 | **Full extent tree backref** → reverse-map extents to files | Medium | High — large file recovery |
 | 🔵 P3 | **Cross-generation timeline** | High | Very High — unique forensic capability |
-| 🔵 P3 | **Internal node slack mining** | Medium | Medium — additional data source |
+| 🔵 P3 | **Checksum-guided data validation** (checksum tree) | Medium | High — confidence scoring |
 | ⚪ P4 | **Compression support** (zlib/lzo/zstd) | Low-Medium | Medium |
 | ⚪ P4 | **Multi-device / RAID** | High | Niche but important |
 
@@ -501,23 +578,34 @@ Btrfs stores checksums for all data in the checksum tree. By parsing old checksu
 
 **What `btrfs-restore` does** that we don't: structural tree walking from a known root. But it can't find orphaned nodes or Orphan-Items.
 
-**What nobody does**: Generation-diff analysis, cross-generation file timelines, intelligent Orphan-Item analysis with cross-referencing, extent backref reverse mapping, and predictive overwrite analysis.
+**What the full paper review revealed** (gaps not previously in this document):
+- **Leaf slack** and **file slack** are forensically meaningful residue spaces that no tool touches.
+- **Orphaned extent-tree nodes** contain `EXTENT_DATA_REF` back-pointers for deleted files — a second recovery path beyond FS-tree scanning.
+- **Defragmentation** (`btrfs defrag`) is the primary active threat to forensic evidence — no tool detects or warns about it.
+- **CRC32c** (Castagnoli) is the specific checksum algorithm — node validation is straightforward once identified.
+- The **boot sector** (first 64 KiB) may contain data from a prior filesystem — trivial to extract, universally overlooked.
+
+**What nobody does**: Generation-diff analysis, cross-generation file timelines, intelligent Orphan-Item analysis with cross-referencing, extent backref reverse mapping, predictive overwrite analysis, slack space corpus extraction, and defragmentation forensic timeline.
 
 **The innovation** is combining ALL of these into a single tool:
 
 ```
-                    ┌──────────────────────────────┐
-                    │     Unified Recovery Engine  │
-                    ├──────────────────────────────┤
-                    │  Brute-Force Scan (current)  │ ← what we have
-                    │  + Superblock Backup Roots   │ ← free wins
-                    │  + Root Tree Walk            │ ← structural discovery
-                    │  + Node Catalog + Gen-Diff   │ ← the core innovation
-                    │  + Extent Backref Analysis   │ ← large file recovery
-                    │  + Orphan-Item Intelligence  │ ← unique forensic data
-                    │  + Checksum Validation       │ ← confidence scoring
-                    │  + Cross-Gen Timeline        │ ← forensic reporting
-                    └──────────────────────────────┘
+                    ┌──────────────────────────────────┐
+                    │     Unified Recovery Engine      │
+                    ├──────────────────────────────────┤
+                    │  Brute-Force Scan (current)      │ ← what we have
+                    │  + CRC32c Validation             │ ← correctness
+                    │  + Slack Space Corpus            │ ← leaf/file/boot/vol
+                    │  + Orphaned Extent-Tree Nodes    │ ← second recovery path
+                    │  + Internal Node Key-Ptr OI Scan │ ← orphaned subtrees
+                    │  + Defrag Hazard Detection       │ ← investigator warning
+                    │  + Superblock Backup Roots       │ ← 4x history
+                    │  + Root Tree Walk                │ ← structural discovery
+                    │  + Node Catalog + Gen-Diff       │ ← the core innovation
+                    │  + Full Extent Backref Analysis  │ ← large file recovery
+                    │  + Checksum Tree Validation      │ ← confidence scoring
+                    │  + Cross-Gen Timeline            │ ← forensic reporting
+                    └──────────────────────────────────┘
 ```
 
-This would be the **first tool of its kind** — no existing open-source or commercial tool combines structural tree walking with orphaned node scanning, Orphan-Item analysis, and generation-based diffing.
+This would be the **first tool of its kind** — no existing open-source or commercial tool combines structural tree walking with orphaned node scanning, Orphan-Item analysis, slack space extraction, defrag detection, and generation-based diffing.

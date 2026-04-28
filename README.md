@@ -1,5 +1,9 @@
 # btrfs-forensics
 
+> **Stage**: Brute-Force Scanner (Stage 1 of a planned multi-stage forensic engine).
+> See [`gap.md`](gap.md) for known gaps and planned additions to this stage,
+> and [`optimized_recovery_research.md`](optimized_recovery_research.md) for the full roadmap.
+
 A forensic tool for recovering deleted files from raw Btrfs disk images. It operates entirely on the raw binary image — no mounted filesystem required — by scanning for orphaned Copy-on-Write (CoW) B-tree nodes left behind after file deletion.
 
 ---
@@ -79,7 +83,7 @@ Up to 200 additional slots beyond `nritems` are checked per node.
 
 | Item Type | Key byte | What is extracted |
 |---|---|---|
-| `INODE_ITEM` (0x01) | | Full 160-byte `btrfs_inode_item` parsed: size, nlink, uid/gid, mode, atime/ctime/mtime/otime. Stored in the report's inode metadata table. |
+| `INODE_ITEM` (0x01) | | Full 160-byte `btrfs_inode_item` parsed: size, nlink, uid/gid, mode, atime/ctime/mtime/otime (file creation/birth time). Stored in the report's inode metadata table. |
 | `INODE_REF` (0x0C) | | Filename of the inode (the object ID of the key *is* the inode number; the key offset is the parent directory inode). Multiple refs in one item are handled. |
 | `DIR_ITEM` (0x54) | | 30-byte directory entry header parsed: target inode number and filename. Updates the `inode_map`. |
 | `DIR_INDEX` (0x60) | | Same structure as `DIR_ITEM`, parsed identically. |
@@ -204,10 +208,39 @@ python main.py
 
 ---
 
-## Limitations
+## Limitations (Brute-Force Stage)
 
-- **Compression**: Inline extents with zlib/lzo/zstd compression are saved in their raw compressed form; decompression is not implemented yet.
-- **Internal nodes**: Internal B-tree nodes (`level > 0`) are currently skipped. Their slack space can contain leaf-node remnants from splits but is not yet scanned.
-- **Multi-device / RAID**: Only single-stripe, single-device images are fully tested. RAID stripe reconstruction is not implemented.
-- **Checksum validation**: Node and extent checksums are not verified; the FSID match and structural sanity checks are used instead.
-- **Space reuse**: If the OS has reclaimed and overwritten an orphaned node's disk blocks, the data is gone and cannot be recovered.
+The items below are known gaps in the current implementation. Priorities and implementation
+details are tracked in [`gap.md`](gap.md).
+
+### Correctness & confidence
+- **No CRC32c checksum validation** — nodes are accepted on FSID match alone. Castagnoli
+  CRC32c validation of `header[0x00:0x20]` would eliminate false-positive matches.
+
+### Missing evidence sources
+- **Internal nodes skipped** — Internal nodes (`level > 0`) contain no file data directly, but
+  orphaned internal nodes may have key-pointer slots beyond `nritems` that point to orphaned
+  child subtrees, and their slack space may contain residual leaf data from before the block
+  was promoted to an internal node.
+- **Leaf slack not extracted** — The free space between the last item pointer and the first
+  item-data byte in every leaf node may contain bytes from previously deleted inline items.
+- **Boot sector not scanned** — The first 64 KiB (`0x0000`–`0xFFFF`) is reserved by Btrfs and
+  never overwritten. It may contain data from a prior filesystem on the same partition.
+- **Orphaned extent-tree nodes not parsed** — Nodes with `owner = 2` (extent tree) may contain
+  `EXTENT_DATA_REF` items (type `0xB2`) that record `(root, inode, offset)` for deleted file
+  extents — a second recovery path when the FS tree node is already gone.
+
+### Report quality
+- **File slack not reported** — For regular extents, `disk_num_bytes − (offset + num_bytes)`
+  bytes of slack follow the file data inside the extent block and are not extracted.
+- **Move/rename artifacts not tagged** — Orphaned `DIR_ITEM` entries for an inode that also
+  appears at a different path are recovered but not identified as move artifacts.
+- **No defragmentation hazard warning** — `btrfs defrag` rewrites extents and is the primary
+  mechanism that destroys forensic evidence on live volumes; not detected or reported.
+
+### Out of scope for this stage
+- **Compression**: Inline extents with zlib/lzo/zstd compression are saved raw.
+- **Multi-device / RAID**: Only single-stripe, single-device images are tested.
+- **Space reuse**: Overwritten blocks cannot be recovered.
+- **Superblock backup roots, root tree walk, generation diff engine**: These belong to the
+  next stage — see [`optimized_recovery_research.md`](optimized_recovery_research.md).
