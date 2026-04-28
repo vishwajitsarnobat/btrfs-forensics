@@ -125,12 +125,12 @@ When a leaf node is full and a new item needs to be inserted:
 ```
 BEFORE (single full node):
 ┌──────────────────────────────────┐
-│ [A][B][C][D][E][F][G][H] (full) │  ← nodesize capacity reached
+│ [A][B][C][D][E][F][G][H] (full)  │  ← nodesize capacity reached
 └──────────────────────────────────┘
 
 AFTER (CoW'd split into two nodes):
 ┌─────────────────┐  ┌─────────────────┐
-│ [A][B][C][D]     │  │ [E][F][G][H][NEW]│  ← new item inserted
+│ [A][B][C][D]    │  │[E][F][G][H][NEW]│  ← new item inserted
 └─────────────────┘  └─────────────────┘
          ↑ NEW block                ↑ NEW block
 
@@ -149,12 +149,12 @@ When deletion makes a node too sparse AND its sibling is also sparse:
 ```
 BEFORE (two sparse nodes):
 ┌──────────┐  ┌──────────┐
-│ [A][B]    │  │ [C]       │  ← both below minimum occupancy
+│ [A][B]   │  │ [C]      │  ← both below minimum occupancy
 └──────────┘  └──────────┘
 
 AFTER (merged into one node):
 ┌─────────────────┐
-│ [A][B][C]        │  ← single NEW block
+│ [A][B][C]       │  ← single NEW block
 └─────────────────┘
 
 BOTH OLD blocks still exist on disk!
@@ -173,12 +173,12 @@ When deletion makes a node too sparse but its sibling has enough items to share:
 ```
 BEFORE:
 ┌─────────────────┐  ┌──────────────────┐
-│ [A]              │  │ [B][C][D][E][F]   │  ← left sparse, right has surplus
+│ [A]             │  │ [B][C][D][E][F]  │  ← left sparse, right has surplus
 └─────────────────┘  └──────────────────┘
 
 AFTER (redistribute from right to left):
 ┌──────────────┐  ┌──────────────┐
-│ [A][B][C]     │  │ [D][E][F]     │  ← balanced
+│ [A][B][C]    │  │ [D][E][F]    │  ← balanced
 └──────────────┘  └──────────────┘
      ↑ NEW                ↑ NEW
 
