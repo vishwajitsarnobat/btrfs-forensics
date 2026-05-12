@@ -5,6 +5,7 @@
 # btrfs_inode_item is 160 bytes and contains the traditional stat(2) data.
 # Reference: https://btrfs.readthedocs.io/en/latest/dev/On-disk-format.html#inode-item-01
 
+import stat
 import struct
 from datetime import datetime, timezone
 
@@ -110,8 +111,6 @@ def format_mode(mode):
     Converts a numeric mode (from stat) to a human-readable permission
     string like 'drwxr-xr-x' or '-rw-r--r--'.
     """
-    import stat
-
     file_type = stat.S_IFMT(mode)
     type_char = {
         stat.S_IFDIR:  'd',

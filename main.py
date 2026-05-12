@@ -40,6 +40,21 @@ def run_recovery_engine(image_file, output_dir, scan_current_gen=True):
     # Initialize the recovery report
     report = RecoveryReport(output_dir)
 
+    # ── Boot sector extraction (B2) ──
+    # The first 64 KiB (0x0000–0xFFFF) is reserved by Btrfs and never written to.
+    # It may contain data from a prior filesystem.
+    from utils.constants import SUPERBLOCK_OFFSET
+    with open(image_file, "rb") as f_boot:
+        boot_bytes = f_boot.read(SUPERBLOCK_OFFSET)  # 0x10000 = 65536 bytes
+
+    if any(b != 0 for b in boot_bytes):
+        boot_path = os.path.join(output_dir, "boot_sector.bin")
+        with open(boot_path, "wb") as bf:
+            bf.write(boot_bytes)
+        print(f"[+] Boot sector non-zero — saved to {boot_path}")
+    else:
+        print("[*] Boot sector is all zeros (no pre-filesystem data)")
+
     # ── Stage 1: Superblock Analysis ──
     sb_data = parse_superblock(image_file)
     if not sb_data:
@@ -48,7 +63,22 @@ def run_recovery_engine(image_file, output_dir, scan_current_gen=True):
 
     # ── Stage 2 & 3: Node Sweep + Orphan-Item Analysis + Extraction ──
     inode_map = sweep_for_orphans(image_file, sb_data, report,
+                                  output_dir=output_dir,
                                   scan_current_gen=scan_current_gen)
+
+    # ── Volume slack extraction (D2) ──
+    # Bytes after the last node-aligned offset may contain residual data.
+    nodesize = sb_data["nodesize"]
+    aligned_end = (file_size // nodesize) * nodesize
+    if aligned_end < file_size:
+        with open(image_file, "rb") as f_vs:
+            f_vs.seek(aligned_end)
+            vol_slack = f_vs.read(file_size - aligned_end)
+        if any(b != 0 for b in vol_slack):
+            vs_path = os.path.join(output_dir, "volume_slack.bin")
+            with open(vs_path, "wb") as vf:
+                vf.write(vol_slack)
+            print(f"[+] Volume slack {len(vol_slack)} bytes → {vs_path}")
 
     # ── Stage 4: Report ──
     report.print_summary()
@@ -78,10 +108,6 @@ def main():
     )
 
     args = parser.parse_args()
-
-    # Update the btree module's output directory
-    import utils.btree as btree_module
-    btree_module.OUTPUT_DIR = args.output
 
     run_recovery_engine(
         image_file=args.image,

@@ -1,10 +1,8 @@
 # btrfs-forensics
 
-> **Stage**: Brute-Force Scanner (Stage 1 of a planned multi-stage forensic engine).
-> See [`gap.md`](gap.md) for known gaps and planned additions to this stage,
-> and [`optimized_recovery_research.md`](optimized_recovery_research.md) for the full roadmap.
-
 A forensic tool for recovering deleted files from raw Btrfs disk images. It operates entirely on the raw binary image — no mounted filesystem required — by scanning for orphaned Copy-on-Write (CoW) B-tree nodes left behind after file deletion.
+
+Zero third-party dependencies. Pure Python ≥ 3.14.
 
 ---
 
@@ -20,7 +18,44 @@ Additionally, Btrfs B-tree balancing and merging operations can leave **Orphan-I
 
 - Bhat, A. & Wani, M.A. (2018). *Forensic analysis of B-tree file system (Btrfs)*. Digital Investigation.
 - Wani, M.A. et al. (2020). *An analysis of anti-forensic capabilities of B-tree file system (Btrfs)*.
+- Rodeh, O., Bacik, J. & Mason, C. (2013). *BTRFS: The Linux B-Tree Filesystem*. ACM Transactions on Storage.
+- Hilgert, J.N. et al. (2018). *Forensic analysis of multiple device BTRFS configurations using The Sleuth Kit*.
 - [Btrfs On-Disk Format — official documentation](https://btrfs.readthedocs.io/en/latest/dev/On-disk-format.html)
+
+---
+
+## Features
+
+### Core Recovery
+- **Brute-force node scanning** — linear sweep of the entire disk image, `nodesize`-aligned
+- **CRC32c (Castagnoli) checksum validation** — every FSID-matching node is verified against its stored CRC32c, eliminating false positives
+- **Orphan-Item scanning** — finds metadata remnants beyond `nritems` in leaf nodes from B-tree balancing
+- **Inline extent extraction** — recovers file data stored directly in B-tree nodes
+- **Regular extent extraction** — translates logical→physical addresses via the chunk map and reads file data from disk
+- **Extent deduplication** — identical `(disk_bytenr, offset, num_bytes)` extents are extracted only once
+
+### Evidence Sources
+- **Leaf slack extraction** — saves the free space between item pointers and item data in leaf nodes, which may contain bytes from deleted items
+- **Boot sector extraction** — saves the reserved first 64 KiB of the partition (may contain data from a prior filesystem)
+- **Volume slack extraction** — saves bytes after the last node-aligned offset
+- **Orphaned extent-tree node scanning** — parses `EXTENT_DATA_REF` items (type `0xB2`) from orphaned extent tree leaves for `(root, inode, offset)` backrefs
+- **Internal node key-pointer orphan scanning** — reads key-pointer slots beyond `nritems` in internal nodes for orphaned child pointers
+- **Internal node slack mining** — scans the slack region of internal nodes for residual leaf item structures
+
+### Metadata Enrichment
+- **Move/rename detection** — identifies when an inode appears under different names across generations (file was moved/renamed)
+- **File slack reporting** — reports `disk_num_bytes − (offset + num_bytes)` slack bytes in regular extents
+- **Defragmentation hazard detection** — warns when the orphaned-node ratio is abnormally low relative to disk usage (suggests `btrfs defrag` was run)
+- **Snapshot/subvolume indicator** — detects nodes with `owner ≥ 256` indicating subvolume/snapshot usage
+
+### Additional Parsers
+- **ROOT_ITEM reserved field inspection** — flags non-zero bytes in reserved regions of `btrfs_root_item` structures
+- **Device tree parsing** — extracts device UUID, total size, and usage from orphaned `DEV_ITEM` entries
+
+### Reporting
+- Human-readable summary table to stdout
+- Machine-readable `recovery_report.json` with full metadata for every artifact
+- Generation-aware `(inode, generation)` keying prevents filename collisions across file lifetimes
 
 ---
 
@@ -45,78 +80,40 @@ The tool reads the primary superblock at offset `0x10000` (64 KiB) and validates
 1. **Bootstrap** (`parse_chunk_map`): The `sys_chunk_array` embedded in the superblock is parsed. This contains only SYSTEM chunks — just enough to locate the chunk tree itself.
 2. **Full traversal** (`parse_chunk_tree`): The chunk tree is walked recursively (internal nodes → leaf nodes), and all `CHUNK_ITEM` entries are collected. This gives the complete logical→physical mapping covering DATA and METADATA chunks too.
 
-The chunk map is a list of `{logical_start, logical_end, physical_start, chunk_length}` entries used for address translation throughout the rest of the pipeline.
-
 ---
 
 ### Stage 2 — Raw Disk Sweep (`utils/btree.py` — `sweep_for_orphans`)
 
-The tool iterates over the entire raw image in `nodesize`-aligned steps, starting just after the superblock region. For each block it reads the 101-byte **node header** (`btrfs_header`) and checks:
+The tool iterates over the entire raw image in `nodesize`-aligned steps, starting just after the superblock region. For each block it reads the 101-byte **node header** and checks:
 
-1. **FSID match**: `header[0x20:0x36]` must equal the filesystem UUID from the superblock. Blocks that don't match are skipped instantly.
-2. **Generation check**:
+1. **FSID match**: `header[0x20:0x36]` must equal the filesystem UUID from the superblock.
+2. **CRC32c validation**: The full node is read and `crc32c(node_bytes[32:])` is compared to the stored checksum in bytes `0x00:0x04`. Mismatches are counted and rejected.
+3. **Generation check**:
    - `node_gen < sb_gen` → **Orphaned node** (old CoW copy). Its items are parsed with full Orphan-Item scanning enabled.
-   - `node_gen == sb_gen` and `level == 0` → **Current-generation leaf**. Only Orphan-Items (slots beyond `nritems`) are scanned; valid items in live nodes are the active filesystem and not targets for recovery.
+   - `node_gen == sb_gen` and `level == 0` → **Current-generation leaf**. Only Orphan-Items (slots beyond `nritems`) are scanned.
 
-Internal nodes (`level > 0`) are skipped in the current implementation.
+**Specialized branching**: Orphaned extent-tree nodes (`owner == 2`) and device-tree nodes (`owner == 4`) are routed to dedicated parsers instead of the generic item parser. Internal nodes (`level > 0`) have their key-pointer slots scanned for orphaned children and their slack space mined for residual item structures.
 
 ---
 
 ### Stage 3 — Node Item Parsing (`parse_node_items`, `_parse_single_item`)
 
-For each identified leaf node, item pointers (`btrfs_item`, 25 bytes each) are read. Each pointer holds a `btrfs_disk_key` (object ID, item type, key offset), a `data_offset`, and a `data_size`.
-
-#### Valid items (indices `0 … nritems-1`)
-
-All items within the declared `nritems` range are parsed normally.
-
-#### Orphan-Items (indices `nritems … max_possible-1`)
-
-Slots beyond `nritems` are examined for remnants of B-tree balancing. A slot is considered a real Orphan-Item if:
-- `data_size` is non-zero and fits within `nodesize`
-- `data_offset + data_size` falls within the node body
-- `item_type` is one of the five known recoverable types
-
-Up to 200 additional slots beyond `nritems` are checked per node.
+For each identified leaf node, item pointers (`btrfs_item`, 25 bytes each) are read.
 
 #### Item type handlers
 
 | Item Type | Key byte | What is extracted |
 |---|---|---|
-| `INODE_ITEM` (0x01) | | Full 160-byte `btrfs_inode_item` parsed: size, nlink, uid/gid, mode, atime/ctime/mtime/otime (file creation/birth time). Stored in the report's inode metadata table. |
-| `INODE_REF` (0x0C) | | Filename of the inode (the object ID of the key *is* the inode number; the key offset is the parent directory inode). Multiple refs in one item are handled. |
-| `DIR_ITEM` (0x54) | | 30-byte directory entry header parsed: target inode number and filename. Updates the `inode_map`. |
+| `INODE_ITEM` (0x01) | | Full 160-byte `btrfs_inode_item`: size, nlink, uid/gid, mode, atime/ctime/mtime/otime. |
+| `INODE_REF` (0x0C) | | Filename of the inode. Multiple refs in one item are handled. |
+| `DIR_ITEM` (0x54) | | Target inode number and filename. Triggers move/rename detection. |
 | `DIR_INDEX` (0x60) | | Same structure as `DIR_ITEM`, parsed identically. |
-| `EXTENT_DATA` (0x6C) | | 21-byte extent header parsed. Two sub-cases: inline (type=0) and regular (type=1). See below. |
+| `EXTENT_DATA` (0x6C) | | Inline (type=0) → data extracted immediately. Regular (type=1) → queued for second pass. |
+| `ROOT_ITEM` (0x84) | | Reserved region inspected for non-zero bytes (anomaly indicator). |
 
-**Inode → filename map**: `inode_map` is a dict built incrementally from `DIR_ITEM`, `DIR_INDEX`, and `INODE_REF` items. When multiple names are found for the same inode, the shorter/cleaner name is kept. This map is used to assign meaningful filenames to extracted data.
+**`otime`** is the file **creation/birth time** — unique to Btrfs and not available on most Linux filesystems via traditional `stat(2)`. It records when the inode was first created and is never updated.
 
----
-
-### File Extent Extraction
-
-#### Inline extents (`BTRFS_FILE_EXTENT_INLINE = 0`)
-
-The file data is stored directly inside the B-tree node, immediately after the 21-byte extent header. The payload is written to disk as:
-
-```
-<sanitized_filename>_gen<generation>_<source>_inline.bin
-```
-
-If the extent is compressed (zlib, lzo, or zstd), a warning is printed and the raw (still-compressed) bytes are saved.
-
-#### Regular extents (`BTRFS_FILE_EXTENT_REG = 1`)
-
-The extent header is followed by 32 bytes of extent reference data:
-
-| Field | Size | Description |
-|---|---|---|
-| `disk_bytenr` | 8 | Logical address of the extent on disk |
-| `disk_num_bytes` | 8 | Size of the extent on disk |
-| `offset` | 8 | Byte offset within the extent where the file's data starts |
-| `num_bytes` | 8 | Number of file bytes in this extent |
-
-Sparse extents (`disk_bytenr == 0`) are logged and skipped. Non-sparse extents are queued for the second pass.
+**Inode → filename map**: Keyed by `(inode_number, generation)` to prevent collisions when the same inode number is reused across file lifetimes.
 
 ---
 
@@ -124,22 +121,9 @@ Sparse extents (`disk_bytenr == 0`) are logged and skipped. Non-sparse extents a
 
 After the full sweep, all queued regular extent references are processed:
 
-1. `disk_bytenr` is translated from logical → physical using `translate_logical_to_physical` against the chunk map.
-2. The physical file is seeked to `physical_addr + offset` and `num_bytes` bytes are read.
-3. Data is written to:
-   ```
-   <sanitized_filename>_gen<generation>_<source>_extent.bin
-   ```
-4. If the logical address is not covered by the chunk map, the extent is logged as failed.
-
----
-
-### Stage 5 — Recovery Report (`utils/recovery_report.py`)
-
-A `RecoveryReport` object accumulates statistics and artifacts throughout the run. At the end it:
-
-- Prints a human-readable summary table to stdout (filename, inode, generation, extent type, size, source).
-- Saves a machine-readable `recovery_report.json` to the output directory with full metadata for every recovered artifact and all inode metadata.
+1. `disk_bytenr` is translated from logical → physical using the chunk map.
+2. **Deduplication**: extents with identical `(disk_bytenr, offset, num_bytes)` are extracted only once.
+3. Data is written to `<sanitized_filename>_gen<N>_<source>_extent.bin`.
 
 ---
 
@@ -148,15 +132,22 @@ A `RecoveryReport` object accumulates statistics and artifacts throughout the ru
 ```
 btrfs-forensics/
 ├── main.py                    # Entry point & CLI
-└── utils/
-    ├── constants.py           # All Btrfs on-disk format constants and offsets
-    ├── superblock.py          # Superblock parsing
-    ├── chunk_parser.py        # Chunk map bootstrap + chunk tree traversal
-    │                          # + logical→physical address translation
-    ├── btree.py               # Raw sweep, node parsing, item handlers,
-    │                          # extent extraction (inline + regular)
-    ├── inode_parser.py        # btrfs_inode_item (160 bytes) parser
-    └── recovery_report.py     # Statistics accumulator + JSON/text report
+├── utils/
+│   ├── constants.py           # All Btrfs on-disk format constants and offsets
+│   ├── crc32c.py              # Pure-Python CRC32c (Castagnoli) implementation
+│   ├── superblock.py          # Superblock parsing
+│   ├── chunk_parser.py        # Chunk map bootstrap + chunk tree traversal
+│   │                          # + logical→physical address translation
+│   ├── btree.py               # Raw sweep, node parsing, item handlers,
+│   │                          # extent extraction, slack extraction,
+│   │                          # internal node scanning, move detection
+│   ├── inode_parser.py        # btrfs_inode_item (160 bytes) parser
+│   └── recovery_report.py     # Statistics accumulator + JSON/text report
+├── tests/
+│   ├── test_crc32c.py         # CRC32c unit tests (RFC 3720 vectors)
+│   ├── test_inode_parser.py   # Inode parser unit tests (binary fixtures)
+│   └── test_integration.py    # Full pipeline integration test
+└── plan.md                    # Implementation plan and checklist
 ```
 
 ---
@@ -187,9 +178,20 @@ python main.py disk.img --no-current-gen
 After a run the output directory contains:
 - `<filename>_gen<N>_<source>_inline.bin` — recovered inline-extent files
 - `<filename>_gen<N>_<source>_extent.bin` — recovered regular-extent files
+- `leaf_slack_0x<offset>_gen<N>.bin` — leaf node slack regions with non-zero content
+- `boot_sector.bin` — first 64 KiB of the partition (if non-zero)
+- `volume_slack.bin` — trailing bytes after the last node-aligned offset (if non-zero)
 - `recovery_report.json` — machine-readable report with all stats and per-file metadata
 
 The `source` field in filenames is either `valid` (item was within `nritems`) or `orphan` (item was beyond `nritems`, found by Orphan-Item scanning).
+
+---
+
+## Running Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ---
 
@@ -208,39 +210,8 @@ python main.py
 
 ---
 
-## Limitations (Brute-Force Stage)
+## Known Limitations
 
-The items below are known gaps in the current implementation. Priorities and implementation
-details are tracked in [`gap.md`](gap.md).
-
-### Correctness & confidence
-- **No CRC32c checksum validation** — nodes are accepted on FSID match alone. Castagnoli
-  CRC32c validation of `header[0x00:0x20]` would eliminate false-positive matches.
-
-### Missing evidence sources
-- **Internal nodes skipped** — Internal nodes (`level > 0`) contain no file data directly, but
-  orphaned internal nodes may have key-pointer slots beyond `nritems` that point to orphaned
-  child subtrees, and their slack space may contain residual leaf data from before the block
-  was promoted to an internal node.
-- **Leaf slack not extracted** — The free space between the last item pointer and the first
-  item-data byte in every leaf node may contain bytes from previously deleted inline items.
-- **Boot sector not scanned** — The first 64 KiB (`0x0000`–`0xFFFF`) is reserved by Btrfs and
-  never overwritten. It may contain data from a prior filesystem on the same partition.
-- **Orphaned extent-tree nodes not parsed** — Nodes with `owner = 2` (extent tree) may contain
-  `EXTENT_DATA_REF` items (type `0xB2`) that record `(root, inode, offset)` for deleted file
-  extents — a second recovery path when the FS tree node is already gone.
-
-### Report quality
-- **File slack not reported** — For regular extents, `disk_num_bytes − (offset + num_bytes)`
-  bytes of slack follow the file data inside the extent block and are not extracted.
-- **Move/rename artifacts not tagged** — Orphaned `DIR_ITEM` entries for an inode that also
-  appears at a different path are recovered but not identified as move artifacts.
-- **No defragmentation hazard warning** — `btrfs defrag` rewrites extents and is the primary
-  mechanism that destroys forensic evidence on live volumes; not detected or reported.
-
-### Out of scope for this stage
-- **Compression**: Inline extents with zlib/lzo/zstd compression are saved raw.
+- **Compression**: Inline extents with zlib/lzo/zstd compression are saved raw (not decompressed).
 - **Multi-device / RAID**: Only single-stripe, single-device images are tested.
 - **Space reuse**: Overwritten blocks cannot be recovered.
-- **Superblock backup roots, root tree walk, generation diff engine**: These belong to the
-  next stage — see [`optimized_recovery_research.md`](optimized_recovery_research.md).

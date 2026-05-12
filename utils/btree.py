@@ -24,20 +24,47 @@ from .constants import (
     FILE_EXTENT_HEADER_SIZE, DIR_ITEM_HEADER_SIZE,
     INODE_ITEM_SIZE,
     BTRFS_FS_TREE_OBJECTID,
+    BTRFS_EXTENT_TREE_OBJECTID,
+    BTRFS_DEV_TREE_OBJECTID,
+    BTRFS_EXTENT_ITEM_KEY,
+    BTRFS_EXTENT_DATA_REF_KEY,
+    BTRFS_ROOT_ITEM_KEY,
+    BTRFS_DEV_ITEM_KEY,
     ITEM_TYPE_NAMES,
 )
 from .inode_parser import parse_inode_item
 from .chunk_parser import translate_logical_to_physical
+from .crc32c import crc32c
 
 
-# ─── Output directory ────────────────────────────────────────────
-OUTPUT_DIR = "recovery_output"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# ─── Inode Map Helpers ───────────────────────────────────────────
+# The inode map is keyed by (inode_number, generation) to avoid
+# filename collisions when the same inode number is reused across
+# generations (e.g., after delete + recreate).
+
+def _inode_map_set(inode_map, inode_id, generation, filename):
+    """Store a filename mapping for (inode, generation). Prefer shorter names."""
+    key = (inode_id, generation)
+    if key not in inode_map or len(filename) < len(inode_map[key]):
+        inode_map[key] = filename
+
+
+def _inode_map_get(inode_map, inode_id, generation):
+    """Look up filename by (inode, generation), falling back to any generation."""
+    key = (inode_id, generation)
+    if key in inode_map:
+        return inode_map[key]
+    # Fallback: find any generation for this inode
+    for (ino, gen), name in inode_map.items():
+        if ino == inode_id:
+            return name
+    return f"inode_{inode_id}"
 
 
 # ─── Item Parsing ────────────────────────────────────────────────
 
-def _parse_dir_entry(f, absolute_data_offset, data_size, object_id, inode_map, label):
+def _parse_dir_entry(f, absolute_data_offset, data_size, object_id,
+                     node_gen, inode_map, label, report):
     """
     Parse a DIR_ITEM or DIR_INDEX payload.
 
@@ -81,16 +108,30 @@ def _parse_dir_entry(f, absolute_data_offset, data_size, object_id, inode_map, l
 
         print(f"        [{label}] '{filename}' -> Inode {target_inode} (type={file_type})")
 
-        # Update the inode map — prefer shorter/cleaner names
-        if target_inode not in inode_map or len(filename) < len(inode_map[target_inode]):
-            inode_map[target_inode] = filename
+        # ── Move/rename detection (C1) ──
+        # If this inode already has a *different* name in the map,
+        # the orphaned entry is the pre-move/pre-rename path.
+        for (ino, gen), existing_name in inode_map.items():
+            if ino == target_inode and existing_name != filename:
+                print(f"        [MOVE] Inode {target_inode}: "
+                      f"'{filename}' → '{existing_name}' (file was moved/renamed)")
+                report.add_move_artifact({
+                    "inode":         target_inode,
+                    "original_path": filename,
+                    "current_path":  existing_name,
+                })
+                break
+
+        # Update the inode map (generation-aware)
+        _inode_map_set(inode_map, target_inode, node_gen, filename)
 
         return target_inode, filename
     except Exception:
         return None, None
 
 
-def _parse_inode_ref(f, absolute_data_offset, data_size, object_id, inode_map):
+def _parse_inode_ref(f, absolute_data_offset, data_size, object_id,
+                     node_gen, inode_map):
     """
     Parse an INODE_REF payload.
 
@@ -130,8 +171,10 @@ def _parse_inode_ref(f, absolute_data_offset, data_size, object_id, inode_map):
             filename = raw_name.decode('utf-8', errors='replace')
             if filename.isprintable() and len(filename.strip()) > 0:
                 print(f"        [INODE_REF] Inode {object_id} -> '{filename}'")
-                if object_id not in inode_map:
-                    inode_map[object_id] = filename
+                # Update inode map (generation-aware) — only if no name yet
+                key = (object_id, node_gen)
+                if key not in inode_map:
+                    _inode_map_set(inode_map, object_id, node_gen, filename)
                 filenames.append(filename)
         except Exception:
             pass
@@ -140,7 +183,8 @@ def _parse_inode_ref(f, absolute_data_offset, data_size, object_id, inode_map):
 
 
 def _extract_inline_extent(f, absolute_data_offset, data_size, object_id,
-                           node_gen, inode_map, report, source_label):
+                           node_gen, inode_map, report, source_label,
+                           output_dir):
     """
     Extract inline file data from an EXTENT_DATA item.
 
@@ -172,13 +216,15 @@ def _extract_inline_extent(f, absolute_data_offset, data_size, object_id,
             comp_name = comp_names.get(compression, f"unknown({compression})")
             print(f"        [!] Inline data is {comp_name}-compressed ({payload_size} bytes)")
 
-        real_filename = inode_map.get(object_id, f"inode_{object_id}")
+        real_filename = _inode_map_get(inode_map, object_id, node_gen)
         # Sanitize filename for filesystem safety
         safe_name = "".join(c if c.isalnum() or c in '._-' else '_' for c in real_filename)
-        out_path = os.path.join(OUTPUT_DIR, f"{safe_name}_gen{node_gen}_{source_label}_inline.bin")
+        out_path = os.path.join(output_dir, f"{safe_name}_gen{node_gen}_{source_label}_inline.bin")
 
-        # Avoid overwriting files we've already recovered
+        # Avoid overwriting files we've already recovered — log the skip
         if os.path.exists(out_path):
+            print(f"        [*] Duplicate inline extent for '{real_filename}' "
+                  f"(gen {node_gen}) — already extracted, skipping")
             return
 
         with open(out_path, "wb") as out_file:
@@ -226,12 +272,17 @@ def _handle_regular_extent(f, absolute_data_offset, object_id, node_gen,
     offset         = struct.unpack_from("<Q", extent_ref, 16)[0]
     num_bytes      = struct.unpack_from("<Q", extent_ref, 24)[0]
 
-    real_filename = inode_map.get(object_id, f"inode_{object_id}")
+    real_filename = _inode_map_get(inode_map, object_id, node_gen)
 
     if disk_bytenr == 0:
         # Sparse extent — all zeros
         print(f"        [!] Sparse extent for '{real_filename}' ({num_bytes} bytes)")
         return
+
+    # ── File slack reporting (C2) ──
+    file_slack = disk_num_bytes - (offset + num_bytes)
+    if file_slack > 0:
+        print(f"            → File Slack:    {file_slack} bytes (unextracted)")
 
     print(f"        [EXTENT] '{real_filename}' (Inode {object_id})")
     print(f"            -> Logical Addr:  0x{disk_bytenr:X}")
@@ -249,6 +300,7 @@ def _handle_regular_extent(f, absolute_data_offset, object_id, node_gen,
         "disk_bytenr":     disk_bytenr,
         "disk_num_bytes":  disk_num_bytes,
         "offset":          offset,
+        "file_slack":      file_slack if file_slack > 0 else 0,
         "source":          source_label,
         "output_path":     None,  # filled in during second pass
     })
@@ -257,7 +309,7 @@ def _handle_regular_extent(f, absolute_data_offset, object_id, node_gen,
 # ─── Node Parsing ────────────────────────────────────────────────
 
 def parse_node_items(f, node_offset, nodesize, node_gen, inode_map, report,
-                     scan_orphan_items=True):
+                     output_dir, scan_orphan_items=True, parse_valid_items=True):
     """
     Parses a B-tree leaf node's item pointers.
 
@@ -265,6 +317,7 @@ def parse_node_items(f, node_offset, nodesize, node_gen, inode_map, report,
     Extracts inline file data from EXTENT_DATA items.
     Records regular extent references for second-pass extraction.
 
+    If parse_valid_items is True, parses items within nritems (indices 0..nritems-1).
     If scan_orphan_items is True, also scans items beyond nritems
     (Orphan-Items per Paper 2 — remnants of B-tree balancing operations).
     """
@@ -278,8 +331,11 @@ def parse_node_items(f, node_offset, nodesize, node_gen, inode_map, report,
     nritems = struct.unpack_from("<I", header, NH_NRITEMS)[0]
 
     if level != 0:
-        # Internal node — skip for now in brute-force mode.
-        # Future: scan internal-node slack for leaf remnants (Paper 2, Sec. 3.4)
+        # Internal node — scan key-pointer slots beyond nritems
+        # for orphaned children (B4) and mine slack space (D1)
+        if scan_orphan_items:
+            _scan_internal_node_orphan_ptrs(f, node_offset, nodesize, nritems,
+                                            node_gen, report)
         return
 
     # Sanity check: nritems should be reasonable
@@ -288,9 +344,10 @@ def parse_node_items(f, node_offset, nodesize, node_gen, inode_map, report,
         return  # corrupted header
 
     # ── Parse valid items (within nritems) ──
-    for i in range(nritems):
-        _parse_single_item(f, node_offset, i, node_gen, inode_map, report,
-                           source_label="valid")
+    if parse_valid_items:
+        for i in range(nritems):
+            _parse_single_item(f, node_offset, i, node_gen, inode_map, report,
+                               output_dir, source_label="valid")
 
     # ── Parse Orphan-Items (beyond nritems) ──
     if scan_orphan_items:
@@ -327,15 +384,19 @@ def parse_node_items(f, node_offset, nodesize, node_gen, inode_map, report,
             # This looks like a valid Orphan-Item!
             orphan_count += 1
             _parse_single_item(f, node_offset, i, node_gen, inode_map, report,
-                               source_label="orphan")
+                               output_dir, source_label="orphan")
 
         if orphan_count > 0:
             report.orphan_items_found += orphan_count
             print(f"        [ORPHAN] Found {orphan_count} Orphan-Items in this node")
 
+    # ── Leaf slack extraction (B1) ──
+    _extract_leaf_slack(f, node_offset, nodesize, nritems, node_gen, report,
+                        output_dir)
+
 
 def _parse_single_item(f, node_offset, item_index, node_gen, inode_map,
-                        report, source_label):
+                        report, output_dir, source_label):
     """
     Parse a single btrfs_item at the given index within a leaf node.
     """
@@ -371,27 +432,45 @@ def _parse_single_item(f, node_offset, item_index, node_gen, inode_map,
 
     # ── INODE_REF (type 0x0C) ──
     elif item_type == BTRFS_INODE_REF_KEY:
-        _parse_inode_ref(f, absolute_data_offset, data_size, object_id, inode_map)
+        _parse_inode_ref(f, absolute_data_offset, data_size, object_id,
+                         node_gen, inode_map)
 
     # ── DIR_ITEM (type 0x54) ──
     elif item_type == BTRFS_DIR_ITEM_KEY:
         _parse_dir_entry(f, absolute_data_offset, data_size, object_id,
-                         inode_map, "DIR_ITEM")
+                         node_gen, inode_map, "DIR_ITEM", report)
 
     # ── DIR_INDEX (type 0x60) ──
     elif item_type == BTRFS_DIR_INDEX_KEY:
         _parse_dir_entry(f, absolute_data_offset, data_size, object_id,
-                         inode_map, "DIR_INDEX")
+                         node_gen, inode_map, "DIR_INDEX", report)
 
     # ── EXTENT_DATA (type 0x6C) ──
     elif item_type == BTRFS_EXTENT_DATA_KEY:
         _extract_inline_extent(f, absolute_data_offset, data_size, object_id,
-                               node_gen, inode_map, report, source_label)
+                               node_gen, inode_map, report, source_label,
+                               output_dir)
+
+    # ── ROOT_ITEM reserved field inspection (D3) ──
+    elif item_type == BTRFS_ROOT_ITEM_KEY:
+        if data_size >= 439:
+            f.seek(absolute_data_offset)
+            root_item_data = f.read(data_size)
+            # Check reserved/padding regions for non-zero values
+            # ROOT_ITEM is 439 bytes; bytes 235..438 are reserved in older formats
+            if len(root_item_data) >= 439:
+                reserved_region = root_item_data[235:439]
+                non_zero_count = sum(1 for b in reserved_region if b != 0)
+                if non_zero_count > 0:
+                    print(f"        [ROOT_ITEM] Inode {object_id}: "
+                          f"{non_zero_count} non-zero bytes in reserved region")
+                    report.root_item_anomalies += 1
 
 
 # ─── Main Sweep ──────────────────────────────────────────────────
 
-def sweep_for_orphans(image_path, sb_data, report, scan_current_gen=True):
+def sweep_for_orphans(image_path, sb_data, report, output_dir,
+                      scan_current_gen=True):
     """
     Brute-force sweep of the raw disk image for B-tree nodes.
 
@@ -410,6 +489,8 @@ def sweep_for_orphans(image_path, sb_data, report, scan_current_gen=True):
     chunk_map= sb_data["chunk_map"]
 
     # Initialize the inode → filename map
+    # Keyed by (inode_number, generation) to avoid collisions when the same
+    # inode number is reused across generations (delete + recreate).
     inode_map = {}
 
     file_size = os.path.getsize(image_path)
@@ -431,9 +512,29 @@ def sweep_for_orphans(image_path, sb_data, report, scan_current_gen=True):
             node_fsid = header[NH_FSID:NH_FSID + 16]
 
             if node_fsid == fsid:
+                # ── CRC32c checksum validation ──
+                # Read the full node and verify Castagnoli CRC32c.
+                # The checksum is stored in the first 4 bytes of the header;
+                # it covers bytes 32 onward (everything after the csum field).
+                f.seek(current_offset)
+                node_bytes = f.read(nodesize)
+                if len(node_bytes) < nodesize:
+                    current_offset += nodesize
+                    continue
+                stored_csum = struct.unpack_from("<I", node_bytes, 0)[0]
+                computed_csum = crc32c(node_bytes[32:])
+                if stored_csum != computed_csum:
+                    report.checksum_failures += 1
+                    current_offset += nodesize
+                    continue
+
                 node_gen = struct.unpack_from("<Q", header, NH_GENERATION)[0]
                 node_owner = struct.unpack_from("<Q", header, NH_OWNER)[0]
                 level = header[NH_LEVEL]
+
+                # ── Snapshot presence indicator (C4) ──
+                if node_owner >= 256:
+                    report.subvolume_nodes_seen += 1
 
                 # ── Orphaned node (old CoW copy) ──
                 if node_gen < sb_gen:
@@ -441,33 +542,65 @@ def sweep_for_orphans(image_path, sb_data, report, scan_current_gen=True):
                     print(f"\n    [!] Orphaned Node @ offset 0x{current_offset:X} "
                           f"(Gen {node_gen}, Owner {node_owner}, Level {level})")
 
-                    parse_node_items(f, current_offset, nodesize, node_gen,
-                                     inode_map, report, scan_orphan_items=True)
+                    # Branch: extent-tree nodes get a specialized parser (B3)
+                    if node_owner == BTRFS_EXTENT_TREE_OBJECTID and level == 0:
+                        _parse_extent_tree_leaf(f, current_offset, nodesize,
+                                                node_gen, report)
+                    # Branch: device-tree nodes (D4)
+                    elif node_owner == BTRFS_DEV_TREE_OBJECTID and level == 0:
+                        _parse_dev_tree_leaf(f, current_offset, nodesize,
+                                             node_gen, report)
+                    else:
+                        parse_node_items(f, current_offset, nodesize, node_gen,
+                                         inode_map, report, output_dir,
+                                         scan_orphan_items=True,
+                                         parse_valid_items=True)
 
-                # ── Current-gen node: scan only for Orphan-Items ──
+                # ── Current-gen node: scan ONLY for Orphan-Items ──
                 elif scan_current_gen and level == 0:
                     report.current_nodes_scanned += 1
-                    # Only scan for Orphan-Items in current-gen leaf nodes
-                    # (valid items in current nodes are the active filesystem)
+                    # Valid items in current nodes are the active filesystem —
+                    # only scan for Orphan-Items (beyond nritems)
                     parse_node_items(f, current_offset, nodesize, node_gen,
-                                     inode_map, report, scan_orphan_items=True)
+                                     inode_map, report, output_dir,
+                                     scan_orphan_items=True,
+                                     parse_valid_items=False)
 
             current_offset += nodesize
 
     print(f"\n[*] Scan complete. Found {report.orphan_nodes_found} orphaned nodes.")
     print(f"    Inode map contains {len(inode_map)} filename mappings.")
 
+    # ── Defragmentation hazard detection (C3) ──
+    if report.nodes_scanned > 0:
+        orphan_ratio = report.orphan_nodes_found / report.nodes_scanned
+        bytes_used_pct = sb_data["bytes_used"] / sb_data["total_bytes"] if sb_data["total_bytes"] > 0 else 0
+        if orphan_ratio < 0.01 and bytes_used_pct > 0.5:
+            print(f"\n[!] DEFRAG WARNING: Very low orphaned-node ratio "
+                  f"({orphan_ratio:.1%}) with {bytes_used_pct:.0%} disk usage.")
+            print("    Online defragmentation may have run, reducing recoverable data.")
+            report.defrag_warning = True
+
+    # ── Snapshot presence indicator (C4) ──
+    if report.subvolume_nodes_seen > 0:
+        print(f"[*] Subvolume/snapshot nodes detected ({report.subvolume_nodes_seen} nodes). "
+              "Recovery probability is elevated on snapshot-heavy filesystems.")
+        report.has_snapshots = True
+
     # ── Second Pass: Extract regular extent data ──
-    _extract_regular_extents(image_path, chunk_map, report)
+    _extract_regular_extents(image_path, chunk_map, report, output_dir)
 
     return inode_map
 
 
-def _extract_regular_extents(image_path, chunk_map, report):
+def _extract_regular_extents(image_path, chunk_map, report, output_dir):
     """
     Second pass: for each regular extent reference collected during the scan,
     translate the logical address to physical using the chunk map and read
     the actual file data from disk.
+
+    Deduplicates by (disk_bytenr, offset, num_bytes) to avoid writing
+    identical extent data multiple times.
     """
     regular_extents = [
         f for f in report.recovered_files
@@ -479,6 +612,9 @@ def _extract_regular_extents(image_path, chunk_map, report):
 
     print(f"\n[*] Second pass: extracting {len(regular_extents)} regular extent(s)...")
 
+    # Track already-extracted extents to avoid duplicates
+    extracted_extents = set()  # (disk_bytenr, offset, num_bytes)
+
     with open(image_path, "rb") as f:
         for entry in regular_extents:
             disk_bytenr    = entry["disk_bytenr"]
@@ -488,6 +624,16 @@ def _extract_regular_extents(image_path, chunk_map, report):
             filename       = entry["filename"]
             gen            = entry["generation"]
             source         = entry["source"]
+
+            # ── Deduplicate ──
+            extent_key = (disk_bytenr, offset, num_bytes)
+            if extent_key in extracted_extents:
+                print(f"    [*] Duplicate extent for '{filename}' "
+                      f"(0x{disk_bytenr:X}+{offset}, {num_bytes} bytes) "
+                      f"— already extracted, skipping")
+                entry["output_path"] = "(duplicate)"
+                continue
+            extracted_extents.add(extent_key)
 
             # Translate logical → physical
             phys_addr = translate_logical_to_physical(disk_bytenr, chunk_map)
@@ -506,7 +652,7 @@ def _extract_regular_extents(image_path, chunk_map, report):
                 print(f"    [!] Short read for '{filename}': got {len(raw_data)}/{num_bytes}")
 
             safe_name = "".join(c if c.isalnum() or c in '._-' else '_' for c in filename)
-            out_path = os.path.join(OUTPUT_DIR, f"{safe_name}_gen{gen}_{source}_extent.bin")
+            out_path = os.path.join(output_dir, f"{safe_name}_gen{gen}_{source}_extent.bin")
 
             # Avoid overwriting
             if os.path.exists(out_path):
@@ -523,3 +669,269 @@ def _extract_regular_extents(image_path, chunk_map, report):
             report.regular_extents_recovered += 1
             print(f"    [+] Extracted '{filename}' -> {out_path} "
                   f"({len(raw_data)} bytes, phys=0x{read_offset:X})")
+
+
+# ─── Leaf Slack Extraction (B1) ──────────────────────────────────
+
+def _extract_leaf_slack(f, node_offset, nodesize, nritems, node_gen, report,
+                        output_dir):
+    """
+    Extract and save the slack space between the item-pointer array and
+    the first item-data byte in a leaf node.
+
+    Source: Wani et al. (2020)
+    """
+    if nritems == 0:
+        return
+
+    item_ptr_end = node_offset + NODE_HEADER_SIZE + (nritems * ITEM_POINTER_SIZE)
+
+    # Find the earliest (smallest) data_offset among all valid items
+    # — this is the start of the item-data region
+    min_data_offset = nodesize  # worst case: no data
+    for i in range(nritems):
+        ptr_off = node_offset + NODE_HEADER_SIZE + (i * ITEM_POINTER_SIZE)
+        f.seek(ptr_off)
+        ptr_raw = f.read(ITEM_POINTER_SIZE)
+        if len(ptr_raw) < ITEM_POINTER_SIZE:
+            break
+        _, data_offset, data_size = struct.unpack("<17sII", ptr_raw)
+        if data_size > 0:
+            min_data_offset = min(min_data_offset, data_offset)
+
+    # Absolute position of the first item-data byte
+    first_data_byte = node_offset + NODE_HEADER_SIZE + min_data_offset
+
+    slack_size = first_data_byte - item_ptr_end
+    if slack_size <= 0:
+        return
+
+    f.seek(item_ptr_end)
+    slack_bytes = f.read(slack_size)
+
+    # Only save if non-zero (all-zero slack has no forensic value)
+    if all(b == 0 for b in slack_bytes):
+        return
+
+    out_path = os.path.join(output_dir,
+                            f"leaf_slack_0x{node_offset:X}_gen{node_gen}.bin")
+    if not os.path.exists(out_path):
+        with open(out_path, "wb") as out:
+            out.write(slack_bytes)
+        report.leaf_slacks_found += 1
+        print(f"        [SLACK] Leaf slack {slack_size} bytes → {out_path}")
+
+
+# ─── Internal Node Orphan Pointer Scanning (B4) ─────────────────
+
+def _scan_internal_node_orphan_ptrs(f, node_offset, nodesize, nritems,
+                                     node_gen, report):
+    """
+    In an orphaned internal node, read key-pointer pairs beyond nritems.
+    Each such pair may point to an orphaned child leaf.
+    Record the child logical addresses in the report.
+
+    Also calls _mine_internal_node_slack for D1 (slack mining).
+
+    Source: Bhat & Wani (2018)
+    """
+    max_possible_ptrs = (nodesize - NODE_HEADER_SIZE) // KEY_PTR_SIZE
+    orphan_ptr_count = 0
+
+    for i in range(nritems, max_possible_ptrs):
+        ptr_off = node_offset + NODE_HEADER_SIZE + (i * KEY_PTR_SIZE)
+        f.seek(ptr_off)
+        ptr_raw = f.read(KEY_PTR_SIZE)
+        if len(ptr_raw) < KEY_PTR_SIZE:
+            break
+
+        # btrfs_key_ptr: disk_key(17) + block_number(8) + generation(8)
+        child_logical = struct.unpack_from("<Q", ptr_raw, 17)[0]
+        child_gen     = struct.unpack_from("<Q", ptr_raw, 25)[0]
+
+        # Sanity: child_logical should look like a plausible address (non-zero, aligned)
+        if child_logical == 0 or child_logical % 4096 != 0:
+            break  # hit padding/garbage, stop
+
+        orphan_ptr_count += 1
+        report.add_orphan_child_ptr({
+            "parent_offset": node_offset,
+            "parent_gen":    node_gen,
+            "child_logical": child_logical,
+            "child_gen":     child_gen,
+            "slot":          i,
+        })
+
+    if orphan_ptr_count > 0:
+        report.internal_orphan_ptrs_found += orphan_ptr_count
+        print(f"        [INT-ORPHAN] {orphan_ptr_count} orphaned child pointers "
+              f"in internal node @ 0x{node_offset:X}")
+
+    # ── Internal node slack mining (D1) ──
+    _mine_internal_node_slack(f, node_offset, nodesize, nritems, node_gen, report)
+
+
+# ─── Internal Node Slack Mining (D1) ─────────────────────────────
+
+def _mine_internal_node_slack(f, node_offset, nodesize, nritems, node_gen, report):
+    """
+    For orphaned internal nodes, the region from
+    NODE_HEADER_SIZE + (nritems × KEY_PTR_SIZE) to end of node may contain
+    residual leaf item data from before the block was promoted to an internal node.
+
+    Scan this raw region for valid btrfs_item-sized chunks.
+
+    Source: Bhat & Wani (2018), Wani et al. (2020)
+    """
+    slack_start = node_offset + NODE_HEADER_SIZE + (nritems * KEY_PTR_SIZE)
+    slack_end = node_offset + nodesize
+    slack_size = slack_end - slack_start
+
+    if slack_size < ITEM_POINTER_SIZE:
+        return
+
+    f.seek(slack_start)
+    slack_data = f.read(slack_size)
+
+    # All-zero slack has no value
+    if all(b == 0 for b in slack_data):
+        return
+
+    known_types = {
+        BTRFS_INODE_ITEM_KEY, BTRFS_INODE_REF_KEY,
+        BTRFS_DIR_ITEM_KEY, BTRFS_DIR_INDEX_KEY,
+        BTRFS_EXTENT_DATA_KEY, BTRFS_ROOT_ITEM_KEY,
+    }
+
+    residual_count = 0
+    # Slide a 25-byte window through the slack
+    for pos in range(0, len(slack_data) - ITEM_POINTER_SIZE + 1, ITEM_POINTER_SIZE):
+        window = slack_data[pos:pos + ITEM_POINTER_SIZE]
+        key_raw, data_offset, data_size = struct.unpack("<17sII", window)
+        item_type = key_raw[8]
+
+        if item_type in known_types and data_size > 0 and data_size < nodesize:
+            if data_offset + data_size <= nodesize - NODE_HEADER_SIZE:
+                residual_count += 1
+
+    if residual_count > 0:
+        report.internal_slack_residuals += residual_count
+        print(f"        [INT-SLACK] {residual_count} residual item structures "
+              f"in internal node slack @ 0x{node_offset:X}")
+
+
+# ─── Extent Tree Leaf Parsing (B3) ───────────────────────────────
+
+def _parse_extent_tree_leaf(f, node_offset, nodesize, node_gen, report):
+    """
+    Parse an orphaned extent-tree leaf node for EXTENT_DATA_REF items.
+    These record (root, inode, file_offset) for extents that were
+    referenced by deleted files.
+
+    Source: Rodeh, Bacik & Mason (2013)
+    """
+    f.seek(node_offset)
+    header = f.read(NODE_HEADER_SIZE)
+    nritems = struct.unpack_from("<I", header, NH_NRITEMS)[0]
+    max_possible = (nodesize - NODE_HEADER_SIZE) // ITEM_POINTER_SIZE
+    if nritems > max_possible:
+        return
+
+    current_extent_laddr = None  # logical address from the preceding EXTENT_ITEM key
+
+    for i in range(nritems):
+        ptr_off = node_offset + NODE_HEADER_SIZE + (i * ITEM_POINTER_SIZE)
+        f.seek(ptr_off)
+        ptr_raw = f.read(ITEM_POINTER_SIZE)
+        if len(ptr_raw) < ITEM_POINTER_SIZE:
+            break
+        key_raw, data_offset, data_size = struct.unpack("<17sII", ptr_raw)
+        item_type  = key_raw[8]
+        key_objid  = struct.unpack_from("<Q", key_raw, 0)[0]
+        key_offset = struct.unpack_from("<Q", key_raw, 9)[0]
+
+        abs_data = node_offset + NODE_HEADER_SIZE + data_offset
+
+        if item_type == BTRFS_EXTENT_ITEM_KEY:
+            # The key offset IS the logical address of this extent
+            current_extent_laddr = key_offset
+
+        elif item_type == BTRFS_EXTENT_DATA_REF_KEY and data_size >= 28:
+            f.seek(abs_data)
+            ref_data = f.read(28)
+            if len(ref_data) < 28:
+                continue
+            ref_root     = struct.unpack_from("<Q", ref_data, 0)[0]
+            ref_inode    = struct.unpack_from("<Q", ref_data, 8)[0]
+            ref_offset   = struct.unpack_from("<Q", ref_data, 16)[0]
+            ref_count    = struct.unpack_from("<I", ref_data, 24)[0]
+
+            print(f"        [BACKREF] Extent 0x{current_extent_laddr or 0:X} "
+                  f"→ root={ref_root} inode={ref_inode} offset={ref_offset} "
+                  f"count={ref_count}")
+
+            report.add_extent_backref({
+                "extent_laddr":  current_extent_laddr,
+                "root":          ref_root,
+                "inode":         ref_inode,
+                "file_offset":   ref_offset,
+                "ref_count":     ref_count,
+                "node_gen":      node_gen,
+            })
+
+
+# ─── Device Tree Leaf Parsing (D4) ───────────────────────────────
+
+def _parse_dev_tree_leaf(f, node_offset, nodesize, node_gen, report):
+    """
+    Parse an orphaned device-tree leaf node for DEV_ITEM entries.
+    Extracts device UUID, total device size, and physical layout.
+
+    Source: Hilgert et al. (2018)
+    """
+    f.seek(node_offset)
+    header = f.read(NODE_HEADER_SIZE)
+    nritems = struct.unpack_from("<I", header, NH_NRITEMS)[0]
+    max_possible = (nodesize - NODE_HEADER_SIZE) // ITEM_POINTER_SIZE
+    if nritems > max_possible:
+        return
+
+    for i in range(nritems):
+        ptr_off = node_offset + NODE_HEADER_SIZE + (i * ITEM_POINTER_SIZE)
+        f.seek(ptr_off)
+        ptr_raw = f.read(ITEM_POINTER_SIZE)
+        if len(ptr_raw) < ITEM_POINTER_SIZE:
+            break
+        key_raw, data_offset, data_size = struct.unpack("<17sII", ptr_raw)
+        item_type = key_raw[8]
+
+        if item_type != BTRFS_DEV_ITEM_KEY or data_size < 98:
+            continue
+
+        abs_data = node_offset + NODE_HEADER_SIZE + data_offset
+        f.seek(abs_data)
+        dev_data = f.read(min(data_size, 98))
+        if len(dev_data) < 98:
+            continue
+
+        # DEV_ITEM layout (first 98 bytes):
+        #   devid(8) + total_bytes(8) + bytes_used(8) + ...
+        #   + type(8) + generation(8) + start_offset(8) + dev_group(4)
+        #   + seek_speed(1) + bandwidth(1) + uuid(16) + fsid(16)
+        import uuid
+        devid       = struct.unpack_from("<Q", dev_data, 0)[0]
+        total_bytes = struct.unpack_from("<Q", dev_data, 8)[0]
+        bytes_used  = struct.unpack_from("<Q", dev_data, 16)[0]
+        dev_uuid    = uuid.UUID(bytes=dev_data[82:98])
+
+        print(f"        [DEV] Device {devid}: UUID={dev_uuid}, "
+              f"size={total_bytes/(1024*1024):.1f} MiB, "
+              f"used={bytes_used/(1024*1024):.2f} MiB")
+
+        report.add_device_info({
+            "devid":       devid,
+            "uuid":        str(dev_uuid),
+            "total_bytes": total_bytes,
+            "bytes_used":  bytes_used,
+            "node_gen":    node_gen,
+        })

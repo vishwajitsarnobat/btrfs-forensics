@@ -14,14 +14,36 @@ class RecoveryReport:
     def __init__(self, output_dir):
         self.output_dir = output_dir
         self.recovered_files = []     # list of dicts
-        self.inode_metadata = {}      # inode_id → {generation, inode_item_data}
-        self.orphan_items_found = 0
+        self.inode_metadata = {}      # (inode_id, gen) → {inode_item_data}
+
+        # Core counters
         self.nodes_scanned = 0
         self.orphan_nodes_found = 0
         self.current_nodes_scanned = 0
+        self.orphan_items_found = 0
+        self.checksum_failures = 0
         self.inline_files_recovered = 0
         self.regular_extents_recovered = 0
         self.regular_extents_failed = 0
+
+        # Phase B — New Evidence Sources
+        self.leaf_slacks_found = 0
+        self.extent_backrefs = []
+        self.extent_backrefs_found = 0
+        self.internal_orphan_ptrs_found = 0
+        self.orphan_child_ptrs = []
+
+        # Phase C — Metadata Enrichment
+        self.move_artifacts = []
+        self.move_artifacts_found = 0
+        self.defrag_warning = False
+        self.subvolume_nodes_seen = 0
+        self.has_snapshots = False
+
+        # Phase D — Completeness
+        self.internal_slack_residuals = 0
+        self.root_item_anomalies = 0
+        self.device_info = []
 
     def add_recovered_file(self, entry):
         """
@@ -29,7 +51,7 @@ class RecoveryReport:
 
         entry should be a dict with keys:
             filename, inode, generation, extent_type, size,
-            output_path, source ('valid_item' or 'orphan_item'),
+            output_path, source ('valid' or 'orphan'),
             timestamps (optional)
         """
         self.recovered_files.append(entry)
@@ -40,19 +62,50 @@ class RecoveryReport:
         if key not in self.inode_metadata:
             self.inode_metadata[key] = metadata
 
+    def add_extent_backref(self, entry):
+        """Store an EXTENT_DATA_REF backref from the extent tree."""
+        self.extent_backrefs.append(entry)
+        self.extent_backrefs_found += 1
+
+    def add_orphan_child_ptr(self, entry):
+        """Store an orphaned child pointer from an internal node."""
+        self.orphan_child_ptrs.append(entry)
+
+    def add_move_artifact(self, entry):
+        """Store a move/rename artifact."""
+        self.move_artifacts.append(entry)
+        self.move_artifacts_found += 1
+
+    def add_device_info(self, entry):
+        """Store device information from DEV_ITEM."""
+        self.device_info.append(entry)
+
     def print_summary(self):
         """Print a human-readable summary to stdout."""
         print("\n" + "=" * 70)
         print("  RECOVERY SUMMARY")
         print("=" * 70)
         print(f"  Nodes Scanned (total):       {self.nodes_scanned}")
+        print(f"  Checksum Failures:           {self.checksum_failures}")
         print(f"  Orphan Nodes Found:          {self.orphan_nodes_found}")
         print(f"  Current-Gen Nodes Scanned:   {self.current_nodes_scanned}")
         print(f"  Orphan-Items Found:          {self.orphan_items_found}")
+        print(f"  Leaf Slacks Found:           {self.leaf_slacks_found}")
+        print(f"  Extent Backrefs Found:       {self.extent_backrefs_found}")
+        print(f"  Internal Orphan Ptrs Found:  {self.internal_orphan_ptrs_found}")
+        print(f"  Internal Slack Residuals:    {self.internal_slack_residuals}")
+        print(f"  Move/Rename Artifacts:       {self.move_artifacts_found}")
+        print(f"  ROOT_ITEM Anomalies:         {self.root_item_anomalies}")
         print(f"  Inline Files Recovered:      {self.inline_files_recovered}")
         print(f"  Regular Extents Recovered:   {self.regular_extents_recovered}")
         print(f"  Regular Extents Failed:      {self.regular_extents_failed}")
         print(f"  Total Artifacts:             {len(self.recovered_files)}")
+
+        if self.defrag_warning:
+            print(f"  ⚠ Defrag Warning:            YES")
+        if self.has_snapshots:
+            print(f"  Snapshots/Subvolumes:        YES ({self.subvolume_nodes_seen} nodes)")
+
         print("-" * 70)
 
         if self.recovered_files:
@@ -73,6 +126,12 @@ class RecoveryReport:
         if self.inode_metadata:
             print(f"\n  Inode Metadata Recovered: {len(self.inode_metadata)} unique (inode, gen) pairs")
 
+        # Move artifacts summary
+        if self.move_artifacts:
+            print(f"\n  Move/Rename Artifacts:")
+            for m in self.move_artifacts:
+                print(f"    Inode {m['inode']}: '{m['original_path']}' → '{m['current_path']}'")
+
         print("=" * 70)
 
     def save_json_report(self):
@@ -82,19 +141,33 @@ class RecoveryReport:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "stats": {
                 "nodes_scanned":            self.nodes_scanned,
+                "checksum_failures":        self.checksum_failures,
                 "orphan_nodes_found":       self.orphan_nodes_found,
                 "current_nodes_scanned":    self.current_nodes_scanned,
                 "orphan_items_found":       self.orphan_items_found,
+                "leaf_slacks_found":        self.leaf_slacks_found,
+                "extent_backrefs_found":    self.extent_backrefs_found,
+                "internal_orphan_ptrs_found": self.internal_orphan_ptrs_found,
+                "internal_slack_residuals": self.internal_slack_residuals,
+                "move_artifacts_found":     self.move_artifacts_found,
+                "root_item_anomalies":      self.root_item_anomalies,
                 "inline_files_recovered":   self.inline_files_recovered,
                 "regular_extents_recovered":self.regular_extents_recovered,
                 "regular_extents_failed":   self.regular_extents_failed,
                 "total_artifacts":          len(self.recovered_files),
+                "defrag_warning":           self.defrag_warning,
+                "has_snapshots":            self.has_snapshots,
+                "subvolume_nodes_seen":     self.subvolume_nodes_seen,
             },
             "recovered_files": self.recovered_files,
             "inode_metadata": {
                 f"{k[0]}_{k[1]}": _serialize_metadata(v)
                 for k, v in self.inode_metadata.items()
             },
+            "extent_backrefs": self.extent_backrefs,
+            "orphan_child_ptrs": self.orphan_child_ptrs,
+            "move_artifacts": self.move_artifacts,
+            "device_info": self.device_info,
         }
 
         with open(report_path, "w") as f:
@@ -116,13 +189,16 @@ def _format_size(size_bytes):
 
 
 def _serialize_metadata(meta):
-    """Make inode metadata JSON-serializable."""
+    """Make inode metadata JSON-serializable, preserving numeric types."""
     if meta is None:
         return None
     result = {}
     for k, v in meta.items():
         if isinstance(v, dict):
-            result[k] = {sk: str(sv) for sk, sv in v.items()}
+            result[k] = {
+                sk: sv if isinstance(sv, (int, float, str, bool, type(None))) else str(sv)
+                for sk, sv in v.items()
+            }
         else:
             result[k] = v
     return result
