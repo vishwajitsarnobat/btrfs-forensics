@@ -26,6 +26,51 @@ For **every** feature or milestone:
 
 ## Timeline
 
+### 2026-08-14 — Review Pass & Bug Fixes (M1 branch)
+
+- **Branch:** `feature/m1-backup-roots`
+
+A full review of the implementation, tests, and docs surfaced two real bugs,
+one test-robustness issue, and one hardening gap. All fixed and verified.
+
+**Bug 1 — EXTENT_ITEM backref recorded the extent *length* as its address.**
+
+In the extent tree, an `EXTENT_ITEM` (0xA8) key encodes the extent's logical
+bytenr in the **objectid** and the extent **length** in the key offset. The
+parser in `utils/btree.py` (`_parse_extent_tree_leaf`) was using the key
+offset — i.e. reporting the 5 MiB length `0x500000` as the extent address.
+Verified on `sandbox.img`: the large_target.txt extent key is
+`objectid=0xD00000, offset=0x500000`. Fixed to read the objectid; any
+`EXTENT_DATA_REF` now correctly attributes the owning extent address
+(0xD00000). This mattered most for the reverse-semantic reconstruction path
+(Mode C / F3), where extent addresses are the join key.
+
+**Bug 2 — `--full-sweep` false alarm on the coverage check.**
+
+The "orphans outside candidate regions" check was computed against `None`
+regions in full-sweep mode, printing a spurious "71 orphaned node(s) fell
+outside the candidate regions" warning. The check is now gated to targeted
+mode (regions are non-None), where it is meaningful.
+
+**Test robustness.** `TestRegionBuilder` (targeted-scan tests) now skips
+cleanly when `sandbox.img` is absent, matching the other integration
+classes.
+
+**Hardening — anchored walks are now CRC-validated end-to-end.**
+
+`collect_fs_tree_state` walks with `validate_crc=True`, so every node on a
+historical root-to-leaf path is checksum-verified. Anchored provenance is
+now backed by a full checksum-valid chain, not just a valid root node.
+
+**Cleanup.** Removed unused imports (`sys` in main.py, `ITEM_TYPE_NAMES` in
+btree.py) and the dead `node_count: null` field in `historical_states`.
+
+**Verification.** Full suite passes (49 tests); targeted and `--full-sweep`
+runs produce identical recovery results; `orphans_outside_regions` is 0 in
+both modes.
+
+---
+
 ### 2026-08-14 — M1: Superblock Backup Roots + Anchored Historical Walking
 
 - **Branch:** `feature/m1-backup-roots`
@@ -34,6 +79,17 @@ For **every** feature or milestone:
 **Goal.** Recover complete historical filesystem states from the superblock's
 backup roots instead of blind scanning — walking checksum-valid root-to-leaf
 paths gives *anchored provenance* for recovered files.
+
+**Concept — why backup roots preserve history.** Every transaction commit,
+Btrfs writes a `btrfs_root_backup` struct into the superblock containing the
+logical addresses + generations of the tree, chunk, extent, fs, dev, and
+csum roots *as of that commit*. The superblock keeps the four most recent
+snapshots, so even though the live superblock only points at the current
+roots, the backups retain pointers to complete older trees. Those older
+trees are exactly the same CoW copies a forensic sweep finds blindly — but
+anchored walking reaches them through a validated root path, which is why
+recovery from backup roots carries structural proof rather than heuristic
+confidence.
 
 **Empirical finding — backup-root layout (sandbox.img).**
 

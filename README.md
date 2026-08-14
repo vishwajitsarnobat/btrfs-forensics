@@ -86,7 +86,7 @@ The tool reads the primary superblock at offset `0x10000` (64 KiB) and validates
 
 ### Stage 2 — Raw Disk Sweep (`utils/btree.py` — `sweep_for_orphans`)
 
-The tool iterates over the entire raw image in `nodesize`-aligned steps, starting just after the superblock region. For each block it reads the 101-byte **node header** and checks:
+By default the tool iterates the **candidate regions** derived in Stage 1 (METADATA/SYSTEM chunks plus unmapped gaps — see "Structure-Directed Targeted Scan"); with `--full-sweep` it iterates the entire raw image in `nodesize`-aligned steps starting just after the superblock region. Either way, the per-block logic is identical: for each block it reads the 101-byte **node header** and checks:
 
 1. **FSID match**: `header[0x20:0x36]` must equal the filesystem UUID from the superblock.
 2. **CRC32c validation**: The full node is read and `crc32c(node_bytes[32:])` is compared to the stored checksum in bytes `0x00:0x04`. Mismatches are counted and rejected.
