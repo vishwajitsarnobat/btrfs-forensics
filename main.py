@@ -15,9 +15,30 @@ import sys
 from utils.superblock import parse_superblock
 from utils.btree import sweep_for_orphans
 from utils.recovery_report import RecoveryReport
+from utils.chunk_parser import build_scan_regions
+from utils.orphan_scan import get_live_metadata_blocks
 
 
-def run_recovery_engine(image_file, output_dir, scan_current_gen=True):
+def _region_blocks(regions, nodesize):
+    """Number of node-sized blocks covered by a list of (start, end) regions."""
+    return sum((end - start) // nodesize for start, end in regions)
+
+
+def _count_orphans_outside_regions(orphan_offsets, regions):
+    """How many recorded orphan offsets fall outside the candidate regions."""
+    if not regions:
+        return len(orphan_offsets)
+    covered = 0
+    for off in orphan_offsets:
+        for start, end in regions:
+            if start <= off < end:
+                covered += 1
+                break
+    return len(orphan_offsets) - covered
+
+
+def run_recovery_engine(image_file, output_dir, scan_current_gen=True,
+                        full_sweep=False, scan_data_chunks=False):
     """
     Main recovery pipeline:
         1. Parse the superblock to get filesystem metadata & chunk map
@@ -61,10 +82,56 @@ def run_recovery_engine(image_file, output_dir, scan_current_gen=True):
         print("[!] Aborting: Could not establish filesystem state.")
         return
 
+    nodesize = sb_data["nodesize"]
+
+    # ── Structure-directed scan planning (M2) ──
+    # Candidate regions = METADATA/SYSTEM chunks + unmapped gaps left by
+    # relocated/removed chunks, minus the boot region. DATA chunks can never
+    # contain metadata nodes, so they are skipped (unless --scan-data-chunks).
+    scan_regions = None
+    live_metadata_blocks = None
+    if not full_sweep:
+        scan_regions = build_scan_regions(
+            sb_data["chunk_map"], nodesize, file_size,
+            include_data=scan_data_chunks)
+        live_metadata_blocks, _ = get_live_metadata_blocks(image_file, sb_data)
+
+        report.scan_mode = "targeted"
+        report.targeted_blocks_scanned = _region_blocks(scan_regions, nodesize)
+        report.full_sweep_blocks = _region_blocks(
+            [(SUPERBLOCK_OFFSET + nodesize, file_size)], nodesize)
+        report.boot_blocks_skipped = (SUPERBLOCK_OFFSET + nodesize) // nodesize
+        report.live_metadata_blocks = len(live_metadata_blocks)
+        if not scan_data_chunks:
+            report.data_chunk_blocks_skipped = _region_blocks(
+                [(c["physical_start"],
+                  c["physical_start"] + c["chunk_length"])
+                 for c in sb_data["chunk_map"]
+                 if (c.get("type", 0) & 0x7) == 0x1],  # DATA
+                nodesize)
+    else:
+        report.scan_mode = "full"
+        report.full_sweep_blocks = _region_blocks(
+            [(SUPERBLOCK_OFFSET + nodesize, file_size)], nodesize)
+
+    print(f"[*] Scan plan: mode={report.scan_mode}, "
+          f"{report.targeted_blocks_scanned or report.full_sweep_blocks} "
+          f"candidate block(s) of {report.full_sweep_blocks} total")
+
     # ── Stage 2 & 3: Node Sweep + Orphan-Item Analysis + Extraction ──
     inode_map = sweep_for_orphans(image_file, sb_data, report,
                                   output_dir=output_dir,
-                                  scan_current_gen=scan_current_gen)
+                                  scan_current_gen=scan_current_gen,
+                                  scan_regions=scan_regions,
+                                  live_metadata_blocks=live_metadata_blocks)
+
+    # ── Coverage check: no orphan may fall outside the candidate regions ──
+    report.orphans_outside_regions = _count_orphans_outside_regions(
+        report.orphan_offsets, scan_regions)
+    if report.orphans_outside_regions > 0:
+        print(f"[!] {report.orphans_outside_regions} orphaned node(s) fell "
+              "outside the candidate regions — widen the regions "
+              "(--scan-data-chunks) or use --full-sweep.")
 
     # ── Volume slack extraction (D2) ──
     # Bytes after the last node-aligned offset may contain residual data.
@@ -106,6 +173,18 @@ def main():
         action="store_true",
         help="Skip scanning current-generation nodes for Orphan-Items",
     )
+    parser.add_argument(
+        "--full-sweep",
+        action="store_true",
+        help="Use the legacy full-image linear sweep instead of the "
+             "structure-directed targeted scan",
+    )
+    parser.add_argument(
+        "--scan-data-chunks",
+        action="store_true",
+        help="Include DATA chunk regions in the targeted scan "
+             "(paranoid; normally skipped since nodes cannot live there)",
+    )
 
     args = parser.parse_args()
 
@@ -113,6 +192,8 @@ def main():
         image_file=args.image,
         output_dir=args.output,
         scan_current_gen=not args.no_current_gen,
+        full_sweep=args.full_sweep,
+        scan_data_chunks=args.scan_data_chunks,
     )
 
 
