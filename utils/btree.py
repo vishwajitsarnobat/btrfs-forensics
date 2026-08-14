@@ -469,20 +469,107 @@ def _parse_single_item(f, node_offset, item_index, node_gen, inode_map,
 
 # ─── Main Sweep ──────────────────────────────────────────────────
 
-def sweep_for_orphans(image_path, sb_data, report, output_dir,
-                      scan_current_gen=True):
+def _process_candidate_block(f, offset, fsid, sb_gen, nodesize, inode_map,
+                             report, output_dir, scan_current_gen):
     """
-    Brute-force sweep of the raw disk image for B-tree nodes.
+    Validate and process a single node-sized block at the given physical
+    offset. Shared by the legacy full-image sweep and the targeted
+    region-driven sweep so both modes behave identically.
+    """
+    f.seek(offset)
+    header = f.read(NODE_HEADER_SIZE)
+    if not header or len(header) < NODE_HEADER_SIZE:
+        return
+
+    report.nodes_scanned += 1
+
+    # Check if this block belongs to our filesystem
+    node_fsid = header[NH_FSID:NH_FSID + 16]
+
+    if node_fsid != fsid:
+        return
+
+    # ── CRC32c checksum validation ──
+    # Read the full node and verify Castagnoli CRC32c.
+    # The checksum is stored in the first 4 bytes of the header;
+    # it covers bytes 32 onward (everything after the csum field).
+    f.seek(offset)
+    node_bytes = f.read(nodesize)
+    if len(node_bytes) < nodesize:
+        return
+    stored_csum = struct.unpack_from("<I", node_bytes, 0)[0]
+    computed_csum = crc32c(node_bytes[32:])
+    if stored_csum != computed_csum:
+        report.checksum_failures += 1
+        return
+
+    node_gen = struct.unpack_from("<Q", header, NH_GENERATION)[0]
+    node_owner = struct.unpack_from("<Q", header, NH_OWNER)[0]
+    level = header[NH_LEVEL]
+
+    # ── Snapshot presence indicator (C4) ──
+    if node_owner >= 256:
+        report.subvolume_nodes_seen += 1
+
+    # ── Orphaned node (old CoW copy) ──
+    if node_gen < sb_gen:
+        report.orphan_nodes_found += 1
+        report.orphan_offsets.append(offset)
+        print(f"\n    [!] Orphaned Node @ offset 0x{offset:X} "
+              f"(Gen {node_gen}, Owner {node_owner}, Level {level})")
+
+        # Branch: extent-tree nodes get a specialized parser (B3)
+        if node_owner == BTRFS_EXTENT_TREE_OBJECTID and level == 0:
+            _parse_extent_tree_leaf(f, offset, nodesize, node_gen, report)
+        # Branch: device-tree nodes (D4)
+        elif node_owner == BTRFS_DEV_TREE_OBJECTID and level == 0:
+            _parse_dev_tree_leaf(f, offset, nodesize, node_gen, report)
+        else:
+            parse_node_items(f, offset, nodesize, node_gen,
+                             inode_map, report, output_dir,
+                             scan_orphan_items=True,
+                             parse_valid_items=True)
+
+    # ── Current-gen node: scan ONLY for Orphan-Items ──
+    elif scan_current_gen and level == 0:
+        report.current_nodes_scanned += 1
+        # Valid items in current nodes are the active filesystem —
+        # only scan for Orphan-Items (beyond nritems)
+        parse_node_items(f, offset, nodesize, node_gen,
+                         inode_map, report, output_dir,
+                         scan_orphan_items=True,
+                         parse_valid_items=False)
+
+
+def sweep_for_orphans(image_path, sb_data, report, output_dir,
+                      scan_current_gen=True, scan_regions=None,
+                      live_metadata_blocks=None):
+    """
+    Sweep the raw disk image for B-tree nodes.
 
     Phase 1: Scan for orphaned nodes (gen < sb_gen) — these are old CoW
              copies that may contain deleted file data.
     Phase 2: Optionally also scan current-generation nodes for Orphan-Items
              (items beyond nritems) — remnants from B-tree balancing.
 
+    If `scan_regions` is provided (list of (start, end) physical ranges,
+    e.g. from chunk_parser.build_scan_regions), only those ranges are
+    examined — the structure-directed targeted scan. Otherwise the legacy
+    full-image linear sweep runs. Per-block logic is identical in both modes.
+
+    `live_metadata_blocks` (set of physical offsets currently allocated per
+    the extent tree) is used for classification stats only.
+
     After scanning, performs a second pass to extract regular extent data
     using the chunk map for logical → physical translation.
     """
-    print("[*] Starting raw disk sweep for B-tree nodes...")
+    if scan_regions is not None:
+        print("[*] Starting targeted scan of candidate regions "
+              f"({len(scan_regions)} region(s), "
+              f"{sum((e - s) for s, e in scan_regions) // sb_data['nodesize']} blocks)...")
+    else:
+        print("[*] Starting full raw disk sweep for B-tree nodes...")
+
     fsid     = sb_data["fsid"]
     sb_gen   = sb_data["generation"]
     nodesize = sb_data["nodesize"]
@@ -496,77 +583,21 @@ def sweep_for_orphans(image_path, sb_data, report, output_dir,
     file_size = os.path.getsize(image_path)
 
     with open(image_path, "rb") as f:
-        # Start scanning from after the superblock region
-        current_offset = SUPERBLOCK_OFFSET + nodesize
-
-        while current_offset + NODE_HEADER_SIZE <= file_size:
-            f.seek(current_offset)
-            header = f.read(NODE_HEADER_SIZE)
-
-            if not header or len(header) < NODE_HEADER_SIZE:
-                break
-
-            report.nodes_scanned += 1
-
-            # Check if this block belongs to our filesystem
-            node_fsid = header[NH_FSID:NH_FSID + 16]
-
-            if node_fsid == fsid:
-                # ── CRC32c checksum validation ──
-                # Read the full node and verify Castagnoli CRC32c.
-                # The checksum is stored in the first 4 bytes of the header;
-                # it covers bytes 32 onward (everything after the csum field).
-                f.seek(current_offset)
-                node_bytes = f.read(nodesize)
-                if len(node_bytes) < nodesize:
-                    current_offset += nodesize
-                    continue
-                stored_csum = struct.unpack_from("<I", node_bytes, 0)[0]
-                computed_csum = crc32c(node_bytes[32:])
-                if stored_csum != computed_csum:
-                    report.checksum_failures += 1
-                    current_offset += nodesize
-                    continue
-
-                node_gen = struct.unpack_from("<Q", header, NH_GENERATION)[0]
-                node_owner = struct.unpack_from("<Q", header, NH_OWNER)[0]
-                level = header[NH_LEVEL]
-
-                # ── Snapshot presence indicator (C4) ──
-                if node_owner >= 256:
-                    report.subvolume_nodes_seen += 1
-
-                # ── Orphaned node (old CoW copy) ──
-                if node_gen < sb_gen:
-                    report.orphan_nodes_found += 1
-                    print(f"\n    [!] Orphaned Node @ offset 0x{current_offset:X} "
-                          f"(Gen {node_gen}, Owner {node_owner}, Level {level})")
-
-                    # Branch: extent-tree nodes get a specialized parser (B3)
-                    if node_owner == BTRFS_EXTENT_TREE_OBJECTID and level == 0:
-                        _parse_extent_tree_leaf(f, current_offset, nodesize,
-                                                node_gen, report)
-                    # Branch: device-tree nodes (D4)
-                    elif node_owner == BTRFS_DEV_TREE_OBJECTID and level == 0:
-                        _parse_dev_tree_leaf(f, current_offset, nodesize,
-                                             node_gen, report)
-                    else:
-                        parse_node_items(f, current_offset, nodesize, node_gen,
-                                         inode_map, report, output_dir,
-                                         scan_orphan_items=True,
-                                         parse_valid_items=True)
-
-                # ── Current-gen node: scan ONLY for Orphan-Items ──
-                elif scan_current_gen and level == 0:
-                    report.current_nodes_scanned += 1
-                    # Valid items in current nodes are the active filesystem —
-                    # only scan for Orphan-Items (beyond nritems)
-                    parse_node_items(f, current_offset, nodesize, node_gen,
-                                     inode_map, report, output_dir,
-                                     scan_orphan_items=True,
-                                     parse_valid_items=False)
-
-            current_offset += nodesize
+        if scan_regions is not None:
+            # ── Targeted scan: only structure-derived candidate ranges ──
+            for region_start, region_end in scan_regions:
+                for offset in range(region_start, region_end, nodesize):
+                    _process_candidate_block(f, offset, fsid, sb_gen, nodesize,
+                                             inode_map, report, output_dir,
+                                             scan_current_gen)
+        else:
+            # ── Legacy full-image linear sweep ──
+            current_offset = SUPERBLOCK_OFFSET + nodesize
+            while current_offset + NODE_HEADER_SIZE <= file_size:
+                _process_candidate_block(f, current_offset, fsid, sb_gen,
+                                         nodesize, inode_map, report,
+                                         output_dir, scan_current_gen)
+                current_offset += nodesize
 
     print(f"\n[*] Scan complete. Found {report.orphan_nodes_found} orphaned nodes.")
     print(f"    Inode map contains {len(inode_map)} filename mappings.")

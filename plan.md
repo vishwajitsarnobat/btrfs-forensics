@@ -116,7 +116,21 @@ The brute-force stage is complete.
 | R3 | Snapshot/subvolume presence indicator | Rodeh et al. 2013 | Implemented via `owner >= 256` tracking |
 | H1 | Device-tree parsing | Hilgert et al. 2018 | Implemented via orphaned device-tree leaf parsing |
 
-### 3.4 Current `RecoveryReport` Coverage
+### 3.4 Verified Baseline (empirical, measured on `sandbox.img`)
+
+These facts were verified directly against `sandbox.img` and shape the optimized algorithm:
+
+| Fact | Measurement | Implication |
+|---|---|---|
+| Chunk layout | 256 MiB image; only 48 MiB mapped: 8 MiB DATA (0xD00000) + 8 MiB SYSTEM (0x1500000) + 32 MiB METADATA (0x1D00000→phys 0x2500000) | Metadata nodes can only ever live in METADATA/SYSTEM chunks or in space freed by removed chunks — the scan target is tiny, not the whole disk |
+| Live metadata set | Current extent tree (root 0x1D38000, gen 14, via ROOT_ITEM at offset 176) lists ~10 live metadata blocks as METADATA_ITEMs | Complement within the metadata chunk = orphan candidate space; live blocks only need orphan-item scanning |
+| Backup roots populated | Superblock holds 4 `btrfs_root_backup` entries; a backup entry references a complete gen-13 state: tree 0x1D28000, extent 0x1D10000, fs 0x1D20000, dev 0x1D2C000, csum 0x1D08000 (all CRC-valid, owner-correct) | A full historical filesystem state (gen 13, one transaction before current gen 14) is recoverable by anchored walking — no blind scanning needed for it |
+| Relocated-chunk orphans | 21 of 71 orphaned nodes lie OUTSIDE the current chunk map (0x100000–0x130000, 0x500000–0x520000; owners 1–7, 10–11, gens 1–4; header bytenr == physical offset) | These are remnants of a since-removed chunk. A chunk-map-only scan would miss 30% of orphans → unmapped inter-chunk gaps must also be scanned (cheap FSID prefilter) |
+| Chunk-type encoding | `btrfs_chunk.type` is at offset 24 of the CHUNK_ITEM payload; DATA=0x1, SYSTEM=0x2, METADATA=0x4 | The existing chunk parser must record type to drive a typed scan |
+| Physical ≠ logical | Metadata chunk maps logical 0x1D00000 → physical 0x2500000 (+0x80000); node headers store logical `bytenr` | All node lookups must go through the chunk map; header `bytenr` can reconstruct historical chunk maps |
+| Extent/root-tree access path | root tree (0x1D4C000, gen 14) → ROOT_ITEM (extent root at `root_item[176:184]`) → extent tree works today with a ~40-line generic walker | The generic tree walker is a proven primitive; it should be extracted into a reusable module |
+
+### 3.5 Current `RecoveryReport` Coverage
 
 | Counter/Field | Meaning |
 |---|---|
@@ -471,20 +485,43 @@ Definition of done:
 
 ---
 
-## 8. Immediate Priority Order
+## 8. Immediate Priority Order (evidence-based, Aug 2026)
 
-The next concrete implementation order should be:
+The order below is grounded in the verified baseline in §3.4. `sandbox.img` is a valid test bed for every milestone because it contains a complete gen-13 tree state (backup roots), a current gen-14 state, relocated-chunk orphans, and subvolume owners.
 
-1. parse backup roots from the superblock and expose them in `superblock.py`
-2. introduce a persistent SQLite catalog for scanned nodes and internal edges
-3. generalize the chunk-tree walker into a reusable metadata-tree walker
-4. parse and catalog root-tree structures and root relationships
-5. expand extent-tree parsing beyond current `EXTENT_DATA_REF` support
-6. build reverse structural and reverse semantic queries over the catalog
-7. assemble fragments and add confidence scoring
-8. implement generation diffing and historical reporting
+### Milestone 1 — Backup roots + generic tree walker (anchored recovery)
 
-This order keeps the architecture honest: catalog first, then anchored walking, then reverse reconstruction, then diffing.
+1. Parse `btrfs_root_backup` entries from the superblock (4 entries; the layout is packed/unaligned — verify field offsets against kernel `struct btrfs_root_backup` and validate each referenced root with CRC). Expose historical root sets `{R_i}` with generations.
+2. Extract the generic metadata-tree walker from `chunk_parser.py` into `utils/tree_walker.py` (given logical root + chunk map + nodesize → yields nodes, parent→child edges, leaf items, per-tree dispatch).
+3. Walk the backup-root tree states (esp. the gen-13 fs tree) and the current root tree; catalog every reachable root.
+
+*Definition of done*: the tool lists all historical roots and walks the gen-13 fs tree, yielding the same file items the brute-force sweep finds for gen 13 — but with anchored provenance.
+
+### Milestone 2 — Targeted candidate scan (the optimized orphan finder) — **implemented**
+
+4. ✅ Record chunk type (offset 24 of CHUNK_ITEM) in the chunk map; candidate physical regions = everything except DATA chunks and the boot region (covers METADATA/SYSTEM chunks **plus unmapped gaps** where relocated-chunk orphans live).
+5. ✅ Walk the extent tree via the root tree (generic walker in `utils/tree_walker.py`) to build the live-metadata block set (10 live blocks on `sandbox.img`).
+6. ✅ Scan only candidate regions with the FSID prefilter; identical per-block logic to the legacy sweep (`_process_candidate_block`); scan-mode stats in `recovery_report.json`.
+
+*Result*: targeted run checks 15,867 blocks of 16,379 (512 DATA blocks skipped) and finds the **same 71 orphaned nodes, same 14 current-gen nodes, same recovered files** as the full sweep — verified by `tests/test_targeted_scan.py` (10 tests, parity assertions + 0 orphans outside regions). New CLI flags: `--full-sweep`, `--scan-data-chunks`. On real disks where DATA ≈ 95%+ of capacity the reduction is much larger.
+
+### Milestone 3 — SQLite catalog + reverse queries
+
+7. Introduce `utils/catalog.py` (sqlite3): tables for nodes (logical/physical/gen/owner/level/nritems/key range/reachable-from-anchor), tree_edges, leaf_items, roots, chunks, extent backrefs.
+8. Populate from anchored walks + targeted scan; add reverse queries (which parents referenced child X; which tree covered key K; which inodes referenced extent E).
+
+*Definition of done*: a single scan populates a catalog that answers reverse queries without rescanning the disk.
+
+### Milestone 4 — Hybrid reconstruction + confidence
+
+9. Combine anchored trees, reverse structural edges, and reverse semantic backrefs; classify outputs as Confirmed / Probable / Unattached per §9.
+10. Generation diffing: diff gen-13 vs gen-14 fs tree states → create/modify/move/delete timeline (both states exist in `sandbox.img`, so this is directly testable).
+
+### Milestone 5 — Broader coverage (from §7, F7)
+
+11. Compression-aware extraction, log-tree analysis, multi-device/RAID, real-world image corpus.
+
+This order keeps the architecture honest but starts from the highest-value, most testable primitive: anchored walking of states that already exist on disk.
 
 ---
 
