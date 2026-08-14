@@ -6,6 +6,10 @@
 - the future hybrid reconstruction architecture
 - the execution order for upcoming work
 
+> **Development history:** every milestone, commit, and empirical finding is
+> catalogued chronologically in [`docs/catalog.md`](docs/catalog.md).
+> Update that file for each new feature; this plan stays forward-looking.
+
 ---
 
 ## 1. Goal
@@ -28,11 +32,12 @@ The target end state is not just file carving. It is a recovery system that can:
 
 | Area | Status | Notes |
 |---|---|---|
-| Brute-force metadata sweep | Implemented | Full raw-image scan for metadata nodes, orphan detection, item parsing, and extraction |
-| Chunk-tree walking | Implemented | Recursive top-down chunk-tree traversal already exists and proves generic tree walking is viable |
+| Brute-force metadata sweep | Implemented | Full raw-image scan for metadata nodes, orphan detection, item parsing, and extraction (`--full-sweep`) |
+| Chunk-tree walking | Implemented | Recursive top-down chunk-tree traversal; now generalized into `utils/tree_walker.py` |
 | Original brute-force gap list | Complete | All items from the old `gap.md` are now implemented |
-| Optimized structural recovery engine | Not implemented | Backup-root walking, root-tree walking, DB-backed cataloging, hybrid reconstruction, and generation diffing remain future work |
-| Verification | Passing | `python3 -m unittest discover -s tests -v` currently passes with 27 tests |
+| M2 — structure-directed targeted scan | Implemented | Candidate regions from typed chunk map (METADATA/SYSTEM + relocated-chunk gaps), live-metadata set from extent tree, parity-verified vs full sweep |
+| Optimized structural recovery engine | Partially implemented | M2 scan + generic tree walker done; backup-root walking (M1), SQLite catalog (M3), hybrid reconstruction + generation diffing (M4) remain |
+| Verification | Passing | `python3 -m unittest discover -s tests -v` currently passes with 37 tests |
 
 ### 2.2 What the Current Code Does
 

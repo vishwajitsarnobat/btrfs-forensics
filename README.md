@@ -138,18 +138,30 @@ btrfs-forensics/
 │   ├── crc32c.py              # Pure-Python CRC32c (Castagnoli) implementation
 │   ├── superblock.py          # Superblock parsing
 │   ├── chunk_parser.py        # Chunk map bootstrap + chunk tree traversal
-│   │                          # + logical→physical address translation
-│   ├── btree.py               # Raw sweep, node parsing, item handlers,
-│   │                          # extent extraction, slack extraction,
-│   │                          # internal node scanning, move detection
+│   │                          # + logical→physical translation + scan regions
+│   ├── tree_walker.py         # Generic anchored B-tree walker (any tree)
+│   ├── orphan_scan.py         # Extent-tree root lookup + live-metadata set
+│   ├── btree.py               # Sweep (full + targeted), node parsing, item
+│   │                          # handlers, extent extraction, slack mining
 │   ├── inode_parser.py        # btrfs_inode_item (160 bytes) parser
 │   └── recovery_report.py     # Statistics accumulator + JSON/text report
 ├── tests/
 │   ├── test_crc32c.py         # CRC32c unit tests (RFC 3720 vectors)
 │   ├── test_inode_parser.py   # Inode parser unit tests (binary fixtures)
-│   └── test_integration.py    # Full pipeline integration test
-└── plan.md                    # Implementation plan and checklist
+│   ├── test_integration.py    # Full pipeline integration test
+│   └── test_targeted_scan.py  # Targeted-scan parity + region unit tests
+├── docs/
+│   └── catalog.md             # Master development timeline (every commit/milestone)
+└── plan.md                    # Roadmap: goal, architecture vision, F0–F7 phases
 ```
+
+## Documentation
+
+- **`docs/catalog.md`** — master development catalog: every commit and milestone
+  in chronological order, with decisions, empirical findings, and verification.
+  Update it whenever work lands; it is the project's memory.
+- **`plan.md`** — forward-looking roadmap: the hybrid reconstruction vision,
+  the F0–F7 phase plan, and the confidence model.
 
 ---
 
