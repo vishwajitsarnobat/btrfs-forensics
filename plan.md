@@ -518,6 +518,14 @@ The order below is grounded in the verified baseline in §3.4. `sandbox.img` is 
 
 *Definition of done*: a single scan populates a catalog that answers reverse queries without rescanning the disk.
 
+### Hardening backlog (from the 2026-08-14 review)
+
+- ✅ CRC-validate every node on anchored walk paths (provenance = checksum-valid root-to-leaf chain, not just a valid root)
+- Backup-root **scan-fallback**: if the canonical slots (SB+0xB2B…) yield no valid entries, scan the superblock for `total_bytes`-matching structs (the validation-driven approach used to locate them originally)
+- Superblock **mirror parsing**: read the backup superblocks (64 MiB / 256 GiB) for redundancy when the primary is damaged
+- Build a **second test image** with a richer history (moves, renames, snapshots, multiple subvolumes) to validate M4 generation diffing beyond the minimal sandbox scenario
+- Broaden `EXTENT_DATA_REF` coverage to `TREE_BLOCK_REF` (0xB0) and shared-block backrefs for metadata extents (feeds Mode C reverse semantics)
+
 ### Milestone 4 — Hybrid reconstruction + confidence
 
 9. Combine anchored trees, reverse structural edges, and reverse semantic backrefs; classify outputs as Confirmed / Probable / Unattached per §9.
