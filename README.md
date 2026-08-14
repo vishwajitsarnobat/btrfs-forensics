@@ -29,6 +29,7 @@ Additionally, Btrfs B-tree balancing and merging operations can leave **Orphan-I
 ### Core Recovery
 - **Structure-directed targeted scanning** — scans only candidate regions (METADATA/SYSTEM chunks + relocated-chunk gaps), skipping DATA chunks; parity-tested against the full sweep
 - **Brute-force node scanning** — linear sweep of the entire disk image, `nodesize`-aligned (`--full-sweep`)
+- **Anchored historical walking (M1)** — parses and CRC-validates the 4 superblock backup roots, walks each historical fs tree (sandbox.img preserves gens 11–14) into a file inventory, tags sweep-recovered files with anchored provenance, and reports files deleted since each generation (`--no-anchored` to skip)
 - **CRC32c (Castagnoli) checksum validation** — every FSID-matching node is verified against its stored CRC32c, eliminating false positives
 - **Orphan-Item scanning** — finds metadata remnants beyond `nritems` in leaf nodes from B-tree balancing
 - **Inline extent extraction** — recovers file data stored directly in B-tree nodes
@@ -141,6 +142,8 @@ btrfs-forensics/
 │   │                          # + logical→physical translation + scan regions
 │   ├── tree_walker.py         # Generic anchored B-tree walker (any tree)
 │   ├── orphan_scan.py         # Extent-tree root lookup + live-metadata set
+│   ├── backup_roots.py        # Superblock backup-root parsing + validation
+│   ├── anchored_walk.py       # Historical fs-state walking + provenance
 │   ├── btree.py               # Sweep (full + targeted), node parsing, item
 │   │                          # handlers, extent extraction, slack mining
 │   ├── inode_parser.py        # btrfs_inode_item (160 bytes) parser
@@ -149,7 +152,8 @@ btrfs-forensics/
 │   ├── test_crc32c.py         # CRC32c unit tests (RFC 3720 vectors)
 │   ├── test_inode_parser.py   # Inode parser unit tests (binary fixtures)
 │   ├── test_integration.py    # Full pipeline integration test
-│   └── test_targeted_scan.py  # Targeted-scan parity + region unit tests
+│   ├── test_targeted_scan.py  # Targeted-scan parity + region unit tests
+│   └── test_m1_anchored.py    # Backup roots + anchored walking tests
 ├── docs/
 │   └── catalog.md             # Master development timeline (every commit/milestone)
 └── plan.md                    # Roadmap: goal, architecture vision, F0–F7 phases
@@ -187,6 +191,7 @@ python main.py disk.img --no-current-gen
 | `--no-current-gen` | *(off)* | If set, skips current-generation nodes entirely (only scans orphaned nodes) |
 | `--full-sweep` | *(off)* | Use the legacy full-image linear sweep instead of the structure-directed targeted scan |
 | `--scan-data-chunks` | *(off)* | Include DATA chunk regions in the targeted scan (paranoid; skipped by default since Btrfs never allocates metadata nodes there) |
+| `--no-anchored` | *(off)* | Skip the anchored historical analysis (superblock backup roots) |
 
 ### Structure-Directed Targeted Scan
 

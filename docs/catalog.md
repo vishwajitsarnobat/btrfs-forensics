@@ -26,6 +26,52 @@ For **every** feature or milestone:
 
 ## Timeline
 
+### 2026-08-14 — M1: Superblock Backup Roots + Anchored Historical Walking
+
+- **Branch:** `feature/m1-backup-roots`
+- **Plan:** plan.md §8, Milestone 1 (implemented)
+
+**Goal.** Recover complete historical filesystem states from the superblock's
+backup roots instead of blind scanning — walking checksum-valid root-to-leaf
+paths gives *anchored provenance* for recovered files.
+
+**Empirical finding — backup-root layout (sandbox.img).**
+
+The four `btrfs_root_backup` entries sit at **packed, unaligned** superblock
+offsets `0xB2B / 0xBD3 / 0xC7B / 0xD23` (stride 0xA8 = 168 bytes) with the
+standard field offsets (tree_root@0x00 … total_bytes@0x60, num_devices@0x70).
+All four validated with CRC + owner checks and reference **four distinct
+historical states**: fs trees at 0x1D5C000 (gen 11), 0x1D70000 (gen 12),
+0x1D20000 (gen 13), 0x1D48000 (gen 14); the newest tree_root equals the live
+root tree address.
+
+**What was done.**
+
+- `utils/backup_roots.py`: parses the 4 slots and validates every referenced
+  root (CRC32c + expected owner via the chunk map) — garbage slots are never
+  treated as evidence.
+- `utils/anchored_walk.py`: walks a backup's fs tree into a file inventory
+  (inode → name/size/has_data), walks the current fs tree via the live root
+  tree for comparison, tags sweep-recovered artifacts with
+  `provenance: "anchored"`, and reports files deleted since each generation.
+- `main.py` runs the anchored analysis after the sweep (`--no-anchored` to
+  skip); new stats in the summary + JSON (`historical_states`, backup-root
+  counts, deleted-since).
+
+**Result on sandbox.img.**
+
+- gen 11 state: `target_file.txt` (31 B inline) — deleted by gen 12
+- gen 13 state: `large_target.txt` (5 MiB regular extent) — deleted by gen 14
+- gen 14 state: only the root dir (files gone) — coherent deletion timeline
+- 5 sweep artifacts confirmed with anchored provenance; 2 files reported
+  as deleted since a backup generation
+
+**Verification.** `tests/test_m1_anchored.py` (12 tests): 4 backups parsed,
+all valid, gens span 11–14, state inventories match the sweep findings,
+deleted-since diff, provenance tagging. Full suite: **49 tests pass**.
+
+---
+
 ### 2026-08-14 — M2: Structure-Directed Targeted Orphan Scan
 
 - **Branch:** `feature/m2-targeted-orphan-scan`
