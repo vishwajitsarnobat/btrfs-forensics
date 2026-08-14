@@ -19,12 +19,23 @@ class RecoveryReport:
         # Core counters
         self.nodes_scanned = 0
         self.orphan_nodes_found = 0
+        self.orphan_offsets = []      # physical offsets of orphaned nodes
+
         self.current_nodes_scanned = 0
         self.orphan_items_found = 0
         self.checksum_failures = 0
         self.inline_files_recovered = 0
         self.regular_extents_recovered = 0
         self.regular_extents_failed = 0
+
+        # Targeted scan (M2) stats
+        self.scan_mode = "full"
+        self.targeted_blocks_scanned = 0
+        self.full_sweep_blocks = 0
+        self.data_chunk_blocks_skipped = 0
+        self.boot_blocks_skipped = 0
+        self.live_metadata_blocks = 0
+        self.orphans_outside_regions = 0
 
         # Phase B — New Evidence Sources
         self.leaf_slacks_found = 0
@@ -85,6 +96,14 @@ class RecoveryReport:
         print("\n" + "=" * 70)
         print("  RECOVERY SUMMARY")
         print("=" * 70)
+        print(f"  Scan Mode:                   {self.scan_mode}")
+        if self.scan_mode == "targeted":
+            print(f"  Targeted Blocks Scanned:     {self.targeted_blocks_scanned}")
+            print(f"  Full-Sweep Block Equivalent: {self.full_sweep_blocks}")
+            print(f"  Data Chunk Blocks Skipped:   {self.data_chunk_blocks_skipped}")
+            print(f"  Boot Blocks Skipped:         {self.boot_blocks_skipped}")
+            print(f"  Live Metadata Blocks:        {self.live_metadata_blocks}")
+            print(f"  Orphans Outside Regions:     {self.orphans_outside_regions}")
         print(f"  Nodes Scanned (total):       {self.nodes_scanned}")
         print(f"  Checksum Failures:           {self.checksum_failures}")
         print(f"  Orphan Nodes Found:          {self.orphan_nodes_found}")
@@ -140,6 +159,13 @@ class RecoveryReport:
         report = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "stats": {
+                "scan_mode":                self.scan_mode,
+                "targeted_blocks_scanned":  self.targeted_blocks_scanned,
+                "full_sweep_blocks":        self.full_sweep_blocks,
+                "data_chunk_blocks_skipped": self.data_chunk_blocks_skipped,
+                "boot_blocks_skipped":      self.boot_blocks_skipped,
+                "live_metadata_blocks":     self.live_metadata_blocks,
+                "orphans_outside_regions":  self.orphans_outside_regions,
                 "nodes_scanned":            self.nodes_scanned,
                 "checksum_failures":        self.checksum_failures,
                 "orphan_nodes_found":       self.orphan_nodes_found,

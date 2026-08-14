@@ -89,6 +89,22 @@ BTRFS_DEV_EXTENT_KEY      = 0xCC   # 204
 BTRFS_DEV_ITEM_KEY        = 0xD8   # 216
 BTRFS_CHUNK_ITEM_KEY      = 0xE4   # 228
 
+# ─── Chunk Item (btrfs_chunk) ─────────────────────────────────
+# payload layout: length(8) + owner(8) + stripe_len(8) + type(8)
+#                 + io_align(4) + io_width(4) + sector_size(4)
+#                 + num_stripes(4) + sub_stripes(4) + stripes[]
+CHUNK_ITEM_TYPE_OFFSET = 24
+
+# Block group / chunk type flags (low 3 bits)
+BTRFS_BLOCK_GROUP_DATA     = 0x1
+BTRFS_BLOCK_GROUP_SYSTEM   = 0x2
+BTRFS_BLOCK_GROUP_METADATA = 0x4
+
+# ─── ROOT_ITEM (btrfs_root_item) ──────────────────────────────
+# payload begins with a 160-byte btrfs_inode_item, then:
+#   generation(8) @160, root_dirid(8) @168, bytenr(8) @176 ...
+ROOT_ITEM_BYTENR_OFFSET = 176
+
 # ─── File Extent Types ───────────────────────────────────────
 BTRFS_FILE_EXTENT_INLINE   = 0
 BTRFS_FILE_EXTENT_REG      = 1
