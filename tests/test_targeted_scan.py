@@ -31,6 +31,8 @@ def _region_blocks(regions, nodesize):
     return sum((end - start) // nodesize for start, end in regions)
 
 
+@unittest.skipUnless(os.path.exists(SANDBOX_IMG),
+                     "sandbox.img not found — skipping region tests")
 class TestRegionBuilder(unittest.TestCase):
     """Unit tests for build_scan_regions."""
 

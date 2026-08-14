@@ -10,7 +10,6 @@
 
 import argparse
 import os
-import sys
 
 from utils.superblock import parse_superblock
 from utils.btree import sweep_for_orphans
@@ -129,12 +128,14 @@ def run_recovery_engine(image_file, output_dir, scan_current_gen=True,
                                   live_metadata_blocks=live_metadata_blocks)
 
     # ── Coverage check: no orphan may fall outside the candidate regions ──
-    report.orphans_outside_regions = _count_orphans_outside_regions(
-        report.orphan_offsets, scan_regions)
-    if report.orphans_outside_regions > 0:
-        print(f"[!] {report.orphans_outside_regions} orphaned node(s) fell "
-              "outside the candidate regions — widen the regions "
-              "(--scan-data-chunks) or use --full-sweep.")
+    # (only meaningful in targeted mode; a full sweep examines every block)
+    if scan_regions is not None:
+        report.orphans_outside_regions = _count_orphans_outside_regions(
+            report.orphan_offsets, scan_regions)
+        if report.orphans_outside_regions > 0:
+            print(f"[!] {report.orphans_outside_regions} orphaned node(s) fell "
+                  "outside the candidate regions — widen the regions "
+                  "(--scan-data-chunks) or use --full-sweep.")
 
     # ── Stage 2b: Anchored historical walking (M1) ──
     # Backup roots preserve whole historical tree states (one per transaction

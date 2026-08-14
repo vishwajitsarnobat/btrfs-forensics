@@ -24,6 +24,7 @@ from .constants import (
 )
 from .inode_parser import parse_inode_item
 from .tree_walker import walk_tree
+from .crc32c import crc32c
 from .orphan_scan import _find_tree_root_by_objectid
 
 
@@ -119,8 +120,10 @@ def collect_fs_tree_state(image_path, sb_data, fs_root, gen):
                             inv["size"] = max(
                                 inv["size"], data_size - FILE_EXTENT_HEADER_SIZE)
 
+    # Every node along the path is CRC-validated so anchored provenance is
+    # backed by a checksum-valid root-to-leaf chain, not just a valid root.
     walk_tree(image_path, fs_root, sb_data["chunk_map"], sb_data["nodesize"],
-              on_leaf=on_leaf)
+              on_leaf=on_leaf, validate_crc=True, crc32c=crc32c)
     return inventory
 
 
@@ -158,7 +161,6 @@ def analyze_historical_states(image_path, sb_data, backups, report,
             "gen":        backup["gen"],
             "fs_root":    backup["fs_root"],
             "validated":  "fs_root" in backup.get("valid_roots", set()),
-            "node_count": None,  # set below via walk count if needed
             "files": [
                 {"inode": ino, "filename": inv["filename"],
                  "size": inv["size"], "has_data": inv["has_data"],

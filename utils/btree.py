@@ -30,7 +30,6 @@ from .constants import (
     BTRFS_EXTENT_DATA_REF_KEY,
     BTRFS_ROOT_ITEM_KEY,
     BTRFS_DEV_ITEM_KEY,
-    ITEM_TYPE_NAMES,
 )
 from .inode_parser import parse_inode_item
 from .chunk_parser import translate_logical_to_physical
@@ -884,8 +883,10 @@ def _parse_extent_tree_leaf(f, node_offset, nodesize, node_gen, report):
         abs_data = node_offset + NODE_HEADER_SIZE + data_offset
 
         if item_type == BTRFS_EXTENT_ITEM_KEY:
-            # The key offset IS the logical address of this extent
-            current_extent_laddr = key_offset
+            # EXTENT_ITEM key: objectid = extent's logical bytenr,
+            # offset = extent length in bytes (verified on sandbox.img:
+            # 0xD00000/0x500000 for the 5 MiB large_target.txt extent).
+            current_extent_laddr = key_objid
 
         elif item_type == BTRFS_EXTENT_DATA_REF_KEY and data_size >= 28:
             f.seek(abs_data)
