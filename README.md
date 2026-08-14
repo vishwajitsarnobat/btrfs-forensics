@@ -27,7 +27,8 @@ Additionally, Btrfs B-tree balancing and merging operations can leave **Orphan-I
 ## Features
 
 ### Core Recovery
-- **Brute-force node scanning** — linear sweep of the entire disk image, `nodesize`-aligned
+- **Structure-directed targeted scanning** — scans only candidate regions (METADATA/SYSTEM chunks + relocated-chunk gaps), skipping DATA chunks; parity-tested against the full sweep
+- **Brute-force node scanning** — linear sweep of the entire disk image, `nodesize`-aligned (`--full-sweep`)
 - **CRC32c (Castagnoli) checksum validation** — every FSID-matching node is verified against its stored CRC32c, eliminating false positives
 - **Orphan-Item scanning** — finds metadata remnants beyond `nritems` in leaf nodes from B-tree balancing
 - **Inline extent extraction** — recovers file data stored directly in B-tree nodes
@@ -172,6 +173,14 @@ python main.py disk.img --no-current-gen
 | `image` | `sandbox.img` | Path to the raw Btrfs disk image |
 | `-o` / `--output` | `recovery_output` | Output directory for recovered files and the JSON report |
 | `--no-current-gen` | *(off)* | If set, skips current-generation nodes entirely (only scans orphaned nodes) |
+| `--full-sweep` | *(off)* | Use the legacy full-image linear sweep instead of the structure-directed targeted scan |
+| `--scan-data-chunks` | *(off)* | Include DATA chunk regions in the targeted scan (paranoid; skipped by default since Btrfs never allocates metadata nodes there) |
+
+### Structure-Directed Targeted Scan
+
+By default the tool does **not** sweep the whole image. It derives candidate regions from Btrfs structural metadata: metadata nodes can only live in METADATA/SYSTEM chunks or in unmapped space freed by relocated/removed chunks, so the scan covers those regions and skips DATA chunks and the reserved boot area. It also reads the extent tree (via the root tree) to classify currently-allocated metadata blocks. Every orphan offset is checked against the candidate regions; if any fall outside (e.g. a novel chunk-layout case), the tool reports it and you can widen the regions with `--scan-data-chunks` or fall back to `--full-sweep`.
+
+On `sandbox.img` the targeted scan checks 15,867 blocks of 16,379 (skipping 512 DATA blocks) and finds exactly the same 71 orphaned nodes and recovered files as the full sweep. On real disks where DATA space dominates capacity, the reduction is far larger. Scan-mode stats are included in `recovery_report.json`.
 
 ### Output
 
