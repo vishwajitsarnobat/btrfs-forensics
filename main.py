@@ -17,6 +17,8 @@ from utils.btree import sweep_for_orphans
 from utils.recovery_report import RecoveryReport
 from utils.chunk_parser import build_scan_regions
 from utils.orphan_scan import get_live_metadata_blocks
+from utils.backup_roots import parse_backup_roots
+from utils.anchored_walk import analyze_historical_states
 
 
 def _region_blocks(regions, nodesize):
@@ -38,7 +40,8 @@ def _count_orphans_outside_regions(orphan_offsets, regions):
 
 
 def run_recovery_engine(image_file, output_dir, scan_current_gen=True,
-                        full_sweep=False, scan_data_chunks=False):
+                        full_sweep=False, scan_data_chunks=False,
+                        scan_anchored=True):
     """
     Main recovery pipeline:
         1. Parse the superblock to get filesystem metadata & chunk map
@@ -133,6 +136,15 @@ def run_recovery_engine(image_file, output_dir, scan_current_gen=True,
               "outside the candidate regions — widen the regions "
               "(--scan-data-chunks) or use --full-sweep.")
 
+    # ── Stage 2b: Anchored historical walking (M1) ──
+    # Backup roots preserve whole historical tree states (one per transaction
+    # boundary). Walking them confirms recovered artifacts with structural
+    # provenance and reveals files deleted since each recorded generation.
+    if scan_anchored:
+        print("\n[*] Anchored historical analysis (superblock backup roots)...")
+        backups = parse_backup_roots(image_file, sb_data)
+        analyze_historical_states(image_file, sb_data, backups, report)
+
     # ── Volume slack extraction (D2) ──
     # Bytes after the last node-aligned offset may contain residual data.
     nodesize = sb_data["nodesize"]
@@ -185,6 +197,11 @@ def main():
         help="Include DATA chunk regions in the targeted scan "
              "(paranoid; normally skipped since nodes cannot live there)",
     )
+    parser.add_argument(
+        "--no-anchored",
+        action="store_true",
+        help="Skip the anchored historical analysis (superblock backup roots)",
+    )
 
     args = parser.parse_args()
 
@@ -194,6 +211,7 @@ def main():
         scan_current_gen=not args.no_current_gen,
         full_sweep=args.full_sweep,
         scan_data_chunks=args.scan_data_chunks,
+        scan_anchored=not args.no_anchored,
     )
 
 

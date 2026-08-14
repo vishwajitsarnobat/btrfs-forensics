@@ -36,7 +36,8 @@ The target end state is not just file carving. It is a recovery system that can:
 | Chunk-tree walking | Implemented | Recursive top-down chunk-tree traversal; now generalized into `utils/tree_walker.py` |
 | Original brute-force gap list | Complete | All items from the old `gap.md` are now implemented |
 | M2 — structure-directed targeted scan | Implemented | Candidate regions from typed chunk map (METADATA/SYSTEM + relocated-chunk gaps), live-metadata set from extent tree, parity-verified vs full sweep |
-| Optimized structural recovery engine | Partially implemented | M2 scan + generic tree walker done; backup-root walking (M1), SQLite catalog (M3), hybrid reconstruction + generation diffing (M4) remain |
+| M1 — backup roots + anchored walking | Implemented | 4 backup-root slots parsed + CRC/owner-validated; historical fs states (gens 11–14 on sandbox.img) walked into inventories; sweep artifacts tagged with anchored provenance; deleted-since diff |
+| Optimized structural recovery engine | Partially implemented | M1 + M2 done; SQLite catalog (M3), hybrid reconstruction + generation diffing (M4) remain |
 | Verification | Passing | `python3 -m unittest discover -s tests -v` currently passes with 37 tests |
 
 ### 2.2 What the Current Code Does
@@ -494,13 +495,13 @@ Definition of done:
 
 The order below is grounded in the verified baseline in §3.4. `sandbox.img` is a valid test bed for every milestone because it contains a complete gen-13 tree state (backup roots), a current gen-14 state, relocated-chunk orphans, and subvolume owners.
 
-### Milestone 1 — Backup roots + generic tree walker (anchored recovery)
+### Milestone 1 — Backup roots + generic tree walker (anchored recovery) — **implemented**
 
-1. Parse `btrfs_root_backup` entries from the superblock (4 entries; the layout is packed/unaligned — verify field offsets against kernel `struct btrfs_root_backup` and validate each referenced root with CRC). Expose historical root sets `{R_i}` with generations.
-2. Extract the generic metadata-tree walker from `chunk_parser.py` into `utils/tree_walker.py` (given logical root + chunk map + nodesize → yields nodes, parent→child edges, leaf items, per-tree dispatch).
-3. Walk the backup-root tree states (esp. the gen-13 fs tree) and the current root tree; catalog every reachable root.
+1. ✅ Parse `btrfs_root_backup` entries (4 slots at SB+0xB2B/0xBD3/0xC7B/0xD23, stride 0xA8, packed/unaligned — offsets verified empirically, every referenced root CRC+owner-validated).
+2. ✅ Generic metadata-tree walker extracted to `utils/tree_walker.py` (M2).
+3. ✅ Walk the backup-root fs trees (gens 11–14 on sandbox.img) + the current fs tree via the live root tree; tag sweep artifacts with anchored provenance; report deleted-since diffs.
 
-*Definition of done*: the tool lists all historical roots and walks the gen-13 fs tree, yielding the same file items the brute-force sweep finds for gen 13 — but with anchored provenance.
+*Result*: `utils/backup_roots.py` + `utils/anchored_walk.py`; on sandbox.img the gen-11 state contains `target_file.txt` (31 B) and the gen-13 state contains `large_target.txt` (5 MiB), both deleted by gen 14; 5 sweep artifacts confirmed as anchored; 12 new tests (49 total pass).
 
 ### Milestone 2 — Targeted candidate scan (the optimized orphan finder) — **implemented**
 

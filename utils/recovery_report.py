@@ -37,6 +37,15 @@ class RecoveryReport:
         self.live_metadata_blocks = 0
         self.orphans_outside_regions = 0
 
+        # Anchored historical walking (M1) stats
+        self.backup_roots_parsed = 0
+        self.backup_roots_valid = 0
+        self.historical_states_walked = 0
+        self.current_fs_inodes = 0
+        self.anchored_files_confirmed = 0
+        self.deleted_since_backup = 0
+        self.historical_states = []
+
         # Phase B — New Evidence Sources
         self.leaf_slacks_found = 0
         self.extent_backrefs = []
@@ -104,6 +113,12 @@ class RecoveryReport:
             print(f"  Boot Blocks Skipped:         {self.boot_blocks_skipped}")
             print(f"  Live Metadata Blocks:        {self.live_metadata_blocks}")
             print(f"  Orphans Outside Regions:     {self.orphans_outside_regions}")
+        print(f"  Backup Roots Parsed:         {self.backup_roots_parsed}")
+        print(f"  Backup Roots Valid:          {self.backup_roots_valid}")
+        print(f"  Historical States Walked:    {self.historical_states_walked}")
+        print(f"  Current FS Inodes:           {self.current_fs_inodes}")
+        print(f"  Anchored Files Confirmed:    {self.anchored_files_confirmed}")
+        print(f"  Deleted Since Backup:        {self.deleted_since_backup}")
         print(f"  Nodes Scanned (total):       {self.nodes_scanned}")
         print(f"  Checksum Failures:           {self.checksum_failures}")
         print(f"  Orphan Nodes Found:          {self.orphan_nodes_found}")
@@ -166,6 +181,12 @@ class RecoveryReport:
                 "boot_blocks_skipped":      self.boot_blocks_skipped,
                 "live_metadata_blocks":     self.live_metadata_blocks,
                 "orphans_outside_regions":  self.orphans_outside_regions,
+                "backup_roots_parsed":      self.backup_roots_parsed,
+                "backup_roots_valid":       self.backup_roots_valid,
+                "historical_states_walked": self.historical_states_walked,
+                "current_fs_inodes":        self.current_fs_inodes,
+                "anchored_files_confirmed": self.anchored_files_confirmed,
+                "deleted_since_backup":     self.deleted_since_backup,
                 "nodes_scanned":            self.nodes_scanned,
                 "checksum_failures":        self.checksum_failures,
                 "orphan_nodes_found":       self.orphan_nodes_found,
@@ -194,6 +215,7 @@ class RecoveryReport:
             "orphan_child_ptrs": self.orphan_child_ptrs,
             "move_artifacts": self.move_artifacts,
             "device_info": self.device_info,
+            "historical_states": self.historical_states,
         }
 
         with open(report_path, "w") as f:
