@@ -11,9 +11,6 @@ wheels/
 
 # User added
 sandbox.img
-recovery_output
 
 # Paper PDFs and other bulk files stay out of the repo;
 # the development catalog (docs/catalog.md) IS tracked.
-docs/*
-!docs/catalog.md
