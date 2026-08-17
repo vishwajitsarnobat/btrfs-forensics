@@ -1,656 +1,389 @@
-# Btrfs Forensics Plan
+# Build Plan — Btrfs Filesystem-State Archaeology
 
-- the project goal
-- the current implemented state
-- the brute-force work already completed
-- the future hybrid reconstruction architecture
-- the execution order for upcoming work
-
-> **Development history:** every milestone, commit, and empirical finding is
-> catalogued chronologically in [`docs/catalog.md`](docs/catalog.md).
-> Update that file for each new feature; this plan stays forward-looking.
+> Written 2026-08-17 from the verified research in [`research.md`](research.md).
+> History lives in [`catalog.md`](catalog.md). This plan is forward-looking
+> only; update it when decisions change, and log every completed step in the
+> catalog.
 
 ---
 
-## 1. Goal
+## 1. What We Are Building (and Not Building)
 
-Build a forensic-safe Btrfs recovery tool that works directly on raw disk images, recovers deleted file metadata and content from orphaned Copy-on-Write metadata blocks, and evolves from a brute-force artifact extractor into a historical reconstruction engine.
+**Thesis.** Btrfs's copy-on-write design leaves behind a graph of historical
+metadata — orphaned nodes, beyond-`nritems` item remnants, backup and
+superseded roots, free-space-tree state, relocated-chunk residue. Existing
+tools *salvage files*; published work ("Beyond Carving", IEEE Access 2026)
+now also *lists deleted files deterministically* from historical roots.
+**Nobody reconstructs filesystem history as an evidence graph with
+provenance and confidence.** That is the product and the paper.
 
-The target end state is not just file carving. It is a recovery system that can:
+**Product one-liner:** an open-source forensic engine that ingests a raw
+Btrfs image, builds a queryable evidence catalog of *every* metadata
+artifact ever left on disk, and answers: *what existed, when, what changed,
+what can be recovered, how confidently, and was anything hidden?*
 
-- recover files and metadata from orphaned B-tree nodes
-- reconstruct historical filesystem structure when possible
-- correlate forward references and reverse references across Btrfs trees
-- distinguish confirmed reconstructions from probable fragments and unattached artifacts
-- produce a defensible forensic report with provenance and confidence
+**Explicit novelty claims** (each mapped to a verified gap in research.md §6):
 
----
-
-## 2. Current State
-
-### 2.1 Codebase Status
-
-| Area | Status | Notes |
+| Claim | Gap | Beats prior art how |
 |---|---|---|
-| Brute-force metadata sweep | Implemented | Full raw-image scan for metadata nodes, orphan detection, item parsing, and extraction (`--full-sweep`) |
-| Chunk-tree walking | Implemented | Recursive top-down chunk-tree traversal; now generalized into `utils/tree_walker.py` |
-| Original brute-force gap list | Complete | All items from the old `gap.md` are now implemented |
-| M2 — structure-directed targeted scan | Implemented | Candidate regions from typed chunk map (METADATA/SYSTEM + relocated-chunk gaps), live-metadata set from extent tree, parity-verified vs full sweep |
-| Optimized structural recovery engine | Partially implemented | M2 scan + generic tree walker done; backup-root walking (M1), SQLite catalog (M3), hybrid reconstruction + generation diffing (M4) remain |
-| Verification | Passing | `python3 -m unittest discover -s tests -v` currently passes with 37 tests |
+| C1. Orphan-item & slack archaeology as a recovery source (beyond-`nritems` items, node slack, kernel ORPHAN_ITEM 0x30) | G1 | Beyond Carving scans whole valid blocks only — deep leaf scanning is *their stated future work*; we already have it working |
+| C2. Free-space-tree forensics: prove blocks were freed; overwrite-risk scoring | G2 | Zero tools, zero papers (sweep-confirmed) |
+| C3. Full-state generation diffing → per-file timelines (create/modify/rename/delete + content deltas) | G3 | Beyond Carving diffs objectid *sets* (existence only) |
+| C4. Confidence tiers (Confirmed/Probable/Unattached) with per-artifact provenance chains, csum-verified content | G4 | Only X-Ways's binary flag exists |
+| C5. Hiding detection targeting the Toolan & Humphries + Schwietert & Hilgert technique lists, evaluated against fishy-generated images | G5 | Papers propose hiding; nobody ships detection |
+| C6. Orphaned/relocated-chunk forensics + historical chunk-map reconstruction | G6 | Our sandbox discovery (21/71 orphans outside chunk map); their future work |
+| C7. First public btrfs deleted-file benchmark corpus + systematic tool benchmark | G8 | None exists (verified: no btrfs at digitalcorpora/CFReDS) |
 
-### 2.2 What the Current Code Does
-
-| Component | Current role |
-|---|---|
-| `main.py` | Entry point, orchestration, output handling |
-| `utils/superblock.py` | Parses the primary superblock and bootstraps the chunk map |
-| `utils/chunk_parser.py` | Walks the chunk tree recursively and builds logical-to-physical mappings |
-| `utils/btree.py` | Performs the raw sweep, validates metadata nodes, parses items, extracts data, mines slack, and records artifacts |
-| `utils/recovery_report.py` | Aggregates counters, metadata, and JSON/text reporting |
-| `tests/` | Unit and integration coverage for CRC32c, inode parsing, and end-to-end pipeline behavior |
-
-### 2.3 Current Scope Boundary
-
-The current engine is strong at artifact extraction from raw metadata blocks, but it is still mostly node-local. It does not yet reconstruct full historical trees from anchored roots, build a persisted queryable metadata catalog, or correlate all cross-tree references into a unified reconstruction model.
+**Not building (exists elsewhere; reuse or benchmark instead):** raw-image
+tree parsing/extraction plumbing (dissect.btrfs), old-root salvage
+(`btrfs restore`/find-root), carving (PhotoRec), chunk repair
+(chunk-recover, btrfs-rec), write-mode repair of any kind. The tool stays
+**strictly read-only** (forensic soundness).
 
 ---
 
-## 3. Completed Work
+## 2. Architecture
 
-The brute-force stage is complete.
+Six layers; each independently testable.
 
-### 3.1 Completed Phases
+```
+┌──────────────────────────────────────────────────────────────┐
+│ 6. Interfaces: CLI (argparse) · JSON/text reports · notebooks │
+├──────────────────────────────────────────────────────────────┤
+│ 5. Analysis: confidence & provenance · csum verification ·   │
+│    FST/overwrite-risk · hiding detection                     │
+├──────────────────────────────────────────────────────────────┤
+│ 4. Reconstruction: anchored historical walks · orphan graph  │
+│    assembly · generation diff → timelines · subvol recovery  │
+├──────────────────────────────────────────────────────────────┤
+│ 3. Evidence catalog (SQLite): nodes, edges, items, roots,    │
+│    chunks, backrefs, artifacts — all with provenance         │
+├──────────────────────────────────────────────────────────────┤
+│ 2. Scan kernel: strided FSID prefilter + csum validation +   │
+│    targeted regions + old-root discovery                     │
+│    (numpy/mmap now → Rust/PyO3 later; identical interface)   │
+├──────────────────────────────────────────────────────────────┤
+│ 1. Substrate: dissect.btrfs — image/devices, superblock,     │
+│    chunk map, BTree(root_offset=…), file streams incl.       │
+│    zlib/lzo/zstd  + our thin extensions (mirrors, backup     │
+│    roots, csum_type dispatch)                                │
+└──────────────────────────────────────────────────────────────┘
+```
 
-| Phase | Status | Outcome |
-|---|---|---|
-| Phase 0 - bug fixes | Complete | Fixed inode/generation keying, extent deduplication, current-generation orphan scanning, JSON numeric serialization, and output-dir side effects |
-| Phase A - correctness and confidence | Complete | Added CRC32c validation and corrected `otime` documentation |
-| Phase B - new evidence sources | Complete | Added leaf slack extraction, boot sector extraction, orphaned extent-tree parsing, and internal-node orphan pointer scanning |
-| Phase C - metadata enrichment | Complete | Added move/rename tagging, file slack reporting, defrag warning heuristic, and snapshot/subvolume indicator |
-| Phase D - completeness | Complete | Added internal-node slack mining, volume slack extraction, ROOT_ITEM reserved-field inspection, and device-tree parsing |
-| Phase E - tests and docs | Complete | Added CRC and inode parser tests, integration coverage, README cleanup, and plan consolidation |
+Design rules:
 
-### 3.2 Implemented Capabilities Today
+- **Scan once, query forever**: the image is read in one pass (plus targeted
+  re-reads); everything else queries the catalog.
+- **Provenance on every row**: how was this artifact discovered (anchored
+  walk from which root / scan hit at which physical offset / slack region of
+  which node), csum status, generation, owner.
+- **Never collapse ambiguity**: contradictory metadata from different
+  generations are all recorded; confidence tiers express uncertainty instead
+  of guessing.
+- Scan kernel has a frozen interface (`iter_candidate_nodes(image, regions)
+  → NodeRecord`) so the numpy implementation can be swapped for Rust without
+  touching layers 3–6.
 
-#### Core recovery
+## 3. Stack Decision
 
-- brute-force metadata-node scanning across the disk image
-- CRC32c-validated acceptance of candidate metadata nodes
-- orphan-item scanning in leaf nodes
-- orphan key-pointer scanning in internal nodes
-- inline extent extraction
-- regular extent extraction through chunk-map address translation
-- extent deduplication during extraction
+### 3.1 Decision
 
-#### Additional evidence sources
+- **Language:** Python ≥ 3.11 for everything except the scan kernel's fast
+  path. Rust (PyO3/maturin) scan core in M8; the numpy path remains as
+  fallback. No Go/Zig/C++ (research.md §7).
+- **Core deps:** `dissect.btrfs` (substrate), `numpy` (scan kernel),
+  `crc32c` (SSE4.2 CRC32c), `xxhash` (csum dispatch); stdlib `sqlite3`,
+  `argparse`. Dev: `pytest`, `ruff`, `uv`; CI via GitHub Actions.
+- **Packaging:** `pyproject.toml` + uv lockfile, src layout, published to
+  PyPI so reviewers run `uvx <tool> scan image.dd`.
+- **Catalog:** SQLite, single-file `evidence.db` (hashable, chain-of-custody
+  friendly). Build-phase tuning: batched transactions, indexes after load.
+  Optional DuckDB/Parquet export for notebook analytics.
+- **Rationale** (full analysis research.md §7): pure-stdlib Python is
+  15–40 h/TB (non-viable); numpy+crc32c is I/O-bound (~20–75 min/TB);
+  Python keeps research iteration and the DFIR/pip ecosystem; Rust core
+  later gives bulk_extractor-class performance and a paper-citable
+  memory-safety story. Dissect itself validates the hybrid pattern.
 
-- leaf slack extraction
-- internal-node slack mining
-- boot sector extraction
-- volume slack extraction
-- orphaned extent-tree `EXTENT_DATA_REF` parsing
-- orphaned device-tree parsing
+### 3.2 Two-track structure
 
-#### Metadata enrichment and reporting
+- **Track R (research/paper):** everything through M7 in Python. The paper
+  does not wait for Rust.
+- **Track P (product):** M8 Rust core + wheels + optional standalone CLI.
 
-- generation-aware `(inode, generation)` filename tracking
-- move/rename artifact tagging
-- file slack reporting
-- ROOT_ITEM anomaly detection
-- defragmentation hazard warning
-- snapshot/subvolume presence indicator
-- machine-readable `recovery_report.json`
+### 3.3 License
 
-### 3.3 Original Brute-Force Gap Checklist and Result
+Importing `dissect.btrfs` (AGPL-3.0) makes the tool **AGPL-3.0**. Accepted:
+it is genuinely open source, standard in DFIR (all of Dissect), and doesn't
+hinder the paper. Our novel modules (layers 2–6) are original code, so if a
+permissive license ever becomes a goal, the substrate can be swapped
+(candidates: our legacy parser, or Rust `rustutils/btrfsutils`
+MIT/Apache — re-evaluate its maturity then). Document this boundary: keep
+all dissect imports inside `substrate/`.
 
-| ID | Item | Source | Result |
+### 3.4 Naming
+
+Repo stays `btrfs-forensics`. Working package/CLI name: **`btrfska`**
+("btrfs archaeology") — placeholder; decide before first release (check
+PyPI collision then).
+
+---
+
+## 4. Migration of the Current Prototype — What to Delete vs Keep
+
+Principle: **most of the prototype is a re-implementation of things
+dissect.btrfs and btrfs-progs already do correctly — that code is dead
+weight and goes.** Only the parts that encode *our novel logic* or *validated
+empirical results* are worth carrying. Nothing is physically deleted until
+its replacement passes the same tests, but the verdicts below say plainly
+what survives.
+
+Step 0: `git mv` current `main.py utils/ tests/` → `legacy/` (a frozen
+reference kept runnable for cross-checks during migration, then dropped to a
+git tag once M4's parity gate passes — see end of section). Everything in
+the "DELETE" rows below is thrown away at that point and not ported.
+
+### 4.1 Verdict per file
+
+Three verdicts: **DELETE** (redundant reimplementation — the capability
+exists in a maintained library/tool; keep nothing), **MIGRATE** (novel or
+hard-won logic — port carefully with byte-identical behaviour, golden-
+tested), **REWRITE** (the *concept* survives but the code is replaced).
+
+| Current file | Lines | Verdict | Why / what replaces it |
 |---|---|---|---|
-| B1 | CRC32c node checksum validation | Bhat & Wani 2018 | Implemented via `utils/crc32c.py` |
-| B2 | Internal node key-pointer orphan scanning | Bhat & Wani 2018 | Implemented via `_scan_internal_node_orphan_ptrs()` |
-| B3 | Internal node slack mining | Bhat & Wani 2018; Wani 2020 | Implemented via `_mine_internal_node_slack()` |
-| B4 | Move/rename artifact tagging | Bhat & Wani 2018 | Implemented in directory-entry parsing and reporting |
-| B5 | Correct `otime` documentation | Bhat & Wani 2018 | Implemented in `README.md` |
-| W1 | Leaf slack extraction | Wani 2020 | Implemented via `_extract_leaf_slack()` |
-| W2 | File slack reporting | Wani 2020 | Implemented for regular extents |
-| W3 | Boot sector extraction | Wani 2020 | Implemented for the first 64 KiB of the image |
-| W4 | Volume slack extraction | Wani 2020 | Implemented for non-aligned trailing bytes |
-| W5 | `btrfs_root_item` reserved-field inspection | Wani 2020 | Implemented and reported as anomalies |
-| R1 | Orphaned extent-tree scanning for `EXTENT_DATA_REF` | Rodeh et al. 2013 | Implemented via `_parse_extent_tree_leaf()` |
-| R2 | Defragmentation hazard detection | Rodeh et al. 2013 | Implemented as a heuristic warning |
-| R3 | Snapshot/subvolume presence indicator | Rodeh et al. 2013 | Implemented via `owner >= 256` tracking |
-| H1 | Device-tree parsing | Hilgert et al. 2018 | Implemented via orphaned device-tree leaf parsing |
+| `utils/crc32c.py` | 33 | **DELETE** | Pure-Python CRC32c reimplements the `crc32c` PyPI C-ext (SSE4.2, ~1000× faster) and is anyway wrong-by-omission (no xxhash/sha256/blake2b). Keep only the RFC-3720 test vectors as an oracle. |
+| `utils/superblock.py` | 93 | **DELETE** | dissect.btrfs parses the superblock; ours reads only the primary (misses mirrors) and doesn't validate its checksum. |
+| `utils/constants.py` | 172 | **DELETE** | On-disk constants/offsets live in dissect's cstruct definitions; maintaining our own table is a bug source (it already caused the DEV_ITEM offset defect). |
+| `utils/inode_parser.py` | 132 | **DELETE** | dissect parses `btrfs_inode_item`; ours is a hand-rolled duplicate. |
+| `utils/tree_walker.py` | 87 | **DELETE** | Superseded by dissect's `BTree(root_offset=…)` + `Cursor`, which already does arbitrary-root walking with validation. |
+| `utils/chunk_parser.py` — chunk map + logical→physical | ~200 of 281 | **DELETE** | dissect builds the chunk map and translates addresses (incl. multi-device); single-stripe-only is a defect we don't want to carry. |
+| `utils/chunk_parser.py` — `build_scan_regions()` (typed chunks + unmapped gaps) | ~80 of 281 | **MIGRATE** | Novel: the typed-region + relocated-chunk-gap logic behind the 21/71 finding. Port to `scan/regions.py`, add the MIXED_GROUPS fix. |
+| `utils/btree.py` — raw sweep loop | ~200 of 968 | **REWRITE** | Concept (nodesize-strided FSID+csum sweep) survives; code replaced by the numpy/mmap kernel (`scan/kernel_numpy.py`). Pure-Python loop is non-viable at scale (research.md §7). |
+| `utils/btree.py` — orphan-item scan (beyond `nritems`), internal key-ptr scan, leaf/internal slack mining | ~400 of 968 | **MIGRATE** | **This is the crown jewels** — the exact capability Beyond Carving dismisses as an "edge case" and never implements. Port to `recover/orphans.py` + `recover/slack.py`, byte-for-byte, golden-tested against legacy output. |
+| `utils/btree.py` — item parsing + inline/regular extract | ~350 of 968 | **REWRITE** | Parsing/extraction replaced by dissect structs + streams (gains zlib/lzo/zstd we lack). **Keep the ideas:** `(inode, generation)` keying, move/rename tagging, extent dedup — reimplement on top of dissect. |
+| `utils/orphan_scan.py` — live-metadata set via extent tree | 109 | **MIGRATE** | Useful (the "what's currently allocated" complement that defines orphan territory). Reparent onto dissect's walker in `scan/live_set.py`. |
+| `utils/recovery_report.py` | 230 | **REWRITE** | Flat counters → the SQLite evidence catalog + provenance/confidence report (M3/M6). Concept of a machine-readable report survives; the shape changes entirely. |
+| `main.py` | 201 | **REWRITE** | New CLI (subcommands: scan/catalog/recover/timeline/detect-hiding) over the new pipeline. |
+| `tests/` (4 files) | 519 | **MIGRATE** | Port assertions as golden tests: the 71/21/gen-13 numbers, RFC-3720 CRC vectors, inode fixtures, targeted-scan parity. These *are* the regression safety net for everything above. |
 
-### 3.4 Verified Baseline (empirical, measured on `sandbox.img`)
+**Tally:** of ~2,830 lines, roughly **~1,000 lines DELETE** (crc32c,
+superblock, constants, inode_parser, tree_walker, chunk map/translate —
+all redundant with dissect.btrfs), **~590 lines MIGRATE** (orphan/slack
+archaeology, scan regions, live-set, tests — the novel core), **~750 lines
+REWRITE** (sweep loop, item parse/extract, report, CLI — concepts kept,
+code replaced). Net: the majority of the prototype is redundant plumbing;
+the defensible ~590 lines is what the paper is actually about.
 
-These facts were verified directly against `sandbox.img` and shape the optimized algorithm:
+### 4.2 Also delete (non-code)
 
-| Fact | Measurement | Implication |
-|---|---|---|
-| Chunk layout | 256 MiB image; only 48 MiB mapped: 8 MiB DATA (0xD00000) + 8 MiB SYSTEM (0x1500000) + 32 MiB METADATA (0x1D00000→phys 0x2500000) | Metadata nodes can only ever live in METADATA/SYSTEM chunks or in space freed by removed chunks — the scan target is tiny, not the whole disk |
-| Live metadata set | Current extent tree (root 0x1D38000, gen 14, via ROOT_ITEM at offset 176) lists ~10 live metadata blocks as METADATA_ITEMs | Complement within the metadata chunk = orphan candidate space; live blocks only need orphan-item scanning |
-| Backup roots populated | Superblock holds 4 `btrfs_root_backup` entries; a backup entry references a complete gen-13 state: tree 0x1D28000, extent 0x1D10000, fs 0x1D20000, dev 0x1D2C000, csum 0x1D08000 (all CRC-valid, owner-correct) | A full historical filesystem state (gen 13, one transaction before current gen 14) is recoverable by anchored walking — no blind scanning needed for it |
-| Relocated-chunk orphans | 21 of 71 orphaned nodes lie OUTSIDE the current chunk map (0x100000–0x130000, 0x500000–0x520000; owners 1–7, 10–11, gens 1–4; header bytenr == physical offset) | These are remnants of a since-removed chunk. A chunk-map-only scan would miss 30% of orphans → unmapped inter-chunk gaps must also be scanned (cheap FSID prefilter) |
-| Chunk-type encoding | `btrfs_chunk.type` is at offset 24 of the CHUNK_ITEM payload; DATA=0x1, SYSTEM=0x2, METADATA=0x4 | The existing chunk parser must record type to drive a typed scan |
-| Physical ≠ logical | Metadata chunk maps logical 0x1D00000 → physical 0x2500000 (+0x80000); node headers store logical `bytenr` | All node lookups must go through the chunk map; header `bytenr` can reconstruct historical chunk maps |
-| Extent/root-tree access path | root tree (0x1D4C000, gen 14) → ROOT_ITEM (extent root at `root_item[176:184]`) → extent tree works today with a ~40-line generic walker | The generic tree walker is a proven primitive; it should be extracted into a reusable module |
+- `docs/research_report.md`, `docs/catalog.md` — already removed (superseded
+  by root `research.md`/`catalog.md`).
+- `commands.txt` — fold the sandbox build/mount recipe into the new corpus
+  generator (M7) and README, then delete.
+- `recovery_output/` — regenerated artifacts; keep out of git (add to
+  `.gitignore`), don't carry forward.
+- Prototype's "defrag hazard" heuristic — **do not migrate as-is**: it was
+  mis-attributed to Wani 2020 (which never discusses defrag; see research.md
+  §8.4). Re-derive from first principles or drop.
 
-### 3.5 Current `RecoveryReport` Coverage
+### 4.3 Migration-done gate (end of M4)
 
-| Counter/Field | Meaning |
+New pipeline on `sandbox.img` reproduces the legacy report (same 71 orphans,
+same 21 outside-map, same recovered files) **plus** compression,
+csum-dispatch, superblock mirrors, and backup-root walking. When that gate
+is green, tag `legacy-final` and delete `legacy/`.
+
+---
+
+## 5. Milestones
+
+Each milestone = one feature branch + PR + catalog.md entry. Estimates
+assume one focused developer.
+
+### M0 — Reset & scaffolding (~2–3 days)
+- Move prototype to `legacy/`; src layout `src/btrfska/…`; pyproject + uv;
+  pytest + ruff + CI (lint, tests on sandbox fixture); AGPL-3.0 LICENSE;
+  README rewrite pointing at the three docs.
+- **DoD:** `uv run pytest` green (legacy tests still runnable);
+  `uvx --from . btrfska --help` works.
+
+### M1 — Substrate + anchored walking (~1 week)
+- `substrate/`: wrap dissect.btrfs (image open incl. multi-device;
+  chunk map; `BTree` access). Extensions: read SB mirrors (pick best by
+  generation à la `super-recover`), parse the 4 `btrfs_root_backup` entries,
+  `csum_type` dispatch (crc32c/xxhash/sha256/blake2b) + verify node and
+  superblock csums (dissect doesn't).
+- Anchored walks: current roots + backup roots + any user-supplied bytenr;
+  enumerate subvolumes via ROOT_ITEM/ROOT_REF/ROOT_BACKREF.
+- Ground truth in tests via `btrfs inspect-internal dump-tree` subprocess.
+- **DoD:** walking the sandbox gen-13 backup state lists the same files the
+  legacy sweep finds for gen 13, with anchored provenance; works on a
+  xxhash-formatted test image (legacy tool finds nothing there — regression
+  proof for defect #1).
+
+### M2 — Scan kernel v1 (~1 week)
+- `scan/kernel_numpy.py`: mmap + `np.frombuffer` strided FSID compare +
+  csum validation via dispatch + multiprocessing over image chunks; probe
+  at sectorsize (4 KiB) alignment, not just nodesize, to catch odd layouts.
+- Port targeted regions (typed chunks + unmapped gaps) with the
+  MIXED_GROUPS fix (parse incompat_flags); `--full-sweep` fallback.
+- Old-root discovery: from scan hits, group root-tree-owned blocks by
+  (owner, level, generation) — find-root's algorithm feeding our catalog
+  instead of stdout.
+- **DoD:** sandbox parity (71 orphans, 21 outside map, identical offsets);
+  ≥200 MB/s single-core on a synthetic 10 GiB image; benchmark script
+  committed.
+
+### M3 — Evidence catalog (~1 week)
+- SQLite schema (versioned, documented in-repo):
+  `nodes(bytenr, phys, dev, gen, owner, level, nritems, csum_ok, discovery,
+  …)`, `tree_edges(parent, slot, child, key…)`, `items(node, slot, key,
+  raw, parsed_kind, beyond_nritems)`, `roots`, `chunks(current|historical,
+  source)`, `extent_backrefs`, `inodes`, `dir_entries`, `file_extents`,
+  `artifacts(path, sha256, source, confidence…)`, `provenance(subject,
+  evidence, method)`, `scan_runs` (image hash, tool version, params —
+  chain of custody).
+- Reverse queries: parents-of(bytenr), owners-of(extent), trees-covering
+  (key), items-in-generation(g).
+- **DoD:** one scan of sandbox populates `evidence.db`; all M1/M2 outputs
+  flow through it; reverse queries answered without re-reading the image.
+
+### M4 — Recovery engines (~1–2 weeks)
+- Anchored recovery: extract files from any cataloged root via dissect
+  streams (compression handled), `-m`-style metadata, xattrs (0x18),
+  INODE_EXTREF (0x0D).
+- Archaeology port: beyond-`nritems` orphan items (leaf + internal),
+  node-slack residual mining, kernel ORPHAN_ITEM (0x30) resurrection —
+  golden-tested against legacy outputs.
+- Cross-generation dedup of recovered content (by extent tuple + sha256).
+- **DoD:** migration-done criterion (§4) met; deleted files recoverable
+  from (a) anchored historical roots, (b) orphan nodes, (c) orphan items,
+  each labeled with its source.
+
+### M5 — Reconstruction & timelines (~2 weeks; novelty core)
+- Orphan graph: reconcile scanned nodes + edges by owner/generation/
+  key-range/csum into candidate historical subtrees; reattach fragments
+  (cite btrfs-rec's rebuild-trees as prior art, ours is read-only evidence
+  assembly).
+- Generation diffing: full-state diff between any two cataloged states
+  (backup roots, discovered old roots, reconstructed fragments) →
+  per-inode event timeline (create/modify/rename/move/delete, content
+  delta via extent comparison). Sandbox gen-13 vs gen-14 is the first test.
+- Deleted-subvolume recovery (orphaned fs-tree roots without ROOT_ITEM).
+- Historical chunk-map reconstruction from orphaned CHUNK_ITEMs/DEV_EXTENTs
+  (unlocks the 21 outside-map orphans → C6).
+- **DoD:** `btrfska timeline <image>` renders the sandbox's known history;
+  a balance/relocation test image yields reconstructed historical chunk
+  maps and correctly-translated outside-map orphans.
+
+### M6 — Confidence, validation, hiding detection (~1–2 weeks)
+- EXTENT_CSUM (0x80) verification of recovered content where the csum tree
+  (current or historical) survives.
+- FST forensics: parse FREE_SPACE_INFO/EXTENT/BITMAP (0xDD–0xDF); classify
+  every recovered extent as free/allocated-now; overwrite-risk score.
+- Confidence tiers (Confirmed/Probable/Unattached) computed from evidence
+  rules (anchored path, csum, gen/owner consistency, backref agreement);
+  every reported artifact carries its provenance chain.
+- Hiding detection: the §research.md 8.3 target list (reserved regions,
+  SB/chunk-array slack, STRING_ITEM 0xFD, ns-timestamp anomalies, inode
+  reserved bytes) with correct reserved-range definitions (fixes defect #3
+  into a feature). Validate against images generated with **fishy**'s btrfs
+  module.
+- **DoD:** every artifact in the report has tier + provenance; detector
+  finds ≥ the fishy-plantable techniques on generated images with measured
+  false-positive rate on clean corpus images.
+
+### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
+- Corpus generator (scripted, reproducible): scenario matrix =
+  {1 GiB, 100 GiB} × {simple delete, overwrite, create/delete stress,
+  snapshot+delete, balance, defrag, zstd/lzo/zlib, xxhash/sha256 csums,
+  MIXED_GROUPS small fs, multi-device RAID1} with per-file manifest +
+  SHA-256 + operation log; before/after image pairs.
+- **btrfs-specific recoverability axes** (grounded in Bhat & Wani 2018,
+  research.md §4.6 — these are what make the corpus a btrfs contribution,
+  not a generic one): file-size bands **<1 KiB / 1–2 KiB / 2–4 KiB /
+  >4 KiB** (2–4 KiB inline expected worst; <1 KiB and >4 KiB best);
+  **merge- vs redistribution-forcing** deletion patterns (their 10-item
+  unbalancing conditions); **filesystem aging** (fresh vs aged image — aged
+  expected to yield more orphan-items); inline vs regular vs
+  multi-extent layout. Report recovery rate per band to validate/refute
+  their heuristics on a modern kernel — a citable result in itself.
+- **Beyond-4-generations test:** delete a file, then force >4 commits so it
+  falls outside the 4 backup roots; confirm anchored methods (Beyond
+  Carving, `btrfs restore`) miss it while our orphan-node scan recovers it
+  (research.md §4.6 Hilgert limitation → our headline differentiator).
+- Baseline harness (containerized): `btrfs restore`(+find-root),
+  undelete-btrfs, PhotoRec, btrfscue, FKIE-TSK `tsk_recover -e`,
+  btrForensics; commercial (UFS Explorer/R-Studio) if licensed — matches
+  the Beyond Carving + Kim et al. baseline sets.
+- Metrics: recovery rate, SHA-256 exact-match accuracy, metadata recovery
+  rate (name/times/mode), runtime; per scenario.
+- Publish corpus (Zenodo DOI) — contribution C7.
+- **DoD:** one command regenerates corpus + all baseline numbers + our
+  numbers into the paper's tables (notebook-driven).
+
+### M8 — Rust scan core + product polish (Track P, after paper submission)
+- `rust/scan-core`: memmap2 + rayon + crc32c/crc-fast + zerocopy structs
+  (seed layouts from `btrfs-diskformat`), PyO3 module via maturin; numpy
+  path stays as fallback; abi3 wheels in CI.
+- Perf table (Python fallback vs Rust) — goes into the tool paper/README.
+- Later/optional: standalone Rust CLI, degraded-RAID reads, log-tree (G9)
+  as a follow-up research item.
+
+---
+
+## 6. Testing Strategy
+
+- **Golden fixtures:** `sandbox.img` numbers (71/21/gen-13) are regression
+  anchors for every refactor.
+- **Generated matrix images** (M7 generator, used from M1 on in small
+  sizes): each defect from research.md §8.1 gets a dedicated image
+  (xxhash image, MIXED_GROUPS image, multi-mirror-corruption image, …).
+- **Differential testing:** our anchored listings vs `dump-tree` output and
+  vs a mounted copy (`python-btrfs`/find over loop mount) on healthy
+  images.
+- **Property tests** on parsers (random valid+corrupt nodes must never
+  crash — adversarial-input safety, also a paper claim).
+- CI runs the full suite on small images; 100 GiB scenarios run in a
+  scheduled/manual job.
+
+## 7. Paper Plan
+
+- **Primary target:** DFRWS EU/USA (FSI:DI) — the natural venue for this
+  literature (deadline check needed); fallback IEEE Access (where Beyond
+  Carving landed; fast OA).
+- **Paper 1 (tool + method):** "filesystem-state archaeology" — C1, C3, C4,
+  C6 + evaluation vs the full baseline set on the released corpus (C7).
+  Structure maps to milestones: background/format (existing docs),
+  method = layers 2–5, evaluation = M7, related work = research.md §2/§4.
+  Explicit positioning paragraph against Beyond Carving: they answer *"what
+  was deleted?"*; we answer *"what happened?"* — and our recovery source
+  set strictly contains theirs (their future work is our M4/M5).
+- **Possible paper 2 (spin-off):** hiding detection + FST forensics
+  (C2, C5) evaluated against fishy/ForTrace-generated anti-forensic images
+  — fits the DFRWS anti-forensics thread (Göbel/Schwietert/Toolan line).
+- **Artifact:** `uvx` installable tool + Zenodo corpus + notebooks that
+  regenerate every table/figure from `evidence.db`.
+- Re-run the prior-art watch (research.md §9) before submission.
+
+## 8. Risks
+
+| Risk | Mitigation |
 |---|---|
-| `checksum_failures` | Nodes rejected by CRC32c validation |
-| `leaf_slacks_found` | Non-zero leaf slack regions written out |
-| `extent_backrefs_found` | `EXTENT_DATA_REF` backrefs recovered from orphaned extent-tree nodes |
-| `internal_orphan_ptrs_found` | Key-pointer slots found beyond `nritems` in internal nodes |
-| `move_artifacts_found` | Inodes observed under different names across generations |
-| `defrag_warning` | Heuristic warning that evidence may have been reduced by defrag |
-| `subvolume_nodes_seen` / `has_snapshots` | Evidence of subvolume or snapshot activity |
-| `internal_slack_residuals` | Residual item structures found in internal-node slack |
-| `root_item_anomalies` | Non-zero reserved bytes observed in `ROOT_ITEM` structures |
-| `device_info` | Device metadata extracted from device-tree artifacts |
-
----
-
-## 4. Why Btrfs Supports Historical Recovery
-
-### 4.1 Copy-on-Write Preserves Old Metadata
-
-Btrfs does not overwrite metadata blocks in place. A modification creates new metadata blocks and leaves the old ones behind until their space is reused. This is the core reason orphaned B-tree nodes can persist after deletion.
-
-### 4.2 Balancing Operations Leave Recoverable Residue
-
-Split, merge, and redistribution operations can leave behind:
-
-- old leaf nodes that still contain pre-modification data
-- item structures beyond the new `nritems` count
-- residual data in internal-node slack if a block used to be a leaf
-
-### 4.3 Snapshots and Shared References Extend Artifact Lifetime
-
-Reference counting and snapshots can delay physical reuse of old blocks. That can preserve historical metadata much longer than on traditional overwrite-in-place filesystems.
-
-### 4.4 Forward and Reverse References Exist in Different Structures
-
-The future recovery engine should not assume child nodes store direct parent pointers. That is not the model.
-
-Instead, reconstruction depends on combining multiple reference systems:
-
-- internal metadata nodes contain child block pointers
-- filesystem metadata leaves contain forward references to extents
-- extent metadata stores reverse ownership/reference information
-- root structures relate roots, subvolumes, and historical tree entry points
-- chunk and device metadata map logical, physical, and device-level layout
-
-These are not all equivalent, but together they create a cross-reference graph that can be indexed and queried for reconstruction.
-
----
-
-## 5. Core Architectural Vision
-
-The future engine should be hybrid.
-
-It should not rely on only one of these:
-
-- pure top-down root walking
-- pure node-local brute-force parsing
-- pure bottom-up tree guessing
-
-It should combine all three evidence modes below.
-
-### 5.1 Mode A - Anchored Top-Down Reconstruction
-
-This is the highest-confidence mode.
-
-Inputs:
-
-- current superblock roots
-- superblock backup roots
-- root-tree discovered subvolume roots
-
-Behavior:
-
-- walk known roots through valid internal pointers
-- reconstruct exact tree state where root chains survive
-- compare multiple generations when multiple historical roots exist
-
-Use when:
-
-- valid root addresses are available
-- checksum-valid paths can be followed end-to-end
-
-Strength:
-
-- strongest structural confidence
-
-Weakness:
-
-- fails when roots or key internal ancestors are missing
-
-### 5.2 Mode B - Reverse Structural Reconstruction
-
-This is the structural reverse-query mode.
-
-Important distinction: this is not based on children storing explicit parent pointers. Instead, all parent-to-child edges found during scanning are persisted, then queried in reverse.
-
-Behavior:
-
-- scan all internal nodes and record every child pointer edge
-- given a child logical address, query all known parents that referenced it
-- build candidate historical subtrees or fragments
-
-Use when:
-
-- a child or subtree survives but its anchored root path is missing
-
-Strength:
-
-- can reconnect fragments even when the canonical top-down path is incomplete
-
-Weakness:
-
-- ambiguous across generations and snapshots; does not always yield one exact tree
-
-### 5.3 Mode C - Reverse Semantic Reconstruction
-
-This is the cross-reference mode centered on extent and metadata ownership.
-
-Behavior:
-
-- persist forward references from filesystem metadata to data extents
-- persist reverse references and ownership data from extent metadata
-- correlate both sides to recover which files or metadata structures referenced a given extent
-- extend this beyond current `EXTENT_DATA_REF` support to additional metadata/tree-block reference forms
-
-Use when:
-
-- tree structure is incomplete but extent ownership survives in another tree
-
-Strength:
-
-- can recover ownership and provenance even when exact tree placement is missing
-
-Weakness:
-
-- may prove ownership without proving exact parent chain
-
-### 5.4 Mode D - Fragment Assembly and Reconciliation
-
-This mode merges evidence from all previous modes.
-
-Behavior:
-
-- combine anchored tree walks, reverse structural edges, and reverse semantic references
-- reconcile generation, owner, key-range, and checksum evidence
-- classify results by confidence instead of forcing exact reconstruction when the evidence does not support it
-
-This is the correct way to interpret “bottom-up” for this project: not guessing trees from nothing, but assembling historical structure from persisted cross-references.
-
----
-
-## 6. Persistent Catalog / Database Layer
-
-The optimized engine should introduce a persisted queryable catalog.
-
-### 6.1 Why a Database Is Needed
-
-The expensive operation is the raw disk sweep. Once the image has been scanned, the tool should be able to query relationships many times without rescanning.
-
-This is a natural fit for `sqlite3` because:
-
-- it is dependency-free and consistent with the current project style
-- it supports indexed reverse lookups and joins
-- it is sufficient for a relationship graph of this size
-
-### 6.2 Initial Target Schema
-
-The first version does not need every table below on day one, but this is the target model.
-
-| Table | Purpose |
-|---|---|
-| `nodes` | One row per checksum-valid metadata node with logical bytenr, physical offset, generation, owner, level, item count, and key range |
-| `tree_edges` | Parent-to-child edges extracted from internal nodes, including slot, separator key, and provenance |
-| `leaf_items` | Generic leaf item inventory keyed by node and item key |
-| `inode_items` | Parsed inode metadata by `(inode, generation)` |
-| `dir_entries` | Parsed directory references and names |
-| `file_extents` | Forward references from filesystem metadata to data extents |
-| `extent_items` | Extent-tree inventory of known extents |
-| `extent_data_backrefs` | Reverse ownership/reference records for file data extents |
-| `metadata_backrefs` | Metadata/tree-block reference records from extent metadata |
-| `root_items` | Root definitions and referenced tree roots |
-| `root_links` | `ROOT_REF` / `ROOT_BACKREF` style relationships between roots/subvolumes |
-| `chunks` | Logical-to-physical mappings |
-| `devices` | Device-tree records and device extents |
-| `artifacts` | Output artifacts, provenance, and confidence classification |
-
-### 6.3 Minimum Catalog Fields for Nodes
-
-Each stored metadata node should at least record:
-
-- logical bytenr
-- physical offset
-- checksum-valid state
-- generation
-- owner
-- level
-- `nritems`
-- min key
-- max key
-- whether it was reachable from an anchored root walk
-- provenance of how it was discovered
-
-This catalog is the basis for both top-down and reverse reconstruction.
-
----
-
-## 7. Roadmap
-
-The roadmap below is the execution order for future work.
-
-### Phase F0 - Catalog Foundation
-
-Status: Pending
-
-Goals:
-
-- parse additional superblock recovery entry points, especially backup roots
-- normalize metadata-node parsing into a reusable node record format
-- introduce SQLite-backed catalog persistence
-- store checksum-valid nodes, internal edges, leaf items, and chunk mappings
-
-Why first:
-
-- everything else depends on a stable, queryable corpus of evidence
-
-Definition of done:
-
-- a single raw-image scan can populate a persistent catalog that can answer basic reverse queries without rescanning the disk
-
-### Phase F1 - Generic Metadata-Tree Walker
-
-Status: Pending
-
-Goals:
-
-- generalize the existing recursive chunk-tree traversal pattern into a reusable metadata-tree walker
-- support walking any tree given a logical root and chunk map
-- separate tree walking from tree-specific item parsing
-
-Why next:
-
-- the code already proves this approach for the chunk tree; the same pattern should be reused rather than reimplemented ad hoc
-
-Definition of done:
-
-- the tool can walk arbitrary metadata trees by logical root and dispatch to tree-specific parsers
-
-### Phase F2 - Root Discovery and Anchored Historical Walking
-
-Status: Pending
-
-Goals:
-
-- parse superblock backup roots
-- walk the current root tree
-- discover active and historical subvolume roots
-- parse root relationships and root metadata
-
-Why next:
-
-- anchored historical walks provide the highest-confidence reconstruction path and reduce dependence on blind inference
-
-Definition of done:
-
-- the tool can list discovered roots/subvolumes and walk at least current plus backup-root anchored tree states
-
-### Phase F3 - Cross-Reference Expansion
-
-Status: Pending
-
-Goals:
-
-- extend extent-tree parsing beyond current orphaned `EXTENT_DATA_REF` support
-- parse additional metadata/tree-block reference forms from extent metadata
-- store both forward extent references and reverse ownership/reference records
-- correlate data extents and metadata extents across trees
-
-Why next:
-
-- this is the core of reverse semantic reconstruction and the strongest expression of the project’s hybrid design
-
-Definition of done:
-
-- given an extent logical address, the engine can answer who referenced it, from which tree context, and with what generation evidence when that information survives
-
-### Phase F4 - Hybrid Reconstruction Engine
-
-Status: Pending
-
-Goals:
-
-- combine anchored walks, reverse structural queries, and reverse semantic queries
-- assemble historical subtrees, partial fragments, and unattached artifacts
-- reconcile conflicting candidates using owner, generation, key-range, and checksum evidence
-
-Why next:
-
-- this is where the project moves from raw artifact extraction to actual reconstruction
-
-Definition of done:
-
-- the engine can produce confirmed trees where anchors exist and probable fragments where only partial evidence survives
-
-### Phase F5 - Generation Diffing and Timelines
-
-Status: Pending
-
-Goals:
-
-- compare anchored and reconstructed states across generations
-- detect create, modify, move, rename, and delete events
-- build per-file and per-inode historical timelines
-
-Why next:
-
-- once historical states exist, diffing them is the most direct way to explain what changed and when
-
-Definition of done:
-
-- the report can describe a file’s lifecycle across multiple generations with provenance and confidence
-
-### Phase F6 - Validation and Confidence Improvements
-
-Status: Pending
-
-Goals:
-
-- use checksum-tree data where possible to validate recovered content
-- add overwrite-risk heuristics
-- improve provenance tracing for every recovered object
-- assign confidence to both structure and data
-
-Definition of done:
-
-- every important reported artifact includes evidence sources and a confidence tier
-
-### Phase F7 - Broader Filesystem Coverage
-
-Status: Pending
-
-Goals:
-
-- compression-aware recovery
-- log-tree analysis
-- multi-device / RAID handling
-- broader real-world image coverage
-
-Definition of done:
-
-- the engine handles more than the current single-device, mostly uncompressed recovery path
-
----
-
-## 8. Immediate Priority Order (evidence-based, Aug 2026)
-
-The order below is grounded in the verified baseline in §3.4. `sandbox.img` is a valid test bed for every milestone because it contains a complete gen-13 tree state (backup roots), a current gen-14 state, relocated-chunk orphans, and subvolume owners.
-
-### Milestone 1 — Backup roots + generic tree walker (anchored recovery)
-
-1. Parse `btrfs_root_backup` entries from the superblock (4 entries; the layout is packed/unaligned — verify field offsets against kernel `struct btrfs_root_backup` and validate each referenced root with CRC). Expose historical root sets `{R_i}` with generations.
-2. Extract the generic metadata-tree walker from `chunk_parser.py` into `utils/tree_walker.py` (given logical root + chunk map + nodesize → yields nodes, parent→child edges, leaf items, per-tree dispatch).
-3. Walk the backup-root tree states (esp. the gen-13 fs tree) and the current root tree; catalog every reachable root.
-
-*Definition of done*: the tool lists all historical roots and walks the gen-13 fs tree, yielding the same file items the brute-force sweep finds for gen 13 — but with anchored provenance.
-
-### Milestone 2 — Targeted candidate scan (the optimized orphan finder) — **implemented**
-
-4. ✅ Record chunk type (offset 24 of CHUNK_ITEM) in the chunk map; candidate physical regions = everything except DATA chunks and the boot region (covers METADATA/SYSTEM chunks **plus unmapped gaps** where relocated-chunk orphans live).
-5. ✅ Walk the extent tree via the root tree (generic walker in `utils/tree_walker.py`) to build the live-metadata block set (10 live blocks on `sandbox.img`).
-6. ✅ Scan only candidate regions with the FSID prefilter; identical per-block logic to the legacy sweep (`_process_candidate_block`); scan-mode stats in `recovery_report.json`.
-
-*Result*: targeted run checks 15,867 blocks of 16,379 (512 DATA blocks skipped) and finds the **same 71 orphaned nodes, same 14 current-gen nodes, same recovered files** as the full sweep — verified by `tests/test_targeted_scan.py` (10 tests, parity assertions + 0 orphans outside regions). New CLI flags: `--full-sweep`, `--scan-data-chunks`. On real disks where DATA ≈ 95%+ of capacity the reduction is much larger.
-
-### Milestone 3 — SQLite catalog + reverse queries
-
-7. Introduce `utils/catalog.py` (sqlite3): tables for nodes (logical/physical/gen/owner/level/nritems/key range/reachable-from-anchor), tree_edges, leaf_items, roots, chunks, extent backrefs.
-8. Populate from anchored walks + targeted scan; add reverse queries (which parents referenced child X; which tree covered key K; which inodes referenced extent E).
-
-*Definition of done*: a single scan populates a catalog that answers reverse queries without rescanning the disk.
-
-### Milestone 4 — Hybrid reconstruction + confidence
-
-9. Combine anchored trees, reverse structural edges, and reverse semantic backrefs; classify outputs as Confirmed / Probable / Unattached per §9.
-10. Generation diffing: diff gen-13 vs gen-14 fs tree states → create/modify/move/delete timeline (both states exist in `sandbox.img`, so this is directly testable).
-
-### Milestone 5 — Broader coverage (from §7, F7)
-
-11. Compression-aware extraction, log-tree analysis, multi-device/RAID, real-world image corpus.
-
-This order keeps the architecture honest but starts from the highest-value, most testable primitive: anchored walking of states that already exist on disk.
-
----
-
-## 9. Confidence Model
-
-The future engine must never force certainty where the evidence is ambiguous.
-
-### 9.1 Confidence Tiers
-
-| Tier | Meaning |
-|---|---|
-| Confirmed | Supported by checksum-valid nodes and an anchored structural path or equivalent high-confidence cross-reference chain |
-| Probable | Strongly supported by multiple consistent references, but missing a complete anchored path or containing generational ambiguity |
-| Unattached Artifact | Valid local artifact or extent ownership evidence exists, but it cannot be placed confidently into a full historical tree |
-
-### 9.2 Evidence That Raises Confidence
-
-- checksum-valid metadata nodes
-- anchored root-to-leaf traversal
-- matching owner and generation context
-- key-range consistency between parent and child
-- agreement between forward references and reverse extent/backref evidence
-- consistency across multiple surviving generations
-
-### 9.3 Evidence That Lowers Confidence
-
-- missing anchors
-- conflicting parents across generations
-- shared-reference ambiguity from snapshots
-- stale or contradictory orphaned copies
-- partial extent ownership without structural placement
-
----
-
-## 10. Testing Strategy
-
-The current test suite covers the brute-force stage. The future engine needs a broader matrix.
-
-### 10.1 Current Verification
-
-- `test_crc32c.py`
-- `test_inode_parser.py`
-- `test_integration.py`
-
-### 10.2 Future Test Categories
-
-| Area | Required coverage |
-|---|---|
-| Backup roots | Images where current root path is damaged but backup roots still recover historical state |
-| Root-tree walking | Discovery of active subvolumes and historical roots |
-| Reverse structural reconstruction | Internal-node edge cataloging and reverse parent query behavior |
-| Reverse semantic reconstruction | Correlation between forward extent refs and reverse extent metadata |
-| Split / merge / redistribution | Recovery behavior across the main B-tree balancing cases |
-| Ambiguous parents | Multiple historical parents referring to related children across generations |
-| Snapshots | Shared extents and generational ambiguity handling |
-| Missing anchors | Recovery of probable fragments without a surviving root chain |
-| Generation diffing | Detection of create, modify, move, rename, and delete events |
-| Confidence tiers | Verified classification into confirmed, probable, and unattached outputs |
-
-### 10.3 Verification Principle
-
-Every future parser or reconstruction step should be testable independently before being integrated into full-image workflows.
-
----
-
-## 11. Risks and Constraints
-
-### 11.1 Ambiguity Is Normal
-
-Because Btrfs preserves multiple historical copies, contradictory-looking metadata can all be valid for different generations. The engine must preserve provenance rather than collapsing everything into one guessed truth.
-
-### 11.2 Reverse References Help, But Do Not Solve Everything
-
-Extent and metadata reverse-reference information can prove ownership or relationship without always proving the exact full tree shape.
-
-### 11.3 Partial Structure Is Still Valuable
-
-Even when a full tree cannot be reconstructed, the tool can still produce valuable outputs:
-
-- recovered file content
-- recovered inode metadata
-- ownership of data extents
-- probable historical fragments
-- warnings about evidence destruction, such as defragmentation
-
-### 11.4 Overwrites Remain Final
-
-If blocks have been reused, no reconstruction strategy can recover the destroyed historical bytes.
-
-### 11.5 Current Practical Limits
-
-The current project still has known future-work areas:
-
-- full metadata/tree-block backref coverage is not implemented yet
-- compression-aware recovery is incomplete
-- multi-device and RAID handling is not implemented yet
-- the log tree is not yet analyzed
-
----
-
-## 12. Planned End State
-
-The intended end state is a unified recovery engine that combines:
-
-- brute-force orphan-node discovery
-- anchored top-down tree walking
-- reverse structural reconstruction from persisted internal edges
-- reverse semantic reconstruction from forward and reverse extent references
-- generation-aware tree and fragment assembly
-- confidence-based reporting and timelines
-
-In practical terms, the project should eventually answer questions like:
-
-- what files and directories existed in a past generation?
-- which recovered file content is confirmed versus only probable?
-- which extents belonged to which file or metadata structure?
-- what changed between two generations?
-- what evidence survived only as fragments rather than complete trees?
-
----
-
-## 13. References
-
-- Bhat, A. & Wani, M.A. (2018). *Forensic analysis of B-tree file system (Btrfs)*
-- Wani, M.A. et al. (2020). *An analysis of anti-forensic capabilities of B-tree file system (Btrfs)*
-- Rodeh, O., Bacik, J. & Mason, C. (2013). *BTRFS: The Linux B-Tree Filesystem*
-- Hilgert, J.N. et al. (2018). *Forensic analysis of multiple device BTRFS configurations using The Sleuth Kit*
+| Beyond Carving team ships their future work first | Our M4/M5 are already prototyped; move M5 early, publish corpus fast (C7 is uncontested) |
+| dissect.btrfs API drift / AGPL concerns | Substrate isolation layer (§3.3); pin versions |
+| Scan performance disappoints on real HDD images | Kernel interface frozen — Rust core can be pulled forward |
+| Ambiguity explosion in orphan graph on real-world images | Confidence tiers are the *product* of ambiguity, not a failure; cap reconstruction depth, report Unattached honestly |
+| Corpus scenarios not representative | Mirror published methodology (Kim et al.) + add btrfs-specific axes; solicit feedback via DFRWS artifact review |
+| Single maintainer bandwidth | Track R before Track P; every milestone independently shippable |
+
+## 9. Working Conventions
+
+- One branch per feature (`feature/<name>`), PR to `main`, catalog.md entry
+  with every merge (numbers + verification).
+- Read-only guarantee: no code path may ever write to an evidence image;
+  enforced by opening images `O_RDONLY` in one place (substrate) and a test
+  asserting image hash before/after every integration test.
+- Every empirical claim destined for the paper gets a script/notebook that
+  reproduces it from a committed or generated image.
