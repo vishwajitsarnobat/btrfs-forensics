@@ -150,18 +150,25 @@ btrfs-forensics/
 │   ├── test_inode_parser.py   # Inode parser unit tests (binary fixtures)
 │   ├── test_integration.py    # Full pipeline integration test
 │   └── test_targeted_scan.py  # Targeted-scan parity + region unit tests
-├── docs/
-│   └── catalog.md             # Master development timeline (every commit/milestone)
-└── plan.md                    # Roadmap: goal, architecture vision, F0–F7 phases
+├── catalog.md                 # Master development timeline
+├── research.md                # Verified prior-art and gap analysis
+└── plan.md                    # Build plan (architecture, migration, milestones)
 ```
 
 ## Documentation
 
-- **`docs/catalog.md`** — master development catalog: every commit and milestone
-  in chronological order, with decisions, empirical findings, and verification.
+- **`catalog.md`** — master development catalog: every milestone in
+  chronological order, with decisions, empirical findings, and verification.
   Update it whenever work lands; it is the project's memory.
-- **`plan.md`** — forward-looking roadmap: the hybrid reconstruction vision,
-  the F0–F7 phase plan, and the confidence model.
+- **`research.md`** — verified prior-art reference: existing tools/libraries
+  with reusability verdicts, the academic corpus, datasets, gap analysis,
+  and the stack analysis.
+- **`plan.md`** — the build plan: architecture, stack decision, prototype
+  migration, milestones M0–M8, evaluation methodology, and paper plan.
+
+> **Note (2026-08-17):** the project was re-scoped after a full prior-art
+> review; this README describes the current prototype, which `plan.md`
+> migrates onto a new architecture.
 
 ---
 
