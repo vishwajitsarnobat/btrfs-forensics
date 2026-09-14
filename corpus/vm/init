@@ -1,0 +1,48 @@
+#!/bin/sh
+# Guest /init template for scenario runs. Nothing scenario-specific is
+# hardcoded: parameters come from the kernel command line (run_scenario.sh
+# sets them):
+#
+#   scenario=NAME        run /scenarios/NAME.sh (from corpus/vm/scenarios/NAME.guest.sh)
+#   mountopts=OPTS       btrfs mount options, e.g. compress=zstd,commit=5,discard=sync
+#                        (empty or absent = kernel defaults)
+#
+# The scenario body runs with the filesystem mounted at $MNT. Afterwards the
+# filesystem is unmounted and the VM powers off.
+export PATH=/bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+
+SCENARIO=
+MOUNTOPTS=
+for word in $(cat /proc/cmdline); do
+    case $word in
+        scenario=*)  SCENARIO=${word#scenario=} ;;
+        mountopts=*) MOUNTOPTS=${word#mountopts=} ;;
+    esac
+done
+
+for m in xor raid6_pq libblake2b btrfs; do
+    insmod /lib/modules/$m.ko || echo "insmod $m failed"
+done
+echo "=== GUEST $(cat /proc/version)"
+echo "=== SCENARIO $SCENARIO MOUNTOPTS ${MOUNTOPTS:-<defaults>}"
+
+MNT=/mnt
+if [ -n "$MOUNTOPTS" ]; then
+    mount -t btrfs -o "$MOUNTOPTS" /dev/vda $MNT
+else
+    mount -t btrfs /dev/vda $MNT
+fi || { echo "=== MOUNT-FAIL"; poweroff -f; }
+# effective options, e.g. shows discard=async when the kernel enabled it itself
+echo "=== MOUNTED $(grep ' /mnt ' /proc/mounts)"
+
+if [ -r "/scenarios/$SCENARIO.sh" ]; then
+    . "/scenarios/$SCENARIO.sh"
+else
+    echo "=== NO-SUCH-SCENARIO $SCENARIO"
+fi
+
+umount $MNT && echo "=== SCENARIO-DONE"
+poweroff -f

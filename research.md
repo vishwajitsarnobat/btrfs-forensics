@@ -46,7 +46,8 @@
 4. **Sleuth Kit upstream has no Btrfs support at all** — PR #413 (2015) was
    closed unmerged in Oct 2024; only the dead FKIE fork (last push 2022) has
    it. "TSK can't parse Btrfs" is the standard baseline claim in this
-   literature (§2.3).
+   literature (§2.3). **Corrected in §10.2:** experimental Btrfs was merged
+   on TSK `develop` 2024-11-27 (PR #3065), unreleased.
 5. **Stack verdict (§7):** pure-stdlib Python is non-viable at TB scale
    (~15–40 h/TB); Python + numpy/mmap + `crc32c` C-ext reaches I/O-bound
    (~20–75 min/TB); the end-state is a Rust scan core under a Python
@@ -120,6 +121,10 @@ Verified by reading `btrfs.py`, `tree.py`, `stream.py`:
   Constraint: AGPL-3.0 propagates to a tool that imports it.
 
 ### 2.3 The Sleuth Kit — C/C++, CPL/IBM-PL, **no upstream Btrfs**
+
+> **Corrected in §10.2:** experimental Btrfs was merged on TSK `develop`
+> 2024-11-27 (PR #3065), unreleased. The statements below describe PR #413
+> and the released versions only.
 
 - Upstream `sleuthkit/sleuthkit`: **no `btrfs*` in `tsk/fs/`**; PR #413
   ("Btrfs support", basicmaster, 2015) **closed unmerged 2024-10-26**.
@@ -948,9 +953,9 @@ marked):**
 | **Bonnet, "Forensic Analysis of the Resilient File System (ReFS) Version 3.14"**, master's thesis, Univ. of Mons, 2026 — tool **`forefst`** | <https://github.com/xbqt/forefst> (GPL-3.0; created 2026-05-16, pushed 2026-09-13); write-up xbpt.gitlab.io/refs (2026-08-24). Thesis record itself UNVERIFIED (author statement only) | Repo verified. Five ReFS deletion-recovery methods: trash-table queue, **two-checkpoint object-table diff**, low-confidence object-table orphan scan, stream snapshots, and **B+-tree node-slack scan as "the primary method"** plus full-volume orphan-page scan. Per-result recoverability verdict (full / extent-backed / metadata-only), INCOMPLETE flag on truncated scans, journal super-timeline, timestomp detection | CoW analogs of C1 (slack + orphan pages), C4 (verdicts), C3 (weak), C5 (timestomp) — **on ReFS, not btrfs** |
 | **Prade, Groß & Dewald, "Forensic Analysis of the Resilient File System (ReFS) Version 3.4"** — *missed earlier* | *FSI: Digital Investigation* 32:300915, 2020, DOI 10.1016/j.fsidi.2020.300915 | Crossref verified | CoW-analog related work (§4.3b) |
 | **Oh & Hwang, "Advanced forensic recovery of deleted file data in F2FS"** — *missed earlier* | *FSI: Digital Investigation* 54:301976, Oct 2025 (DFRWS APAC 2025), DOI 10.1016/j.fsidi.2025.301976, OA (CC BY-NC-ND per OpenAlex) | Crossref verified; abstract only (PDF blocked). Carves metadata to **rebuild the F2FS address table**, then recovers deleted data; tool benchmarked | Conceptual analog of C6 (address-map reconstruction from carved metadata) |
-| Oh, "Ext4 Log Tracker" | *FSI:DI* 58:302145, 2026 (closed) | OpenAlex/Crossref (agent-verified) | Methodology analog for C3 (journal → file-event timeline) |
-| Hornung, Jonker & van Beek, "Connecting File Timestamps: A Formal Approach" | ACM 2026, DOI 10.1145/3785318.3785319 | agent-verified | Timeline framing only |
-| Stoyanov et al., container snapshot chains; Yoon & Hwang, Honeywell surveillance FS | *FSI:DI* 57:302114 / 57:302116 (DFRWS USA 2026) | agent-verified | None (not CoW filesystems) |
+| Oh, "Ext4 Log Tracker: An enhanced approach to file event generation from Ext4 journal" | *FSI:DI* 58:302145, Sept 2026, DOI 10.1016/j.fsidi.2026.302145 (closed) | Crossref metadata: `api.crossref.org/works/10.1016/j.fsidi.2026.302145` (title, author, volume, article number) | Methodology analog for C3 (journal → file-event timeline) |
+| Hornung, Jonker & van Beek, "Connecting File Timestamps: A Formal Approach" | Proc. Digital Forensics Doctoral Symposium, ACM, 2026-03-23, DOI 10.1145/3785318.3785319 | Crossref metadata: `api.crossref.org/works/10.1145/3785318.3785319` | Timeline framing only |
+| Stoyanov et al., "Forensic analysis of container snapshot chains for post-event reconstruction"; Yoon & Hwang, "Forensic analysis of video data deletion and recovery in Honeywell surveillance file system" | *FSI:DI* 57:302114 / 57:302116, June 2026 (DFRWS USA 2026) | Crossref metadata: `api.crossref.org/works/10.1016/j.fsidi.2026.302114` and `…302116` | None (not CoW filesystems) |
 | Hraiz, "Btrfs Forensic Analysis", thesis, Princess Sumaya Univ. for Technology, 2016 (ProQuest) | — | Existence via ProQuest listing; abstract not viewable — **UNVERIFIED** content | Possibly §4.3 foundational; obtain before submission |
 | Aigbogun & Zhou, IEEE CARS 2025, DOI 10.1109/cars67163.2025.11337549 (F2FS and "emerging" FS) | closed | Whether btrfs is covered is UNVERIFIED | — |
 
@@ -1148,9 +1153,9 @@ unconfirmed. **Host fact:** `/boot/config-7.0.0-31-generic` has
 
 | Feature | Kernel / status | On-disk (v7.0 values) | (i) must a recovery tool parse it? | (ii) evidence-survival effect |
 |---|---|---|---|---|
-| **Remap tree** (Mark Harmstone) | Merged in **7.0** ("for-6.20" pull; series v8 2026-01-07); **experimental-only** through 7.3-rc3 (`fs.h` `#ifdef CONFIG_BTRFS_EXPERIMENTAL` includes `INCOMPAT_REMAP_TREE`). progs: `btrfstune --convert-to-remap-tree` (7.0, experimental builds) | incompat **`1<<17`**; tree objectid **13**; keys **IDENTITY_REMAP 234, REMAP 235, REMAP_BACKREF 236** (`btrfs_remap_item{address}`); BG flags **REMAPPED `1<<11`, METADATA_REMAP `1<<12`**; `block_group_item_v2` (+`remap_bytes`, `identity_remap_count`); superblock **`remap_root`, `remap_root_generation`, `remap_root_level`** (`btrfs_tree.h:724-726`) | **Yes** for any image with the flag: logical→logical translation precedes chunk mapping; without it live data in REMAPPED groups is unreadable | Relocation **copies ranges and records old→new remaps instead of COW-rewriting every referencing tree block** (reads translated in `btrfs_map_block()`), so balance produces far fewer stale tree copies. When a group is fully remapped its **chunk stripes are removed and device extents freed** (commit `979e1dc3d69e`), the chunk item remains with **`num_stripes = 0`** (`c3d6dda60c9d` "allow remapped chunks to have zero stripes"), and the source range is **discarded** — at commit for discard=sync, by the async worker via `btrfs_trim_fully_remapped_block_group()` (`7cddbb4339d4`). The remap root is **not** in `btrfs_root_backup` → historical remap trees must be found by scanning for owner 13 |
+| **Remap tree** (Mark Harmstone) | Merged in **7.0** ("for-6.20" pull; series v8 2026-01-07); **experimental-only** through 7.3-rc3 (`fs.h` `#ifdef CONFIG_BTRFS_EXPERIMENTAL` includes `INCOMPAT_REMAP_TREE`). progs: `btrfstune --convert-to-remap-tree` (7.0, experimental builds) | incompat **`1<<17`**; tree objectid **13**; keys **IDENTITY_REMAP 234, REMAP 235, REMAP_BACKREF 236** (`btrfs_remap_item{address}`); BG flags **REMAPPED `1<<11`, METADATA_REMAP `1<<12`**; `block_group_item_v2` (+`remap_bytes`, `identity_remap_count`); superblock **`remap_root`, `remap_root_generation`, `remap_root_level`** (`btrfs_tree.h:724-726`) | **Yes** for any image with the flag: logical→logical translation precedes chunk mapping; without it live data in REMAPPED groups is unreadable | Relocation **copies ranges and records old→new remaps instead of COW-rewriting every referencing tree block** (reads translated in `btrfs_map_block()`), so balance produces far fewer stale tree copies. When a group is fully remapped its **chunk stripes are removed and device extents freed**: at the end of a remap relocation by `fd6594b1446c` ("replace identity remaps with actual remaps when doing relocations", which calls `last_identity_remap_gone()`), on mount for groups left pending by an unfinished async discard by `2aef934b56b3` ("populate fully_remapped_bgs_list on mount"); the helpers `remove_chunk_stripes()` / `btrfs_last_identity_remap_gone()` themselves were introduced for the extent-deletion path by `979e1dc3d69e` ("handle deletions from remapped block group", extent-tree hole punching) — all three checked in the commit patches at `github.com/torvalds/linux/commit/<sha>.patch`, the chunk item remains with **`num_stripes = 0`** (`c3d6dda60c9d` "allow remapped chunks to have zero stripes"), and the source range is **discarded** — at commit for discard=sync, by the async worker via `btrfs_trim_fully_remapped_block_group()` (`7cddbb4339d4`). The remap root is **not** in `btrfs_root_backup` → historical remap trees must be found by scanning for owner 13 |
 | **RAID stripe tree** | 6.7; experimental-only; format changed in 6.11 (`encoding` field removed, `2422547e99f9`) | incompat `1<<14`; tree 12; key **RAID_STRIPE 230** (array of `{devid, physical}`) | Yes, for data in DUP/RAID0/1/10 block groups when the flag is set (in practice zoned multi-device) | Deleted extents lose their stripe item; physical placement survives only in stale RST leaves |
-| **Block-group tree** | 6.1, stable; **mkfs default since btrfs-progs 6.19**. Our `sandbox.img` and host mkfs 6.6.3 images already have it (compat_ro 0xb) | compat_ro `1<<3`; tree 11; `BLOCK_GROUP_ITEM` 192 moves out of the extent tree; root found via root tree | **Yes** — M2's live-set / region logic and any "extent-tree-only" assumption must also read tree 11 | Neutral/slightly positive (small, rarely COWed tree) |
+| **Block-group tree** | 6.1, stable; **mkfs default since btrfs-progs 6.19**. `sandbox.img` has it (compat_ro 0xb), but host mkfs **6.6.3 defaults do not enable it**: every image under `images/scenarios/` has compat_ro **0x3** (FST + FST_VALID only; read as u64 LE at 0x10000 + 0xb4). Scenario images need `MKFS_ARGS="-O block-group-tree"` for tree-11 coverage | compat_ro `1<<3`; tree 11; `BLOCK_GROUP_ITEM` 192 moves out of the extent tree; root found via root tree | **Yes** — M2's live-set / region logic and any "extent-tree-only" assumption must also read tree 11 | Neutral/slightly positive (small, rarely COWed tree) |
 | **Simple quotas** | 6.7 in code (`SIMPLE_QUOTA` in `INCOMPAT_SUPP_STABLE` at v6.7; docs say 6.8); stable, opt-in | incompat `1<<16`; inline ref **EXTENT_OWNER_REF 172** (`{root_id}`), placed first in EXTENT_ITEM | Yes — inline-ref parsers must accept type 172 or backref parsing breaks | **Positive:** stale extent-tree leaves name the subvolume that *created* a deleted data extent, permanently (survives reflink/snapshot sharing) — a new attribution source for C3/C4 |
 | **extent-tree-v2** | Experimental, incomplete, no specific commits since 6.8 | incompat `1<<13` | Detect and refuse | None in real images |
 | **fscrypt** | **Not merged** as of 7.3-rc3 (latest series "[PATCH v7 00/43]" 2026-05-13); prep only: `BTRFS_FT_ENCRYPTED 0x80` (6.2). progs 7.1 "preliminary fscrypt". Proposed `BTRFS_FSCRYPT_CTX_KEY` / `INCOMPAT_ENCRYPT` values UNVERIFIED | dir-entry type bit 0x80 | Mask 0x80 off `dir_item.type` | — |
@@ -1249,49 +1254,100 @@ password, so no root). Each method was actually tried:
 | lklfuse (LKL) | **Not available.** No Debian/Ubuntu package (packages.debian.org: no results); `lkl/linux` has no release binaries and tracks kernel 6.12 (Makefile on `master`, last push 2026-08-18); a source build would need `flex`/`bison` (missing) plus fuse3 headers. Its 6.12 driver would also not exercise 7.0 format features | tested / GitHub API |
 | **QEMU + KVM** | **WORKS — recommended.** `/dev/kvm` carries a logind seat ACL `user:vishwajit:rw-`, so no `kvm` group membership is needed. QEMU is not installed, but `apt-get download` + `dpkg -x` (no root) of `qemu-system-x86 qemu-system-common qemu-system-data seabios libfdt1 libpmem1 librdmacm1t64 libslirp0 libndctl6 libdaxctl1` gives a working QEMU 8.2.2 via `LD_LIBRARY_PATH`. `/boot/vmlinuz-7.0.0-31-generic` is mode 0600, but `apt-get download linux-image-unsigned-7.0.0-31-generic` supplies a readable copy. The host's `/lib/modules/7.0.0-31-generic` modules are world-readable: `btrfs.ko.zst` plus its deps `libblake2b`, `raid6_pq`, `xor` (from `modinfo -F depends`) are zstd-decompressed into a busybox-static initramfs, together with `/usr/bin/btrfs` and its shared libs | tested end-to-end |
 
-**Working recipe** (all under `images/`, which is gitignored):
+**Working recipe — tracked generator in `corpus/vm/`.** The scripts are
+tracked; everything they produce goes to the gitignored `images/` folder.
+Details are in `corpus/vm/README.md`.
 
 ```sh
-# one-time tooling (no root)
-cd images/vm/debs && apt-get download qemu-system-x86 qemu-system-common qemu-system-data \
-   seabios libfdt1 libpmem1 librdmacm1t64 libslirp0 libndctl6 libdaxctl1
-for d in *.deb; do dpkg -x "$d" ../qemu; done
-cd ../kdeb && apt-get download linux-image-unsigned-7.0.0-31-generic && dpkg -x *.deb ../kernel
-# initramfs: busybox-static + btrfs-progs (+ldd libs) + decompressed modules + /init scenario script
-(cd images/vm/initramfs && find . | busybox cpio -o -H newc | gzip -1 > ../initramfs.cpio.gz)
-# per scenario: host mkfs (any csum/features), guest mutates, host analyses
+# one-time tooling (no root, idempotent): apt-get download + dpkg -x into images/vm/ of
+#   qemu-system-x86 qemu-system-common qemu-system-data seabios libfdt1 libpmem1
+#   librdmacm1t64 libslirp0 libndctl6 libdaxctl1, linux-image-unsigned-7.0.0-31-generic,
+#   busybox-static, btrfs-progs (+ linux-modules-7.0.0-31-generic if the host lacks btrfs.ko)
+corpus/vm/fetch_vm.sh
+# initramfs: busybox + btrfs (+ldd libs) + zstd -d of xor/raid6_pq/libblake2b/btrfs modules
+#   + corpus/vm/init + corpus/vm/scenarios/*.guest.sh -> images/vm/initramfs.cpio.gz
+corpus/vm/build_initramfs.sh
+# per image: host mkfs (any csum/features), guest mutates, host analyses
 truncate -s 512M images/scenarios/sNN.img
-mkfs.btrfs -q -f --csum xxhash images/scenarios/sNN.img
-images/vm/run_scenario.sh images/scenarios/sNN.img      # DISCARD=1 adds virtio discard=unmap
-#  = qemu-system-x86_64 -enable-kvm -cpu host -m 1024 -nographic -no-reboot -nic none \
+mkfs.btrfs -q -f --csum xxhash images/scenarios/sNN.img     # add -O block-group-tree for tree 11
+SCENARIO=s01 MOUNT_OPTS=compress=zstd,commit=5 corpus/vm/run_scenario.sh images/scenarios/sNN.img
+#  = timeout 600 qemu-system-x86_64 -L <qemu>/usr/share/seabios -L <qemu>/usr/share/qemu \
+#      -nic none -enable-kvm -cpu host -m 1024 -nographic -no-reboot \
 #      -kernel vmlinuz-7.0.0-31-generic -initrd initramfs.cpio.gz \
-#      -append "console=ttyS0 quiet panic=-1" -drive file=sNN.img,format=raw,if=virtio
+#      -append "console=ttyS0 quiet panic=-1 scenario=s01 mountopts=compress=zstd,commit=5" \
+#      -drive file=sNN.img,format=raw,if=virtio      # ,discard=unmap when DISCARD is set
+# corpus/vm/make_image.sh NAME wraps truncate + mkfs (SIZE, CSUM, MKFS_ARGS) + run + log check
 ```
 
-The guest `/init` inserts the modules, mounts `/dev/vda` (e.g.
-`-o compress=zstd,commit=5`), runs the scenario with busybox and
-`btrfs` commands (`subvolume create`, `snapshot -r`, `rm`, `sync`,
-`balance start --full-balance`, …), prints ground-truth SHA-256s to the
-serial console, unmounts and runs `poweroff -f`.
+The guest `/init` (`corpus/vm/init`) inserts the modules and reads
+`scenario=` and `mountopts=` from `/proc/cmdline`; nothing is hardcoded. It
+mounts `/dev/vda` with those options and logs the effective options from
+`/proc/mounts` (`=== MOUNTED`). It then sources `/scenarios/<name>.sh`
+(busybox and `btrfs` commands: `subvolume create`, `snapshot -r`, `rm`,
+`sync`, `balance start --full-balance`, …), which prints ground-truth
+SHA-256s to the serial console. Finally it unmounts and runs `poweroff -f`.
 
-**Measured scenario `s01`** (512 MiB, xxhash csums, zstd; create 3 files in a
-subvolume, then `sync`, read-only snapshot, delete 2 files, 6 committed churn
-writes, full balance): boot → scenario → poweroff takes **1.4 s wall
-time**. Result: superblock generation 6 → 38, `incompat_flags` 0x341 → 0x371
-(COMPRESS_ZSTD set by the kernel), balance relocated 3/3 chunks (new logical
-chunk addresses; `backup_chunk_root` gen 30 vs 38 in different slots). So
-guest-driven scenarios give a real kernel history, relocation, and
+**Measured scenario `s01`** (`corpus/vm/scenarios/s01.guest.sh`; 512 MiB,
+xxhash csums, zstd; create 3 files in a subvolume, then `sync`, read-only
+snapshot, delete 2 files, 6 committed churn writes, full balance).
+- Timing: `time corpus/vm/run_scenario.sh images/scenarios/s01_timing.img`
+  on a freshly formatted image took **1.43 s real** (0.94 s user, 0.30 s
+  sys; 2026-09-15) from boot through scenario to poweroff.
+- Result: superblock generation 6 → 38 and `incompat_flags` 0x341 → 0x371
+  (COMPRESS_ZSTD set by the kernel). Gen 38 and 0x371 were re-checked on the
+  regenerated images.
+- The balance relocated 3/3 chunks (new logical chunk addresses;
+  `backup_chunk_root` gen 30 vs 38 in different slots). This was observed in
+  the first run and not re-checked.
+
+So guest-driven scenarios give a real kernel history, relocation, and
 modern-feature coverage. The xxhash + zstd + relocation combination is
 exactly what the M1/M2 DoDs need.
 
-**Discard / TRIM survival datapoint (same scenario, three images).** Counts
-use a 4 KiB-aligned FSID-header probe on the host:
+**Discard / TRIM survival datapoint (same scenario, three images).**
+Reproduce with:
 
-| Mount / drive | FSID-matching blocks | stale-generation blocks | copies of deleted inline string | non-zero 4 KiB blocks |
-|---|---|---|---|---|
-| no discard | 368 | 355 | 18 | 832 |
-| `discard=async` + `discard=unmap` | 368 | 355 | 18 | 832 |
-| `discard=sync` + `discard=unmap` | **44** | **31** | **2** | **107** |
+```sh
+corpus/vm/fetch_vm.sh && corpus/vm/build_initramfs.sh && corpus/vm/discard_table.sh
+```
+
+`discard_table.sh` runs `corpus/vm/scenarios/discard_{none,async,sync}.sh`
+to build `images/scenarios/s01_discard_{none,async,sync}.img`. It then runs
+`python3 corpus/vm/probe_stale_metadata.py <img>`, which prints four numbers:
+1. **FSID blocks:** 4 KiB-aligned blocks whose header has the superblock
+   FSID at +0x20, with superblock copies skipped.
+2. **Stale blocks:** the subset of (1) whose header generation (+0x50) is
+   below the superblock generation.
+3. **Inline-string copies:** byte-exact occurrences of the deleted inline
+   file's content `small secret` anywhere in the image.
+4. **Non-zero blocks:** 4 KiB blocks containing any non-zero byte.
+
+| Row (script) | Drive / mount options | FSID blocks | stale blocks | inline-string copies | non-zero 4 KiB blocks |
+|---|---|---|---|---|---|
+| no discard (`discard_none.sh`) | no `discard=unmap`; `compress=zstd,commit=5` | 367 | 355 | 18 | 832 |
+| async (`discard_async.sh`) | `DISCARD=1` (virtio `discard=unmap`); same mount options, **no discard option** | 367 | 355 | 18 | 832 |
+| sync (`discard_sync.sh`) | `DISCARD=1`; `compress=zstd,commit=5,discard=sync` | **43** | **31** | **2** | **107** |
+
+The whole pipeline was re-run end to end on 2026-09-15: a fresh
+`fetch_vm.sh` into an empty `images/vm/`, `build_initramfs.sh`, then
+`discard_table.sh` (6.6 s for all three rows). Columns 2–4 reproduce the
+first measurement exactly (355/355/31, 18/18/2, 832/832/107).
+- Column 1 is one lower than first reported (368/368/44). The committed
+  probe skips the superblock copy at 0x10000, which also carries the FSID at
+  +0x20; the original ad-hoc probe, which was not kept, evidently counted it.
+- Re-running the committed probe on the original images also gives
+  367/367/43.
+
+Notes on the rows:
+- **The async row is enabled automatically by `DISCARD=1` alone.** No
+  discard mount option is passed; the guest log shows the kernel's
+  effective `discard=async` (auto-enable since 6.2, §10.3).
+- **Caveat:** the "no discard" guest *also* mounts with `discard=async`
+  (`=== MOUNTED` log line). QEMU 8.2 virtio-blk advertises discard even
+  without `discard=unmap`; the drive's default `discard=ignore` drops the
+  requests on the host. "No discard" therefore means "no TRIM reaches the
+  image file", not "no discard mount option". A `nodiscard` mount row is a
+  possible M7 addition.
 
 Interpretation: with async discard, TRIM had not run before the unmount about
 a second later, so the result matches no-discard (the kernel queue-delay
@@ -1303,10 +1359,18 @@ reported recoverability caveat.
 
 Also observed: `sandbox.img` (sha256 `07ca38d4…`, crc32c, gen 14) has
 `compat_ro_flags` 0xb = FREE_SPACE_TREE | FREE_SPACE_TREE_VALID |
-**BLOCK_GROUP_TREE**. Progs 6.6.3's mkfs defaults also produced 0xb. So
-block-group items in the golden fixture already live in the block-group tree
-(objectid 11). This explains owner 11 among the 21 outside-map orphans
-(catalog 2026-08-14) — they are old block-group-tree blocks, not an anomaly.
+**BLOCK_GROUP_TREE**, so block-group items in the golden fixture live in the
+block-group tree (objectid 11).
+- **Host mkfs 6.6.3 defaults do NOT enable BLOCK_GROUP_TREE.** Every image it
+  produced (all of `images/scenarios/`, including the regenerated
+  `s01_*` images) has compat_ro **0x3**, read as a u64 LE at 0x10000 + 0xb4.
+  Scenario images therefore need `-O block-group-tree`
+  (`MKFS_ARGS="-O block-group-tree" corpus/vm/make_image.sh …`) for tree-11
+  coverage.
+- Owner 11 among the 21 outside-map orphans (catalog 2026-08-14) is
+  *consistent with* old block-group-tree blocks rather than an anomaly. That
+  argument **rests on `sandbox.img` alone**: no scenario image has tree 11
+  yet, and the orphan blocks themselves were not re-inspected.
 
 ### 10.5 Git archaeology: `feature/m1-backup-roots`
 
@@ -1394,9 +1458,9 @@ block-group items in the golden fixture already live in the block-group tree
    - Axes: {nodiscard, async with quick unmount, async after ≥ 2 min idle,
      sync} × {virtio discard=unmap on/off}; plus a reclaim/balance axis.
    - Pin and record the guest kernel (7.0.0-31) and host mkfs version per
-     image. The generator lives under `images/` (gitignored) per the
-     project-owner rule; the scripts themselves should be committed under a
-     tracked path (e.g. `corpus/`) when M7 starts.
+     image. The generator scripts are now tracked in `corpus/vm/`; all their
+     outputs (tooling, images, logs) stay under the gitignored `images/`
+     per the project-owner rule.
    - Use the generator from M1 on for the xxhash/zstd/relocation DoD images
      (plan §6 already asks for this).
 4. **M5/C6 — widen historical chunk-map reconstruction to also cover
@@ -1436,13 +1500,18 @@ block-group items in the golden fixture already live in the block-group tree
 9. **§3.3 License fallback note.**
    - rustutils/btrfsutils has stalled since 2026-05-14.
    - `btrfs-core` (Apache-2.0) is a second permissive Rust reader, but
-     immature: 0.1.x, single/DUP chunks only, crc32c only.
+     immature: 0.1.x, single/DUP chunks only, crc32c only. Verified in the
+     0.1.5 crate source (`static.crates.io/crates/btrfs-core/btrfs-core-0.1.5.crate`):
+     `src/chunk.rs` `SysChunk::logical_to_physical` maps "single-device
+     single/DUP chunks" via `stripes[0]` ("Multi-device / striped RAID
+     mapping is deferred to a later phase"); `src/crc.rs` verifies crc32c
+     only and returns `None` (deferred) for xxhash64 / sha256 / blake2.
    - Re-evaluate both only if the AGPL boundary becomes a problem; no change
      to the dissect decision.
 
 **Open questions needing a human decision.**
-- (a) Adopt the QEMU generator scripts into a tracked `corpus/` path now, or
-  keep them untracked under `images/` until M7?
+- (a) ~~Adopt the QEMU generator scripts into a tracked `corpus/` path now?~~
+  Resolved: tracked in `corpus/vm/` (outputs remain under `images/`).
 - (b) Build a `CONFIG_BTRFS_EXPERIMENTAL=y` guest kernel to cover
   RST/remap-tree images (in or out of scope for paper 1)?
 - (c) Tag or delete `feature/m1-backup-roots`?

@@ -22,8 +22,11 @@ Maintenance rules:
 
 ## 2026-09-15 — Research refresh (post-reset prior-art watch)
 
-- **Branch:** `main` (uncommitted working-tree changes: `research.md` §10,
-  this entry, `.gitignore`)
+- **Branch:** `docs/research-refresh-2026-09` (PR #5): `research.md` §10,
+  this entry, `.gitignore`, and the tracked rootless image generator
+  `corpus/vm/` (`fetch_vm.sh`, `build_initramfs.sh`, `init`,
+  `run_scenario.sh`, `make_image.sh`, `probe_stale_metadata.py`,
+  `discard_table.sh`, `scenarios/`, `README.md`)
 - **Context:** first prior-art watch since the 2026-08-17 reset. Five
   areas: literature Jul–Sep 2026 (plus retries of the §4.8 papers), tools and
   libraries, on-disk format evolution to kernel 7.0, rootless test-image
@@ -98,16 +101,25 @@ tracked in git, not ignored).
 - **QEMU + KVM works without root:** `/dev/kvm` has a seat ACL for the user;
   QEMU 8.2.2 unpacked from `apt-get download` debs; readable kernel from
   `linux-image-unsigned-7.0.0-31-generic`; busybox-static initramfs with the
-  host's btrfs modules plus `btrfs-progs`. Runner: `images/vm/run_scenario.sh
-  <img>`. Scenario `s01` (xxhash, zstd, subvolume, snapshot, delete, 6
-  commits, full balance) runs in **1.4 s**; image generation 6 → 38, 3/3
+  host's btrfs modules plus `btrfs-progs`. The generator is tracked in
+  `corpus/vm/` (`fetch_vm.sh` → `build_initramfs.sh` → `run_scenario.sh`
+  / `make_image.sh`; outputs under `images/`) and was re-run end to end from
+  an empty `images/vm/`. Scenario `s01` (xxhash, zstd, subvolume, snapshot,
+  delete, 6 commits, full balance) runs in **1.43 s** real
+  (`time corpus/vm/run_scenario.sh …`); image generation 6 → 38, 3/3
   chunks relocated.
 - **Discard datapoint:** after the same scenario, stale-generation metadata
   blocks were 355 (no discard) = 355 (`discard=async`, TRIM not yet run)
   vs **31 (`discard=sync`)**; copies of a deleted inline string went 18 → 2.
   TRIM is the dominant evidence destroyer → make it a corpus axis.
-- `sandbox.img` has BLOCK_GROUP_TREE (compat_ro 0xb), which explains owner-11
-  orphans.
+- **Discard table reproduced** with `corpus/vm/discard_table.sh`
+  (`probe_stale_metadata.py`): 367/355/18/832, 367/355/18/832,
+  43/31/2/107. Column 1 is one lower than first reported because the
+  committed probe skips the superblock copy. The "no discard" guest also
+  auto-mounts `discard=async`; QEMU just drops its TRIMs.
+- `sandbox.img` has BLOCK_GROUP_TREE (compat_ro 0xb); host mkfs 6.6.3
+  images do **not** (compat_ro 0x3; use `-O block-group-tree`). The owner-11
+  orphan explanation rests on `sandbox.img` alone.
 
 **M1 branch archaeology (`research.md` §10.5).** `feature/m1-backup-roots`
 (commits `d870a98`, `1d48203`, `1e9984e`, 2026-08-14; forked from `c51fe91`,
