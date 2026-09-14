@@ -20,6 +20,216 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-15 — Plan revision after research refresh
+
+- **Branch:** `docs/plan-revision-2026-09` (PR #6). Docs only: `plan.md`,
+  this entry, and after review small consistency edits to `research.md` and
+  `README.md`. No code changed.
+- **Context:** folds every finding of `research.md` §10 into `plan.md`,
+  following the ranked recommendations in §10.6, and turns M0 into an
+  executable task list.
+
+**What changed in the plan, and why.**
+1. **Novelty claims (§1).**
+   - **C3** reworded to *full-state, multi-source, per-inode lifecycle
+     timelines* (backup roots + scan-discovered old roots + reconstructed
+     fragments).
+   - **C4** reworded to *evidence-rule-derived tiers with provenance chains
+     across anchored and unanchored artifacts, csum-tree verified*.
+   - **C1/C6** made explicitly btrfs-specific, with ReFS (`forefst`, Prade
+     2020) and F2FS (Oh & Hwang 2025) cited as CoW analogs.
+   - **C5** now cites Toolan & Humphries FSI:DI 58:302198 and SecurityRonin's
+     tamper findings.
+   - Why: `SecurityRonin/btrfs-forensic` ships backup-root deletion diffs and
+     graded findings (§10.1 claim table, §10.2). It is added to "exists
+     elsewhere" together with btrfscue v0.7 subvolume restore.
+2. **Substrate (§3.5, new).**
+   - Decision: **split**. We own image open, superblock + mirrors, csum
+     dispatch (4 types), node-header validation, incompat/compat_ro gate,
+     chunk maps and backup roots.
+   - The first draft kept dissect.btrfs for file streams + decompression
+     behind an adapter module. **Superseded in the review round below:**
+     all runtime parsing, extent reads and decompression are ours, and
+     dissect.btrfs is a test oracle only.
+   - Why: dissect.btrfs 1.10 validates no csum, header field or incompat bit
+     and maps only via the current chunk tree (§10.2). §3.3 (License) and
+     §4 verdicts were updated to match; superblock/tree-walker/chunk-map
+     code moved from DELETE to REWRITE.
+3. **M1 = trust layer** (csum dispatch, header checks, incompat gate that
+   refuses unknown bits and RST/ETv2/REMAP `1<<17`, mirror selection,
+   tree 11) (§10.3, §10.6 item 1).
+   - Branch salvage as spec/tests (§10.5):
+     - defect #8, the EXTENT_ITEM objectid-vs-offset fix;
+     - gen 11–14 ground truth, which replaces "gen-13 state";
+     - backup roots sorted by generation;
+     - the hardening backlog.
+   - M1 DoD images come from `corpus/vm/`: xxhash, sha256+BGT, blake2b, bad
+     node, unknown incompat, mirror damage.
+4. **Corpus from M0/M1 onward (§6.2).**
+   - `corpus/vm/` is the only generator, with a `corpus/manifest.tsv` per
+     image.
+   - New matrix axes: **discard** (none / async quick-unmount / async idle /
+     sync, plus a `nodiscard` control) and **block-group tree** (off/on),
+     because host mkfs 6.6.3 defaults BGT off (§10.3, §10.4).
+5. **Later research items.**
+   - Remap tree and RAID stripe tree are gate-refused until picked up.
+   - The `CONFIG_BTRFS_EXPERIMENTAL` guest kernel is deferred (§10.3,
+     §10.6 items 4 and open question b).
+6. **Baselines (M7):** SecurityRonin `recover_deleted`, a TSK `develop`
+   build, btrfscue v0.7 `recover`, btrfs-progs ≥ 7.1 `restore` (§10.2,
+   §10.6 item 6).
+7. **M9 GUI (new, Track P).**
+   - A read-only local web UI (`btrfska serve`, Starlette + Jinja2 + htmx)
+     over `evidence.db`, after M6 and a stable schema.
+   - Datasette, Qt and Tauri/Electron were considered and rejected, with
+     reasons.
+8. **Test policy (§6.1).**
+   - `sandbox.img` is the primary regression image (read-only; sha256
+     `07ca38d4…5876418` is asserted before/after every test session).
+   - Extra images only under the gitignored `images/`, via `corpus/vm/`.
+   - Nothing is created outside the repo.
+9. **Research method (§7, new).**
+   - EXP-NNN protocol: hypothesis → method → image/scenario → exact command →
+     results → threats to validity.
+   - Records go to `experiments/EXP-NNN.md` plus a committed regeneration
+     script.
+   - Numbers enter the paper only if a script regenerates them.
+   - Guest-driven measurements need ≥ 5 runs with a per-column median and
+     range (the §10.4 discard rows differ by 2 in columns 1–3 and by 4 in
+     column 4); tolerances come from the measured range.
+10. **M0 made executable** (11 ordered tasks):
+    - legacy moved to `legacy/`, with its sandbox/output paths re-pointed so
+      tests don't silently skip;
+    - `src/btrfska` skeleton with a single read-only open site;
+    - pyproject with `uv_build`, pytest, ruff;
+    - LICENSE (Apache-2.0 after review), README rewrite;
+    - CI outline;
+    - exact commands and acceptance checks.
+
+    M1 is broken into 11 ordered tasks.
+11. Sections renumbered: §3.5 Substrate decision added (License stays §3.3,
+    so research.md §7.4's pointer still holds); §7 Research Method inserted,
+    so Paper Plan → §8, Risks → §9 (SecurityRonin marked as a realised risk),
+    Working Conventions → §10. research.md §10.6's plan references were
+    updated to the new numbering in the review round below.
+
+**Checks made while revising (read-only).**
+- PyPI `btrfska` → HTTP 404 (no collision); the name is kept.
+- `sandbox.img` sha256 `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`
+  (matches §10.4). `zstd -19` compresses it to 14 963 bytes, and the piped
+  round-trip reproduces the same hash with no file written. This is the basis
+  for the CI fixture (M0 task 9; tracking decided in the review round).
+- dissect.btrfs 1.10 metadata: `requires-python >=3.10`, zstd via
+  `backports.zstd` only below 3.14.
+- `recovery_output/` (8 files) is still tracked in git → untracked in M0.
+- There is no `.github/` yet.
+- `mmap.ACCESS_READ` write raises `TypeError` (basis for the M0 read-only
+  test).
+
+**Open items for the owner** (as first drafted; status after review):
+- (a) ~~approve tracking `tests/fixtures/sandbox.img.zst`~~ — resolved:
+  tracked in M0 (task 9);
+- (b) ~~tag `feature/m1-backup-roots` as `m1-prototype`~~ — done: annotated
+  tag pushed to origin, pointing at the branch tip `1e9984e`; the branch is
+  kept;
+- (c) gen-12 contents of `sandbox.img` are not yet recorded anywhere
+  (M1 task 1 captures them) — still open.
+
+### Review round (2026-09-15)
+
+A reviewer approved the revision with fixes; the manager took decisions
+A–C. All changes are to `plan.md`, `research.md`, `README.md` and this
+entry.
+
+**Decisions.**
+- **A. Substrate → dissect.btrfs as test oracle only** (plan §3.5).
+  - Why: dissect maps only through its own current chunk tree and has no
+    API to route streams through our validated reader or historical chunk
+    maps. M1 needs our own extent reads anyway, so dissect's only unique
+    runtime contribution was decompression.
+  - All runtime parsing (own `struct` tables in `ondisk.py`), extent reads
+    (`extents.py`) and decompression (`compress.py`: stdlib `zlib` and
+    `compression.zstd`, own LZO1X in `lzo.py`) are ours.
+  - dissect.btrfs 1.10 and `lzallright` 0.2 are dev/test oracles in
+    `tests/oracle/`.
+  - The fallback ladder is lzallright at runtime (stays Apache-2.0), then
+    dissect.btrfs at runtime, which would make the tool AGPL-3.0-or-later.
+  - "Adapter / AGPL boundary" wording is replaced by a *replacement
+    boundary* (`extents.py` + `compress.py`).
+- **Licence → Apache-2.0** (plan §3.3): chosen for DFIR/academic reuse and
+  the patent grant. Every runtime dependency was checked: numpy BSD-3 (+0BSD/
+  MIT/Zlib/CC0), xxhash BSD-2, crc32c LGPL-2.1+ (fine as a separate
+  dependency; `google-crc32c` Apache-2.0 is the swap-in for frozen
+  binaries), M8 Rust crates Apache/MIT, M9 Starlette/Jinja2 BSD-3 and htmx
+  0BSD. Test-only use of AGPL dissect.btrfs does not make the package AGPL
+  (not conveyed; dev group only; import-boundary test).
+- **B.** `tests/fixtures/sandbox.img.zst` is tracked in M0; no sign-off
+  pending (plan task 9, §9 risks).
+- **C.** `m1-prototype` tag: done.
+
+**LZO decoder evaluation** (scratch venv, seeded; details in plan §3.5).
+- Candidates: `python-lzo` (GPL, rejected); `dissect.util` 3.24
+  (Apache-2.0); `lzallright` 0.2.6 (MIT); `lzokay` 2.1.0 (MIT, 1 star).
+- 2 000 round-trip vectors: dissect.util (pure and native) and lzallright
+  all decode identically.
+- Hostile input:
+  - dissect.util native panics (`PanicException`, not an `Exception`) on a
+    crafted lookbehind stream and on 58/300 bit flips;
+  - dissect.util pure Python silently returns 4 bytes for the crafted
+    stream;
+  - lzallright raises `LZOError`.
+- 139–160 of 300 bit flips decode to wrong bytes in every decoder, so LZO
+  success is never content evidence.
+- Choice: our own bounds-checked pure-Python LZO1X decoder (written from
+  `Documentation/staging/lzo.rst`, not GPL source), with lzallright as
+  oracle and fallback.
+
+**Reviewer fixes.**
+1. M0 acceptance made achievable:
+   - `ruff format --check` (ruff 0.16.7) flags 14 files today: 13
+     prototype files that move to the excluded `legacy/`, plus
+     `corpus/vm/probe_stale_metadata.py`;
+   - task 5 now ends with a formatting-only commit for `corpus/`;
+   - the git-status allow-list gains `corpus/` and `conftest.py`.
+2. §3.5 contradiction resolved by A (own `struct` tables, no cstruct).
+3. Superseded by A.
+4. AGPL wording fixed per A.
+5. This entry now names the branch/PR; open items (a)/(b) resolved.
+6. Jitter: §7 and the M2 DoD use a per-column median and range from ≥ 5
+   runs, with tolerances taken from the measured range. The per-image probe
+   comparison is exact. §7 template gains an environment record (host
+   CPU/RAM/storage, host kernel, QEMU, guest kernel, btrfs-progs, Python +
+   `uv.lock` hash, git commit, image sha256).
+7. Minor fixes:
+   - Task 1: the suites remove their own `test_output_*` dirs.
+   - Task 2: only the four path constants change (makedirs already fine).
+   - Task 3/8 ordering: `commands.txt` removal moved into task 8.
+   - M0 `corpus/vm` touchpoint: CI `sh -n` syntax check (passes;
+     shellcheck 0.9.0 fails on style notes, so it is not a gate) plus a
+     documented local smoke command.
+   - Reclaim axis added to the M7 matrix (reclaim × discard).
+   - CI actions: `actions/checkout@v7` (v7.0.1) and `astral-sh/setup-uv@v10`
+     (v10.1.0), verified via the GitHub API.
+8. Cross-references:
+   - research.md §10.6 now points at plan §8 (positioning, paper plan),
+     §9 (risks), §6.2 and §3.3;
+   - README says M0–M9;
+   - research.md §1 item 4 already carried the TSK correction (PR #3065,
+     `develop`, 2024-11-27, unreleased), so it is unchanged;
+   - research.md §1 item 3, §2.2, §7.4, §10.2 and §10.6 note the
+     test-oracle refinement;
+   - §10.4 records the per-column jitter;
+   - §10.5 and open question (c) record the tag.
+
+**Verified while fixing (read-only).**
+- Python 3.14.6: `compression.zstd` (libzstd 1.5.7) round-trips.
+- Kernel v7.0 `fs/btrfs/lzo.c`: 4-byte total/segment headers, 4 419-byte
+  segment bound for 4 KiB sectors, sector-tail padding, and it calls
+  `lzo1x_decompress_safe`.
+- All `corpus/vm` shell scripts pass `sh -n`.
+- `git ls-remote` shows `refs/tags/m1-prototype`, which dereferences to
+  `1e9984e`.
+
 ## 2026-09-15 — Research refresh (post-reset prior-art watch)
 
 - **Branch:** `docs/research-refresh-2026-09` (PR #5): `research.md` §10,

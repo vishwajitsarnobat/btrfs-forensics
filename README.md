@@ -164,7 +164,7 @@ btrfs-forensics/
   with reusability verdicts, the academic corpus, datasets, gap analysis,
   and the stack analysis.
 - **`plan.md`** — the build plan: architecture, stack decision, prototype
-  migration, milestones M0–M8, evaluation methodology, and paper plan.
+  migration, milestones M0–M9, evaluation methodology, and paper plan.
 
 > **Note (2026-08-17):** the project was re-scoped after a full prior-art
 > review; this README describes the current prototype, which `plan.md`
