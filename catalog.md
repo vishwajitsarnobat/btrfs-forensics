@@ -20,6 +20,118 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-15 — Research refresh (post-reset prior-art watch)
+
+- **Branch:** `docs/research-refresh-2026-09` (PR #5): `research.md` §10,
+  this entry, `.gitignore`, and the tracked rootless image generator
+  `corpus/vm/` (`fetch_vm.sh`, `build_initramfs.sh`, `init`,
+  `run_scenario.sh`, `make_image.sh`, `probe_stale_metadata.py`,
+  `discard_table.sh`, `scenarios/`, `README.md`)
+- **Context:** first prior-art watch since the 2026-08-17 reset. Five
+  areas: literature Jul–Sep 2026 (plus retries of the §4.8 papers), tools and
+  libraries, on-disk format evolution to kernel 7.0, rootless test-image
+  generation, and the unmerged M1 branch. Full write-up with citations:
+  `research.md` §10.
+
+**What was searched.**
+- Literature: DFRWS USA 2026 (FSI:DI vol. 57, all 42 Crossref entries) and
+  EU 2026 (vol. 56); DFRWS APAC 2026 (program not yet fetchable); FSI:DI
+  vols. 58–59; IEEE Access, MDPI, Springer, ACM DTRAP, arXiv; OpenAlex and
+  Crossref keyword sweeps (btrfs, bcachefs, ZFS/APFS/F2FS/CoW forensics);
+  Semantic Scholar/OpenAlex citations of Beyond Carving; author feeds
+  (Wani/Bhat, Hilgert/Schwietert, Göbel/Baier, Shon, Dewald, Toolan);
+  GitHub/crates.io/PyPI for new btrfs forensic/undelete tools.
+- Tools: dissect.btrfs 1.10 (installed, source read, tested read-only on
+  `sandbox.img` and the new scenario images), rustutils/btrfsutils,
+  btrfs-progs 6.7–7.1 changelogs, TSK, btrfscue, btrfs-fuse, WinBtrfs,
+  python-btrfs, commercial changelogs.
+- Format: `btrfs_tree.h` / `btrfs.h` / `fs.h` diffs v6.0 → v7.0 → v7.3-rc3,
+  remap-tree patch series and commits, `discard.c` / `disk-io.c` /
+  `super.c` in v7.0, and the btrfs docs Status page.
+
+**What was found (ranked by plan impact).**
+1. **`SecurityRonin/btrfs-forensic`** (Rust, Apache-2.0, created 2026-07-16):
+   crc32c node/superblock checks, backup-root-divergence tamper finding,
+   kernel ORPHAN_ITEM listing, and `recover_deleted()` via backup-root FS_TREE
+   diff. First dedicated open-source btrfs forensic library; narrows C3/C4
+   wording; add to baselines.
+2. **dissect.btrfs validates nothing** (no csum of any type, no node-header
+   checks, no incompat-flag gate — an unknown flag opened silently; current
+   chunk map only). No functional release since 2025-12. The substrate's
+   trust layer is entirely ours.
+3. **Remap tree merged in kernel 7.0** (incompat bit 17, tree 13, keys
+   234–236), experimental-only (`CONFIG_BTRFS_EXPERIMENTAL`, not set on the
+   host kernel). It changes relocation from COW-rewrite to address
+   translation. C6 stands for mainstream images, strengthens for remap-tree
+   images, and gains an explicit relocation log as new evidence.
+4. **Discard semantics (v7.0 source + measurement):** async discard is
+   auto-enabled on discard-capable devices since 6.2, data-only block groups
+   only, 120 s delay, and the queue is purged unmounted; `discard=sync` trims
+   everything at commit (measured: stale metadata 355 → 31).
+5. **The Sleuth Kit has experimental btrfs on `develop`** (PR #3065, merged
+   2024-11-27; unreleased) — corrects research.md §2.3. **btrfscue v0.7**
+   (2026-07-04) adds `recover` and unreferenced-subvolume recovery.
+6. **Toolan & Humphries now published**: FSI:DI 58:302198 (Sept 2026).
+   Missed CoW analogs added: Prade et al. 2020 (ReFS), Oh & Hwang 2025 (F2FS
+   address-table rebuild), Bonnet 2026 ReFS thesis + `forefst` (node-slack
+   recovery and recoverability verdicts on ReFS).
+7. Beyond Carving: 0 citations, code repo empty, no follow-up.
+8. btrfs-progs 7.1 current; block-group tree on by default since 6.19;
+   `mkfs --rootdir` gained `--subvol` (6.12) and `--compress` (6.13).
+
+**Downloaded:** none. Toolan & Humphries 2026, Plum & Dewald 2018 (now gold
+OA per OpenAlex), and Oh & Hwang 2025 were all blocked by publisher bot
+protection (403). `docs/` unchanged at 18 PDFs (note: `docs/*.pdf` are
+tracked in git, not ignored).
+
+**Test-image generation feasibility (measured, `research.md` §10.4).**
+
+- **New rule (project owner):** every disk image, mount point, VM tooling and
+  image scratch file lives under the gitignored `images/` folder inside the
+  repo (`images/scenarios/`, `images/vm/`, `images/scratch/`, `images/mnt/`),
+  never in `/tmp` or elsewhere. `images/` was added to `.gitignore`; image
+  files first created in a temp directory were moved into `images/` or deleted.
+  `sandbox.img` is opened read-only (sha256 `07ca38d4…` unchanged after all
+  tests).
+- `sudo`: password required → no loop mounts. `unshare -r`: namespace works,
+  but btrfs/loop mounting is denied. lklfuse: no package, no release
+  binaries, LKL is based on kernel 6.12.
+- `mkfs.btrfs --rootdir` (progs 6.6.3): works rootless, but produces only a
+  fresh filesystem with host `st_ino` objectids → parser fixtures only.
+- **QEMU + KVM works without root:** `/dev/kvm` has a seat ACL for the user;
+  QEMU 8.2.2 unpacked from `apt-get download` debs; readable kernel from
+  `linux-image-unsigned-7.0.0-31-generic`; busybox-static initramfs with the
+  host's btrfs modules plus `btrfs-progs`. The generator is tracked in
+  `corpus/vm/` (`fetch_vm.sh` → `build_initramfs.sh` → `run_scenario.sh`
+  / `make_image.sh`; outputs under `images/`) and was re-run end to end from
+  an empty `images/vm/`. Scenario `s01` (xxhash, zstd, subvolume, snapshot,
+  delete, 6 commits, full balance) runs in **1.43 s** real
+  (`time corpus/vm/run_scenario.sh …`); image generation 6 → 38, 3/3
+  chunks relocated.
+- **Discard datapoint:** after the same scenario, stale-generation metadata
+  blocks were 355 (no discard) = 355 (`discard=async`, TRIM not yet run)
+  vs **31 (`discard=sync`)**; copies of a deleted inline string went 18 → 2.
+  TRIM is the dominant evidence destroyer → make it a corpus axis.
+- **Discard table reproduced** with `corpus/vm/discard_table.sh`
+  (`probe_stale_metadata.py`): 367/355/18/832, 367/355/18/832,
+  43/31/2/107. Column 1 is one lower than first reported because the
+  committed probe skips the superblock copy. The "no discard" guest also
+  auto-mounts `discard=async`; QEMU just drops its TRIMs.
+- `sandbox.img` has BLOCK_GROUP_TREE (compat_ro 0xb); host mkfs 6.6.3
+  images do **not** (compat_ro 0x3; use `-O block-group-tree`). The owner-11
+  orphan explanation rests on `sandbox.img` alone.
+
+**M1 branch archaeology (`research.md` §10.5).** `feature/m1-backup-roots`
+(commits `d870a98`, `1d48203`, `1e9984e`, 2026-08-14; forked from `c51fe91`,
+never reintegrated after the reset) adds backup-root parsing + anchored
+walking + 12 tests. Verified via `git archive` extract: **49/49 tests pass**.
+Confirmed that `sandbox.img` backup slots hold **gens 13, 14, 11, 12**
+(correction to the 2026-08-14 entry's "gen-13 state"). Verdict: code
+superseded (hand-rolled CRC32c/superblock), but salvage as spec/tests: the
+EXTENT_ITEM objectid-vs-offset bug fix (still present on `main`), the gen
+11–14 ground truth, sort-by-generation, and the hardening backlog. Branch
+left untouched.
+
 ## 2026-08-17 — Project reset: research consolidation, stack decision, doc rewrite
 
 - **Branch:** `main`
