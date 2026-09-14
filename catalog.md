@@ -73,7 +73,10 @@ Maintenance rules:
      then csum (unknown csum types reported).
    - `select()` takes the valid copy with the highest generation, lowest
      mirror on a tie. Each disagreement is reported: invalid copy, older
-     generation, or same generation with differing fields (named).
+     generation, or same generation with differing fields (named). This is
+     btrfs-progs recover-mode behaviour (`btrfs_read_dev_super` with
+     `SBREAD_RECOVER`), not the kernel's: the kernel mounts mirror 0 only.
+     The review fixes below add the progs fsid anchor.
    - `backup_roots()` returns the slots sorted by generation, each keeping
      its slot.
    - `gate()` refuses EXTENT_TREE_V2, RAID_STRIPE_TREE, REMAP_TREE and
@@ -330,7 +333,180 @@ The default count went from 84 (end of M0) to 248 collected. Of those, 18 are
 vm tests; in CI, without images, all but `test_manifest_lists_every_m1a_image`
 skip.
 
+### Review fixes (2026-09-15)
+
+The reviewer approved PR #8 with fixes. They checked the code against
+btrfs-progs `kernel-shared/disk-io.c` and kernel v7.0 `fs/btrfs/disk-io.c`.
+Every fix is test-first: the new tests were run and seen failing
+(AttributeError or assertion) before the code changed. Kernel line numbers
+refer to the v7.0 files in `images/scratch/m1a/kernel/`. btrfs-progs line
+numbers refer to tag `v7.1` (identical in the checked-out `v7.1-56-g4d02bee`).
+
+- **Commits:**
+  - `a018b41` Check superblock geometry against the kernel's validate_super rules
+  - `52d11a9` Anchor superblock selection on the first valid copy's fsid
+  - `527e976` Validate mutate.py patches before creating the output
+  - `3cd7199` Tighten the ground-truth xfails to ImportError and zip copies strictly
+  - `ef94dd2` Add the m1_foreign_mirror image and note foreign superblock residue
+  - this catalog update
+
+1. **HIGH: a foreign mirror could win selection.**
+   - **Before:** `select()` took the highest generation among csum-valid
+     copies, whatever their fsid. A leftover 64 MiB copy of an earlier
+     filesystem with a higher generation would have been reported as this
+     image's identity and roots.
+   - **Progs rule:** in recover mode, `btrfs_read_dev_super`
+     (l.2022-2064) sets the fsid from the first accepted copy, and the
+     metadata_uuid too when that copy has `METADATA_UUID` set (l.2037-2045).
+     It then skips every later copy whose fsid or metadata_uuid differs
+     (l.2046-2056), with the comment "contain data of different
+     filesystems".
+   - **Now:** `superblock.same_filesystem()` implements that rule. The
+     lowest-offset valid copy anchors the identity. Only copies of the same
+     filesystem compete on generation.
+   - **Foreign copies:** valid copies of another filesystem go to
+     `Selection.foreign`. They are reported as `mirror N foreign superblock
+     at <offset> (fsid …[, metadata_uuid …], generation …)`, and `info` marks
+     the copy line `(foreign fsid …)`.
+   - **Differing fields:** an older same-filesystem copy now also names the
+     other fields that differ: `mirror 0 generation 5 != selected generation
+     6, differs in: root`.
+   - **Tests:** synthetic cases cover a higher-generation foreign mirror,
+     anchoring on mirror 1 when mirror 0 is damaged, metadata_uuid anchoring
+     with and without the feature bit, and the CLI marker.
+   - **Image:** `m1_foreign_mirror` (new `corpus/mutate.py transplant-sb`
+     op). `m1_sha256_bgt`'s mirror-1 copy is placed into mirror 1 of a copy
+     of `m1_xxhash`, with generation 1000 and the csum recomputed as
+     sha256. sha256
+     `a5c3e65a6b34f1668b432f6ed70d2135f4a67e515e7c752294cffe49b2f40ea2`.
+   - **Oracle:** host btrfs-progs v6.6.3 `dump-super -a` prints
+     `csum_type 2 (sha256)`, `[match]`, fsid
+     `55692877-4e8d-4649-a76d-370de1420992` and generation 1000 for that copy.
+     The vm test `test_superblock_csums_agree_with_dump_super` now includes
+     the image.
+   - **Research:** research.md §10.7 gains a dated note on foreign copies as
+     evidence of a prior filesystem.
+2. **MEDIUM: policy attribution.**
+   - **Kernel:** it reads only mirror 0 at mount, via `open_ctree` →
+     `btrfs_read_disk_super(bdev, 0, false)` (`disk-io.c:3333`).
+     Highest-generation selection is btrfs-progs recover behaviour.
+   - **Now:** the module docstring, the `select()` docstring and the
+     catalog bullet above say so.
+   - **CLI:** `btrfska info` prints `kernel would mount: mirror 0 (valid,
+     generation N)` or `(invalid: reasons)` whenever the selection is not
+     mirror 0, or when mirror 0 carries any problem. Warnings count, because
+     the kernel rejects on every check btrfska mirrors.
+   - **Tests:** a synthetic CLI test, and the vm test on `m1_mirror_damage`.
+3. **MEDIUM: geometry sanity.**
+   - **Scope:** `superblock.geometry_problems()` mirrors the
+     `btrfs_validate_super` checks (`disk-io.c:2360-2580`) that matter to a
+     read-only reader.
+   - **When:** checks run only when the magic matches, like the bytenr check.
+   - **New fields:** `SuperblockCopy.geometry_ok` joins `valid`. Every
+     violation is recorded in `problems`.
+   - **New constants** (asserted in `test_ondisk.py`): `MIN_BLOCKSIZE` 4096
+     (`fs.h:59-62`, non-debug), `MAX_METADATA_BLOCKSIZE` 65536
+     (`btrfs_tree.h:380`), and `MIN_SYS_CHUNK_ARRAY_SIZE` 97 = disk_key +
+     btrfs_chunk with its embedded stripe (`disk-io.c:2554-2555`).
+
+   | Check (v7.0 `disk-io.c`) | btrfska | Why |
+   |---|---|---|
+   | sectorsize power of two, 4096 ≤ s ≤ 65536 (l.2404-2408) | invalidates | all later slicing uses it |
+   | nodesize power of two, sectorsize ≤ n ≤ 65536 (l.2417-2421) | invalidates | node reads slice by it |
+   | root/chunk_root/log_root level < 8 (l.2384-2398) | invalidates | bounds walker recursion |
+   | sys_chunk_array_size ≤ 2048 and ≥ 97 (l.2548-2561) | invalidates | the bootstrap chunk map is sliced from it |
+   | known csum_type (`open_ctree` l.3345-3351) | invalidates (unchanged) | without a csum nothing is trusted |
+   | root/chunk_root/log_root aligned to sectorsize (l.2429-2443) | warns | identity, backup roots and sys array stay usable; the node reader bounds-checks addresses; skipped when sectorsize is itself invalid |
+   | num_devices == 0 (l.2527-2530) / > 2^31 (l.2524-2526) | warns | no slicing depends on it |
+
+   - **Not mirrored:** super flags (l.2372), `leafsize == nodesize`
+     (l.2422), the host page-size limit (l.2410), fsid vs the mounted device
+     set (l.2445-2467), feature dependencies (l.2473-2508), `bytes_used`
+     and stripesize (l.2514-2523), and `validate_sys_chunk_array` (l.2542;
+     M1b parses the array).
+   - **Output:** a valid copy with warnings prints `valid, … (warnings: …)`.
+   - **Tests:** parametrised negatives (13 invalidating, 5 warning-only),
+     plus a truncated-image test with sizes 1, 65536 and 69631, all below
+     64 KiB + 4096. The truncated test passed at once: `read_copies()`
+     already marks such slots not present. It stays as a guard.
+   - **Helper change:** `tests/helpers.make_block` now builds realistic
+     geometry (4096/16384, sys array 97, aligned root) and accepts
+     field overrides.
+4. **MEDIUM: xfails could mask M1b failures.**
+   - **Now:** `xfail(strict=True, raises=ImportError, …)`.
+   - **Probe:** `images/scratch/review-fixes/test_xfail_raises_probe.py`
+     shows the marker works. The missing-module case gives `1 xfailed`; an
+     AssertionError under the same marker gives `1 failed`.
+5. **LOW: tree fsid.**
+   - **Now:** `superblock.tree_fsid()` follows `btrfs_sb_fsid_ptr`
+     (`volumes.c:734-740`): metadata_uuid when `METADATA_UUID` is set, else
+     fsid. `info` prints `tree fsid:`.
+   - **Tests:** synthetic with and without the bit; sandbox asserts tree
+     fsid == fsid.
+6. **LOW: mutate.py created the output before validating.**
+   - **Now:** `main()` computes every patch and runs `check_patches()`
+     before `open(dst, "xb")`.
+   - **Test:** `test_invalid_source_leaves_no_output`.
+7. **LOW: straddling patches.**
+   - **Now:** `write_patched()` applies only the overlap of each patch with
+     each chunk, and asserts the chunk length is unchanged.
+     `check_patches()` refuses a patch past the image end.
+   - **Tests:** a unit test with a 16-byte chunk: a patch inside one chunk,
+     one straddling a boundary, one spanning three chunks, and one ending at
+     EOF. A second test covers the past-EOF refusal.
+8. **NIT.** `test_two_valid_copies_and_mirror_2_beyond_the_image` asserts
+   the ground truth has two copies, then zips `copies[:2]` with
+   `strict=True`. Mirror 2's absence is asserted just above.
+
+**`btrfska info` after the fixes** (full outputs in
+`images/scratch/review-fixes/info/`):
+```
+$ uv run btrfska info images/scenarios/m1_mirror_damage.img      # exit 0
+  mirror 0 @ 65536: INVALID (magic mismatch, csum mismatch)
+  mirror 1 @ 67108864: valid, generation 38, csum xxhash64 103e07ea76928450
+  mirror 2 @ 274877906944: not present (beyond image end)
+selected: mirror 1 (generation 38)
+kernel would mount: mirror 0 (invalid: magic mismatch, csum mismatch)
+disagreements:
+  mirror 0 invalid: magic mismatch, csum mismatch
+fsid: 554bf995-913e-4d56-9f61-5ce4f5e03ebf
+tree fsid: 554bf995-913e-4d56-9f61-5ce4f5e03ebf
+
+$ uv run btrfska info images/scenarios/m1_foreign_mirror.img     # exit 0
+  mirror 0 @ 65536: valid, generation 38, csum xxhash64 076c0ab4c57738b5
+  mirror 1 @ 67108864: valid, generation 1000, csum sha256 41c053c6…16204d498 (foreign fsid 55692877-4e8d-4649-a76d-370de1420992)
+  mirror 2 @ 274877906944: not present (beyond image end)
+selected: mirror 0 (generation 38)
+disagreements:
+  mirror 1 foreign superblock at 67108864 (fsid 55692877-4e8d-4649-a76d-370de1420992, generation 1000)
+fsid: 554bf995-913e-4d56-9f61-5ce4f5e03ebf
+tree fsid: 554bf995-913e-4d56-9f61-5ce4f5e03ebf
+gate: OK
+```
+With selection by generation alone, `m1_foreign_mirror` would have reported
+generation 1000 and `m1_sha256_bgt`'s fsid and roots.
+
+**Verification** (logs in `images/scratch/review-fixes/verify/`):
+
+| Check | Command | Result |
+|---|---|---|
+| `sandbox.img` before | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime 2026-04-26 18:49:36 |
+| Tests | `uv run pytest -q` | `288 passed, 4 xfailed` (was 244 + 4) |
+| vm tests | `uv run pytest -m vm -q` | `21 passed, 271 deselected` (was 18) |
+| Tests without vm | `uv run pytest -q -m "not vm"` | `267 passed, 21 deselected, 4 xfailed` |
+| Read-only scan and import boundary | `uv run pytest -q tests/test_readonly.py tests/test_import_boundary.py` | `53 passed`; `grep -rn 'dissect\|lzallright' src/` finds nothing |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `26 files already formatted` |
+| Legacy runner | `uv run python -m unittest discover -s legacy/tests` | `Ran 37 tests`, `OK` |
+| Lockfile | `uv lock --check` | `Resolved 10 packages` |
+| Scope | `git diff --stat 8632164..HEAD` | 14 files, +712/−64: `src/btrfska/{cli.py,substrate/{ondisk,superblock}.py}`, `corpus/{mutate.py,manifest.tsv,vm/README.md}`, `research.md`, `tests/…` (+ this catalog) |
+| `sandbox.img` after | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime unchanged |
+
 **For M1b (node reader, chunk maps, tree walker).**
+- Tree block headers must carry `superblock.tree_fsid(fields)`, not `fsid`.
+  Validate node headers against it.
+- The fs-tree xfails now accept only ImportError. Once the walker module
+  exists, a wrong inventory fails the run.
 - Make the four strict xfails in `tests/test_ground_truth.py` pass. The
   expected inode inventories are in `tests/ground_truth/sandbox.json` under
   `fs_tree_by_generation`; adapt the placeholder
