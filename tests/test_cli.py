@@ -5,8 +5,7 @@ import pytest
 
 from btrfska import __version__
 from btrfska.cli import main
-
-SANDBOX_SHA256 = "07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418"
+from conftest import SANDBOX_SHA256
 
 
 def test_version_exits_zero_and_prints_version():
