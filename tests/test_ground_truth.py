@@ -2,7 +2,8 @@
 
 Superblock-level facts are asserted now. The per-generation fs-tree contents
 need the tree walker (plan.md M1 task 7) and are strict xfails until M1b
-lands it: an unexpected pass fails the run, so M1b must remove the marker.
+lands it: an unexpected pass fails the run, so M1b must remove the marker, and
+only an ImportError counts as the expected failure.
 """
 
 import json
@@ -40,7 +41,9 @@ def test_two_valid_copies_and_mirror_2_beyond_the_image(selection):
         (1, True, True),
         (2, False, False),
     ]
-    for copy, expected in zip(copies, EXPECTED_SB["copies"], strict=False):
+    # Ground truth lists the two copies that fit; mirror 2 is checked as absent above.
+    assert len(EXPECTED_SB["copies"]) == 2
+    for copy, expected in zip(copies[:2], EXPECTED_SB["copies"], strict=True):
         assert copy.offset == expected["bytenr"]
         assert copy.fields["csum"][:4].hex() == expected["csum"]
         assert copy.fields["generation"] == expected["generation"]
@@ -113,7 +116,9 @@ def test_fs_tree_roots_in_ground_truth_match_backup_roots(selection):
         assert by_gen[int(gen)] == state["fs_root"]
 
 
-@pytest.mark.xfail(strict=True, reason="tree walker lands in M1b")
+# raises=ImportError: only the missing walker module may make these xfail. Once M1b adds it, a
+# wrong inventory fails loudly instead of hiding behind the marker.
+@pytest.mark.xfail(strict=True, raises=ImportError, reason="tree walker lands in M1b")
 @pytest.mark.parametrize("gen", ["11", "12", "13", "14"])
 def test_fs_tree_contents_per_generation(sandbox_img, gen):
     """Gen 11: target_file.txt 31 B inline; gen 12: root dir only; gen 13: large_target.txt
