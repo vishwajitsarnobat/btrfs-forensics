@@ -118,7 +118,7 @@ Maintenance rules:
   plan's canonical command), not `recovery_output`.
 - "CI green on the PR" can only be checked once the branch is pushed. The
   clean-clone run above is the local equivalent. The action majors
-  (`checkout@v7`, `setup-uv@v10`) are taken from the plan and were not
+  (`checkout@v7`, `setup-uv@v10`) were taken from the plan. On the first PR run, CI failed at job setup because `astral-sh/setup-uv` has no floating `v10` tag; the workflow now pins `setup-uv@v10.1.0` and CI passes (run 34904950286, 17 s). These pins were not otherwise
   re-checked here.
 
 **Follow-ups for M1.**

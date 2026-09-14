@@ -566,7 +566,7 @@ forensic logic.
     - one job `test` on `ubuntu-24.04`, `permissions: contents: read`;
     - steps:
       - `actions/checkout@v7` (current major; v7.0.1, 2026-07-20);
-      - `astral-sh/setup-uv@v10` (current major; v10.1.0, 2026-09-10) with
+      - `astral-sh/setup-uv@v10.1.0` (pin a full tag: this action publishes no floating major tag, so `@v10` fails to resolve) with
         `enable-cache: true` (v10 only changed the `auto` default, which
         disables caching for `pull_request_target`, `workflow_run` and
         `release`);
