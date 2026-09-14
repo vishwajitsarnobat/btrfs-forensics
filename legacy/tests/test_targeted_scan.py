@@ -18,12 +18,12 @@ from utils.recovery_report import RecoveryReport
 from utils.constants import SUPERBLOCK_OFFSET, BTRFS_BLOCK_GROUP_DATA
 
 SANDBOX_IMG = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "sandbox.img"
 )
 TEST_OUT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "test_output_targeted"
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "images", "scratch", "legacy-tests", "targeted"
 )
 
 

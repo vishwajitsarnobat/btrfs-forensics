@@ -20,6 +20,156 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-15 — M0: reset and scaffolding
+
+- **Branch:** `feature/m0-scaffolding` (from `main` at `b55dae2`). Implements
+  plan.md §5 M0 tasks 1–11. No forensic logic.
+- **Commits:**
+  - `a5023b8` Freeze the prototype under legacy/
+  - `e4d12ee` Untrack prototype output and ignore test caches
+  - `a2a95f0` Add btrfska package skeleton and project config
+  - `908f065` Apply ruff formatting to corpus scripts (no functional change)
+  - `8be7fed` Add Apache License 2.0
+  - `c51cc74` Rewrite README for btrfska and drop commands.txt
+  - `67da6ea` Add read-only and CLI tests with a sandbox hash guard
+  - `7f66173` Track a zstd-compressed sandbox.img fixture for CI
+  - `1fe1a56` Add GitHub Actions CI
+  - this catalog entry (the commit after `1fe1a56`)
+
+**What was done.**
+1. **Legacy frozen.** `main.py`, `utils/`, `tests/` moved with `git mv` to
+   `legacy/` (all renames detected, R095–R100). Stray `__pycache__` removed.
+   The only legacy edits are the four path constants: `SANDBOX_IMG` in
+   `test_integration.py` and `test_targeted_scan.py` now resolves the repo
+   root (`dirname` ×3). `TEST_OUTPUT` and `TEST_OUT` now point to
+   `images/scratch/legacy-tests/{integration,targeted}`.
+2. **Untracked:** `recovery_output/` (8 files, kept locally). `.gitignore`
+   gains `recovery_output/`, `.pytest_cache/`, `.ruff_cache/`.
+   `mnt_sandbox/` removed.
+3. **Package** `src/btrfska/`:
+   - `__init__.py` (`0.0.1`), `__main__.py`, `cli.py` (argparse, `--version`,
+     `info IMAGE` printing path, size and sha256);
+   - `substrate/__init__.py` (empty);
+   - `substrate/image.py`: `open_image()` → `ImageHandle`, the single
+     open site (`os.open(O_RDONLY)` + `mmap.ACCESS_READ`, size via `lseek`
+     so block devices work later, `sha256()`, context manager).
+4. **`pyproject.toml`** as specified (btrfska 0.0.1, Apache-2.0, `uv_build`,
+   dev group pytest/ruff, pytest and ruff config). `uv lock` resolved
+   pytest 9.1.1 and ruff 0.16.7.
+5. **Corpus formatting commit** touches only
+   `corpus/vm/probe_stale_metadata.py` (7 insertions, 6 deletions). The probe
+   on `images/scenarios/s01_discard_none.img` printed `367 355 18 832` both
+   before and after.
+6. **LICENSE:** verbatim Apache-2.0 text from apache.org (11 358 bytes,
+   sha256 `cfc7749b…bc523d30`).
+7. **Tests:**
+   - repo-root `conftest.py`: `REPO_ROOT`, a `sandbox_img` fixture, and an
+     autouse session hash guard (expected hash checked at start, unchanged
+     at end);
+   - `tests/test_cli.py`: 3 tests;
+   - `tests/test_readonly.py`: O_RDONLY via `fcntl`, mmap write →
+     `TypeError`, size/sha256, the AST open-site scan, and 10 cases proving
+     the scanner flags write opens.
+8. **README** rewritten per task 8. `commands.txt` removed; its two
+   "running at once" lines live in a legacy subsection with `legacy/` paths.
+9. **Fixture:**
+   - `tests/fixtures/sandbox.img.zst` is 14 963 bytes (`zstd -19` from a
+     read-only read);
+   - its round trip gives `07ca38d4…5876418`;
+   - `tests/fixtures/SHA256SUMS` pins the hash.
+10. **CI:** `.github/workflows/ci.yml` follows the task-10 outline step for
+    step.
+
+**Verification** (all run locally on the branch; logs under
+`images/scratch/m0/`).
+
+| Check | Command | Result |
+|---|---|---|
+| Legacy baseline (untouched tree) | `uv run --python 3.14 python -m unittest discover -s tests` | `Ran 37 tests`, `OK`; `git status` clean, no `test_output_*` left |
+| Legacy after move | `uv run python -m unittest discover -s legacy/tests` | `Ran 37 tests`, `OK` (same count); integration/targeted ran, output dirs removed on teardown |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `14 files already formatted` |
+| Tests | `uv run pytest` | `54 passed` (17 new + 37 legacy), 0 skipped, so no `sandbox.img not found` in the `-ra` summary |
+| Sandbox subset | `uv run pytest -m sandbox` | `1 passed, 53 deselected` |
+| CLI | `uv run btrfska --help` / `uv run btrfska --version` | usage printed, exit 0 / `0.0.1` |
+| uvx | `uvx --from . btrfska --version` | built the wheel, printed `0.0.1` |
+| Info | `uv run btrfska info sandbox.img` | `size: 268435456 bytes`, `sha256: 07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418` |
+| Shell syntax | `for f in corpus/vm/*.sh corpus/vm/scenarios/*.sh corpus/vm/init; do sh -n "$f"; done` | exit 0 (10 files) |
+| CI equivalent, clean clone | `git clone --branch feature/m0-scaffolding . images/scratch/m0/ci-clone`, then every ci.yml step in it | `uv sync --locked` OK; ruff clean; `sh -n` OK; fixture restore `sandbox.img: OK`; `54 passed`; unittest `Ran 37 tests` OK; `--help` OK |
+| Smoke (local, `/dev/kvm` present) | `corpus/vm/fetch_vm.sh && corpus/vm/build_initramfs.sh && corpus/vm/make_image.sh smoke_s01` | printed `images/scenarios/smoke_s01.img`; log has `=== SCENARIO-DONE` (1.5 s wall). Not a merge gate |
+| Scope | `git status`, `git diff --name-status main..HEAD` | only planned paths changed; working tree clean apart from gitignored `images/` |
+| `sandbox.img` | `sha256sum sandbox.img` | before: `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`; after: `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`; mtime still 2026-04-26 |
+
+**Deviations and small additions** (none changes a plan decision, so
+`plan.md` is not edited):
+- `--version` prints the bare version (`0.0.1`), which matches the
+  acceptance check literally.
+- `pyproject.toml` also sets `description` and `readme`.
+- `ImageHandle` exposes `fd`, so the O_RDONLY test can read the access mode
+  with `fcntl`.
+- `main()` turns `OSError`/`ValueError` into exit 1 with a message on
+  stderr; a missing image is tested.
+- The AST scan is slightly stricter than specified. It also flags
+  `x.open(...)` calls in a write mode (`Path.open`, `io.open`) and treats a
+  non-constant mode as a write.
+- The conftest guard also checks the *expected* hash at session start, so a
+  wrong fixture fails loudly.
+- The legacy CLI line in README writes to `images/scratch/legacy-out` (the
+  plan's canonical command), not `recovery_output`.
+- "CI green on the PR" can only be checked once the branch is pushed. The
+  clean-clone run above is the local equivalent. The action majors
+  (`checkout@v7`, `setup-uv@v10`) were taken from the plan. On the first PR run, CI failed at job setup because `astral-sh/setup-uv` has no floating `v10` tag; the workflow now pins `setup-uv@v10.1.0` and CI passes (run 34904950286, 17 s). These pins were not otherwise
+  re-checked here.
+
+**Review fixes** (commits `1d402c2`, `e275410`, `631f904`; each test
+written and seen failing before the fix):
+- **Import mode:** pytest `addopts` gains `--import-mode=importlib`, plus
+  `pythonpath = ["."]`. A throwaway `tests/test_crc32c.py` failed collection
+  before the change and collected cleanly after.
+- **Single hash source:** `conftest.py` parses `tests/fixtures/SHA256SUMS`
+  (the file CI checks); `tests/test_cli.py` imports `SANDBOX_SHA256` from
+  conftest. No Python file holds the hash literal any more.
+- **Write scan** (`tests/test_readonly.py`):
+  - resolves imports, so aliased `os.open` is caught;
+  - flags write-capable APIs by qualified name (`os.fdopen`,
+    `os.truncate`/`ftruncate`, `io.FileIO`, `shutil.copy*`/`move`,
+    `tempfile.*`) and write-only method names on any receiver
+    (`write_bytes`, `write_text`, `truncate`, …);
+  - flags `mmap` unless `access` is literally `ACCESS_READ`.
+  - One `WRITE_ALLOWLIST` holds only `substrate/image.py`; M4 `recover`
+    writers join it explicitly.
+  - Deviation: `copy`/`move` are matched only when they resolve to `shutil`,
+    not on any receiver, because `dict.copy()` would be a false positive.
+  - 24 new self-test cases (19 failed before the fix). A new test proves the
+    allowlist matters only for `image.py`'s one `os.open` call; its read-only
+    mmap passes the scan.
+- **File-type gate** (`substrate/image.py`):
+  - opens with `O_RDONLY | O_NONBLOCK`, so a FIFO cannot block;
+  - then `fstat`s the fd and requires `S_ISREG`/`S_ISBLK`, otherwise closes
+    it and raises `ValueError("not a regular file or block device: …")`;
+  - restores blocking mode afterwards;
+  - rejects empty images with `ValueError("empty image: …")`;
+  - makes `close()` idempotent.
+  - Tests use dirs under `images/scratch/`, not `tmp_path`: directory (was
+    ENOMEM), FIFO under a 5 s `SIGALRM` guard (was a hang), empty file,
+    symlink to a regular file, double close. The first four failed before
+    the fix; the symlink case already passed.
+  - `btrfska info images/scratch` now prints the clear error and exits 1.
+- **Verification:**
+  - `uv run pytest -q`: `84 passed` (54 + 30 new);
+  - `uv run ruff check .`: `All checks passed!`;
+  - `uv run ruff format --check .`: `14 files already formatted`;
+  - `uv run --python 3.14 python -m unittest discover -s legacy/tests`:
+    `Ran 37 tests`, `OK`;
+  - `sandbox.img` sha256 is still `07ca38d4…5876418`, mtime still
+    2026-04-26; no `test_readonly_*` scratch dirs are left behind.
+
+**Follow-ups for M1.**
+- ~~Test basename collisions between `tests/` and `legacy/tests/`~~: resolved
+  by `--import-mode=importlib` (review fixes above).
+- The hash guard runs under pytest only. The original `unittest` runner for
+  `legacy/tests` has no guard.
+
 ## 2026-09-15 — Plan revision after research refresh
 
 - **Branch:** `docs/plan-revision-2026-09` (PR #6). Docs only: `plan.md`,

@@ -25,12 +25,13 @@ Only the Python standard library is used. The probe is 4 KiB-aligned
 (sectorsize), so it also finds 16 KiB nodes, whose headers always start on
 a 4 KiB boundary.
 """
+
 import struct
 import sys
 
 BLOCK = 4096
-SB_OFFSETS = (0x10000, 0x4000000, 0x4000000000)   # primary + two mirrors
-CHUNK = 1024 * BLOCK                               # read 4 MiB at a time
+SB_OFFSETS = (0x10000, 0x4000000, 0x4000000000)  # primary + two mirrors
+CHUNK = 1024 * BLOCK  # read 4 MiB at a time
 
 
 def main():
@@ -43,7 +44,7 @@ def main():
     zero = bytes(BLOCK)
     skip = set(off // BLOCK for off in SB_OFFSETS)
 
-    with open(path, "rb") as f:                     # read-only open
+    with open(path, "rb") as f:  # read-only open
         f.seek(SB_OFFSETS[0])
         sb = f.read(BLOCK)
         if sb[0x40:0x48] != b"_BHRfS_M":
@@ -53,7 +54,7 @@ def main():
 
         f.seek(0)
         blockno = 0
-        tail = b""                  # carry-over so needles spanning reads count
+        tail = b""  # carry-over so needles spanning reads count
         while True:
             buf = f.read(CHUNK)
             if not buf:
@@ -62,10 +63,10 @@ def main():
             # so no occurrence is counted twice
             data = tail + buf
             needle_copies += data.count(needle)
-            tail = data[-(len(needle) - 1):] if len(needle) > 1 else b""
+            tail = data[-(len(needle) - 1) :] if len(needle) > 1 else b""
 
             for off in range(0, len(buf) - BLOCK + 1, BLOCK):
-                blk = buf[off:off + BLOCK]
+                blk = buf[off : off + BLOCK]
                 if blk != zero:
                     nonzero_blocks += 1
                 if blockno not in skip and blk[0x20:0x30] == fsid:

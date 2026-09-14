@@ -17,3 +17,8 @@ sandbox.img
 
 # Generated test images, mount points, VM tooling and scratch files (never outside the repo)
 images/
+
+# Legacy prototype output, test caches
+recovery_output/
+.pytest_cache/
+.ruff_cache/
