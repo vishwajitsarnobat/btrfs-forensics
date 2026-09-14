@@ -41,6 +41,8 @@ def test_info_reports_superblocks_gate_and_backup_roots(sandbox_img, capsys):
     assert "  mirror 2 @ 274877906944: not present (beyond image end)" in lines
     assert "selected: mirror 0 (generation 14)" in lines
     assert "disagreements: none" in lines
+    assert not any(line.startswith("kernel would mount") for line in lines)
+    assert "tree fsid: " + next(ln[6:] for ln in lines if ln.startswith("fsid: ")) in lines
     assert "csum_type: 0 (crc32c, 4 bytes)" in lines
     assert (
         "compat_ro_flags: 0xb (FREE_SPACE_TREE, FREE_SPACE_TREE_VALID, BLOCK_GROUP_TREE)" in lines
@@ -97,6 +99,81 @@ def test_info_selects_mirror_1_when_primary_is_damaged(capsys):
         assert "selected: mirror 1 (generation 7)" in out
         assert "disagreements:" in out
         assert "  mirror 0 invalid: magic mismatch, csum mismatch" in out
+
+
+def test_info_says_what_the_kernel_would_mount_when_it_differs(capsys):
+    # The kernel mounts mirror 0 only: disk-io.c:3333 btrfs_read_disk_super(bdev, 0, false).
+    with scratch_dir("test_cli_") as d:
+        damaged = _image_with(d, "damaged.img", {ondisk.sb_offset(1): make_block(mirror=1)})
+        assert main(["info", damaged]) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert "kernel would mount: mirror 0 (invalid: magic mismatch, csum mismatch)" in out
+
+        blocks = {
+            ondisk.sb_offset(0): make_block(0, generation=5),
+            ondisk.sb_offset(1): make_block(1, generation=6),
+        }
+        assert main(["info", _image_with(d, "older.img", blocks)]) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert "selected: mirror 1 (generation 6)" in out
+        assert "kernel would mount: mirror 0 (valid, generation 5)" in out
+
+        # Mirror 0 is selected but carries a check the kernel rejects on.
+        blocks = {ondisk.sb_offset(0): make_block(0, num_devices=0)}
+        assert main(["info", _image_with(d, "warn.img", blocks)]) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert any(
+            line.startswith("  mirror 0 @ 65536: valid, generation 7, csum crc32c ")
+            and line.endswith(" (warnings: num_devices is 0)")
+            for line in out
+        )
+        assert "kernel would mount: mirror 0 (invalid: num_devices is 0)" in out
+
+        same = {ondisk.sb_offset(m): make_block(m) for m in (0, 1)}
+        assert main(["info", _image_with(d, "same.img", same)]) == 0
+        assert not any(
+            line.startswith("kernel would mount") for line in capsys.readouterr().out.splitlines()
+        )
+
+
+def test_info_marks_a_foreign_mirror(capsys):
+    fsid_a, fsid_b = bytes.fromhex("aa" * 16), bytes.fromhex("bb" * 16)
+    with scratch_dir("test_cli_") as d:
+        blocks = {
+            ondisk.sb_offset(0): make_block(0, generation=5, fsid=fsid_a),
+            ondisk.sb_offset(1): make_block(1, generation=9, fsid=fsid_b),
+        }
+        assert main(["info", _image_with(d, "foreign.img", blocks)]) == 0
+        out = capsys.readouterr().out.splitlines()
+        uuid_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        assert any(
+            line.startswith("  mirror 1 @ 67108864: valid, generation 9, csum crc32c ")
+            and line.endswith(f" (foreign fsid {uuid_b})")
+            for line in out
+        )
+        assert "selected: mirror 0 (generation 5)" in out
+        assert f"  mirror 1 foreign superblock at 67108864 (fsid {uuid_b}, generation 9)" in out
+        assert "fsid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" in out
+        assert not any(line.startswith("kernel would mount") for line in out)
+
+
+def test_info_prints_the_tree_fsid(capsys):
+    fsid, metadata_uuid = bytes.fromhex("aa" * 16), bytes.fromhex("cc" * 16)
+    with scratch_dir("test_cli_") as d:
+        plain = make_block(fsid=fsid, metadata_uuid=metadata_uuid)
+        assert main(["info", _image_with(d, "plain.img", {ondisk.sb_offset(0): plain})]) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert "tree fsid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" in out
+
+        flagged = make_block(
+            fsid=fsid,
+            metadata_uuid=metadata_uuid,
+            incompat=SANDBOX_INCOMPAT | ondisk.INCOMPAT["METADATA_UUID"],
+        )
+        assert main(["info", _image_with(d, "flagged.img", {ondisk.sb_offset(0): flagged})]) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert "fsid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" in out
+        assert "tree fsid: cccccccc-cccc-cccc-cccc-cccccccccccc" in out
 
 
 def test_info_without_any_valid_superblock_fails(capsys):

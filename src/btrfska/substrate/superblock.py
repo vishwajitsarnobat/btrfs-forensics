@@ -1,5 +1,10 @@
 """Superblock copies, best-copy selection, backup roots and the feature gate.
 
+Selection policy: btrfs-progs recover mode, not the kernel. The kernel mounts mirror 0 only
+(disk-io.c:3333); btrfs-progs `btrfs_read_dev_super` with SBREAD_RECOVER (v7.1
+kernel-shared/disk-io.c:1981-2065) anchors the fsid on the first valid copy and takes the highest
+generation among copies of that filesystem. See `select`.
+
 Kernel v7.0 references:
 - copies live at btrfs_sb_offset(0..2) = 64 KiB, 64 MiB, 256 GiB (disk-io.h:37-43); a copy is
   used only if it ends before the device end (volumes.c:1356, `bytenr + 4096 >= size` rejects);
@@ -27,7 +32,8 @@ dependencies (l.2473-2508), bytes_used and stripesize (l.2514-2523), and
 validate_sys_chunk_array (l.2542, M1b parses the array).
 """
 
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 
 from btrfska.substrate import csum, ondisk
 from btrfska.substrate.image import ImageHandle
@@ -152,21 +158,67 @@ def read_copies(img: ImageHandle) -> list[SuperblockCopy]:
     return copies
 
 
+def tree_fsid(fields: dict) -> bytes:
+    """The UUID that tree block headers carry (volumes.c:734-740 btrfs_sb_fsid_ptr).
+
+    metadata_uuid when the METADATA_UUID incompat flag is set, else fsid.
+    """
+    if fields["incompat_flags"] & ondisk.INCOMPAT["METADATA_UUID"]:
+        return fields["metadata_uuid"]
+    return fields["fsid"]
+
+
+def same_filesystem(anchor: dict, fields: dict) -> bool:
+    """Whether a copy belongs to the anchor's filesystem, by the btrfs-progs rule.
+
+    btrfs-progs v7.1 kernel-shared/disk-io.c:2037-2056: fsid must match, and metadata_uuid too,
+    but only when the anchor (the first accepted copy) sets METADATA_UUID.
+    """
+    if fields["fsid"] != anchor["fsid"]:
+        return False
+    if anchor["incompat_flags"] & ondisk.INCOMPAT["METADATA_UUID"]:
+        return fields["metadata_uuid"] == anchor["metadata_uuid"]
+    return True
+
+
 @dataclass(frozen=True)
 class Selection:
     copies: list[SuperblockCopy]
     selected: SuperblockCopy | None
     disagreements: list[str]
+    # Valid copies of a different filesystem than the anchor: residue of an earlier mkfs.
+    foreign: list[SuperblockCopy] = field(default_factory=list)
+
+
+def _foreign_line(copy: SuperblockCopy) -> str:
+    fields = copy.fields
+    ids = f"fsid {uuid.UUID(bytes=fields['fsid'])}"
+    if fields["incompat_flags"] & ondisk.INCOMPAT["METADATA_UUID"]:
+        ids += f", metadata_uuid {uuid.UUID(bytes=fields['metadata_uuid'])}"
+    return (
+        f"mirror {copy.mirror} foreign superblock at {copy.offset} "
+        f"({ids}, generation {fields['generation']})"
+    )
 
 
 def select(copies: list[SuperblockCopy]) -> Selection:
-    """Pick the csum-valid copy with the highest generation (lowest mirror on a tie).
+    """Pick the copy btrfs-progs would pick in recover mode (SBREAD_RECOVER).
 
-    Every present copy that is invalid, older, or different from the selected one is
-    reported as a disagreement.
+    btrfs-progs v7.1 kernel-shared/disk-io.c:2022-2064 btrfs_read_dev_super: the lowest-offset
+    valid copy anchors the filesystem identity (`same_filesystem`); among valid copies of that
+    filesystem the highest generation wins (lowest mirror on a tie). Valid copies of another
+    filesystem are never selected and are listed in `foreign`. This is NOT what the kernel
+    mounts: the kernel reads mirror 0 only (fs/btrfs/disk-io.c:3333, btrfs_read_disk_super(bdev,
+    0, false)), so a damaged primary makes the kernel refuse while progs and btrfska fall back.
+
+    Every present copy that is invalid, foreign, older, or different from the selected one is
+    reported as a disagreement; the differing fields of same-filesystem copies are always named.
     """
     valid = [c for c in copies if c.valid]
-    selected = max(valid, key=lambda c: (c.fields["generation"], -c.mirror), default=None)
+    anchor = min(valid, key=lambda c: c.offset, default=None)
+    own = [c for c in valid if same_filesystem(anchor.fields, c.fields)] if anchor else []
+    foreign = [c for c in valid if c not in own]
+    selected = max(own, key=lambda c: (c.fields["generation"], -c.mirror), default=None)
     disagreements = []
     for copy in copies:
         if not copy.present or copy is selected:
@@ -174,23 +226,28 @@ def select(copies: list[SuperblockCopy]) -> Selection:
         if not copy.valid:
             disagreements.append(f"mirror {copy.mirror} invalid: {', '.join(copy.problems)}")
             continue
-        gen, selected_gen = copy.fields["generation"], selected.fields["generation"]
-        if gen != selected_gen:
-            disagreements.append(
-                f"mirror {copy.mirror} generation {gen} != selected generation {selected_gen}"
-            )
+        if copy in foreign:
+            disagreements.append(_foreign_line(copy))
             continue
+        gen, selected_gen = copy.fields["generation"], selected.fields["generation"]
         differing = [
             name
             for name, value in copy.fields.items()
-            if name not in _PER_COPY_FIELDS and value != selected.fields[name]
+            if name not in _PER_COPY_FIELDS
+            and name != "generation"
+            and value != selected.fields[name]
         ]
-        if differing:
+        if gen != selected_gen:
+            line = f"mirror {copy.mirror} generation {gen} != selected generation {selected_gen}"
+            disagreements.append(
+                line + (f", differs in: {', '.join(differing)}" if differing else "")
+            )
+        elif differing:
             disagreements.append(
                 f"mirror {copy.mirror} differs from mirror {selected.mirror} in: "
                 + ", ".join(differing)
             )
-    return Selection(copies, selected, disagreements)
+    return Selection(copies, selected, disagreements, foreign)
 
 
 def read_superblock(img: ImageHandle) -> Selection:

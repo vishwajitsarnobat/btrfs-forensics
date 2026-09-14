@@ -174,7 +174,87 @@ def test_highest_generation_wins_among_valid_copies():
     ]
     selection = sb.select(copies)
     assert selection.selected.mirror == 1
-    assert selection.disagreements == ["mirror 0 generation 5 != selected generation 6"]
+    assert selection.foreign == []
+    # The other differing fields are always listed, not only the generation.
+    assert selection.disagreements == [
+        "mirror 0 generation 5 != selected generation 6, differs in: root"
+    ]
+
+
+FSID_A = bytes.fromhex("aa" * 16)
+FSID_B = bytes.fromhex("bb" * 16)
+UUID_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+UUID_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+METADATA_UUID = ondisk.INCOMPAT["METADATA_UUID"]
+
+
+def test_foreign_mirror_with_a_higher_generation_is_not_selected():
+    # btrfs-progs v7.1 kernel-shared/disk-io.c:2037-2056: copies whose fsid differs from the
+    # first accepted copy "contain data of different filesystems" and are skipped.
+    copies = [
+        sb.parse_copy(make_block(0, generation=5, fsid=FSID_A), 0),
+        sb.parse_copy(make_block(1, generation=900, fsid=FSID_B, csum_type=csum.SHA256), 1),
+    ]
+    selection = sb.select(copies)
+    assert selection.selected.mirror == 0
+    assert selection.foreign == [copies[1]]
+    assert selection.disagreements == [
+        f"mirror 1 foreign superblock at {ondisk.sb_offset(1)} (fsid {UUID_B}, generation 900)"
+    ]
+
+
+def test_anchor_is_the_lowest_offset_valid_copy():
+    copies = [
+        sb.parse_copy(bytes(4096), 0),
+        sb.parse_copy(make_block(1, generation=5, fsid=FSID_A), 1),
+        sb.parse_copy(make_block(2, generation=6, fsid=FSID_B), 2),
+    ]
+    selection = sb.select(copies)
+    assert selection.selected.mirror == 1
+    assert selection.foreign == [copies[2]]
+    assert selection.disagreements == [
+        "mirror 0 invalid: magic mismatch, csum mismatch",
+        f"mirror 2 foreign superblock at {ondisk.sb_offset(2)} (fsid {UUID_B}, generation 6)",
+    ]
+
+
+def test_metadata_uuid_anchors_when_the_anchor_sets_the_feature():
+    incompat = SANDBOX_INCOMPAT | METADATA_UUID
+    copies = [
+        sb.parse_copy(make_block(0, incompat=incompat, fsid=FSID_A, metadata_uuid=FSID_A), 0),
+        sb.parse_copy(
+            make_block(1, generation=8, incompat=incompat, fsid=FSID_A, metadata_uuid=FSID_B), 1
+        ),
+    ]
+    selection = sb.select(copies)
+    assert selection.selected.mirror == 0
+    assert selection.foreign == [copies[1]]
+    assert selection.disagreements == [
+        f"mirror 1 foreign superblock at {ondisk.sb_offset(1)} "
+        f"(fsid {UUID_A}, metadata_uuid {UUID_B}, generation 8)"
+    ]
+
+
+def test_metadata_uuid_is_ignored_when_the_anchor_lacks_the_feature():
+    # progs compares metadata_uuid only if the first accepted copy has METADATA_UUID set.
+    copies = [
+        sb.parse_copy(make_block(0, fsid=FSID_A), 0),
+        sb.parse_copy(make_block(1, fsid=FSID_A, metadata_uuid=FSID_B), 1),
+    ]
+    selection = sb.select(copies)
+    assert selection.selected.mirror == 0
+    assert selection.foreign == []
+    assert selection.disagreements == ["mirror 1 differs from mirror 0 in: metadata_uuid"]
+
+
+def test_tree_fsid_follows_the_metadata_uuid_feature():
+    # volumes.c:734-740 btrfs_sb_fsid_ptr(): the UUID stamped into tree block headers.
+    plain = sb.parse_copy(make_block(fsid=FSID_A, metadata_uuid=FSID_B), 0).fields
+    assert sb.tree_fsid(plain) == FSID_A
+    flagged = make_block(
+        incompat=SANDBOX_INCOMPAT | METADATA_UUID, fsid=FSID_A, metadata_uuid=FSID_B
+    )
+    assert sb.tree_fsid(sb.parse_copy(flagged, 0).fields) == FSID_B
 
 
 def test_same_generation_different_content_is_reported():

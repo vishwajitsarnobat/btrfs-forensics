@@ -28,10 +28,15 @@ def _print_copies(selection: superblock.Selection) -> None:
         elif copy.valid:
             fields = copy.fields
             size = csum.csum_size(fields["csum_type"])
-            print(
+            line = (
                 f"{where}: valid, generation {fields['generation']}, "
                 f"csum {csum.csum_name(fields['csum_type'])} {fields['csum'][:size].hex()}"
             )
+            if copy in selection.foreign:
+                line += f" (foreign fsid {uuid.UUID(bytes=fields['fsid'])})"
+            if copy.problems:
+                line += f" (warnings: {', '.join(copy.problems)})"
+            print(line)
         else:
             print(f"{where}: INVALID ({', '.join(copy.problems)})")
 
@@ -40,6 +45,15 @@ def _print_copies(selection: superblock.Selection) -> None:
         print("selected: none")
     else:
         print(f"selected: mirror {selected.mirror} (generation {selected.fields['generation']})")
+        # The kernel mounts mirror 0 only (disk-io.c:3333) and rejects on every check btrfska
+        # mirrors, warnings included; say so whenever that differs from the selection.
+        primary = selection.copies[0]
+        if primary is not selected or primary.problems:
+            if primary.problems:
+                state = f"invalid: {', '.join(primary.problems)}"
+            else:
+                state = f"valid, generation {primary.fields['generation']}"
+            print(f"kernel would mount: mirror 0 ({state})")
     if selection.disagreements:
         print("disagreements:")
         for line in selection.disagreements:
@@ -52,6 +66,7 @@ def _print_fields(fields: dict, verdict: superblock.GateVerdict) -> None:
     print(f"fsid: {uuid.UUID(bytes=fields['fsid'])}")
     if any(fields["metadata_uuid"]):
         print(f"metadata_uuid: {uuid.UUID(bytes=fields['metadata_uuid'])}")
+    print(f"tree fsid: {uuid.UUID(bytes=superblock.tree_fsid(fields))}")
     label = fields["label"].split(b"\0", 1)[0].decode("utf-8", "replace")
     print(f"label: {label!r}")
     print(f"generation: {fields['generation']}")

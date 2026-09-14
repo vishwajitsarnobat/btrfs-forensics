@@ -119,3 +119,4 @@ def test_mirror_damage_image_selects_mirror_1_and_reports_it(capsys):
     generation = selection.selected.fields["generation"]
     assert f"selected: mirror 1 (generation {generation})" in lines
     assert "  mirror 0 invalid: magic mismatch, csum mismatch" in lines
+    assert "kernel would mount: mirror 0 (invalid: magic mismatch, csum mismatch)" in lines
