@@ -1,6 +1,7 @@
 """corpus/mutate.py: derives damaged test images, only ever into a new file under images/."""
 
 import hashlib
+import importlib.util
 import subprocess
 import sys
 
@@ -68,6 +69,90 @@ def test_zero_primary_superblock_leaves_mirror_1(source):
     chosen = selection(d / "damaged.img")
     assert chosen.selected.mirror == 1
     assert chosen.disagreements == ["mirror 0 invalid: magic mismatch, csum mismatch"]
+
+
+def test_invalid_source_leaves_no_output(source):
+    _, d = source
+    broken = write_sparse_image(d / "broken.img", SIZE, {})  # no valid superblock at all
+    result = run(broken, d / "out.img", "set-incompat-bit", 40)
+    assert result.returncode != 0
+    assert "not a valid superblock" in result.stderr
+    assert not (d / "out.img").exists()
+
+
+def test_transplant_puts_a_foreign_superblock_into_a_mirror(source):
+    src, d = source
+    fsid = bytes.fromhex("bb" * 16)
+    donor = write_sparse_image(
+        d / "donor.img",
+        SIZE,
+        {ondisk.sb_offset(1): make_block(1, generation=7, csum_type=csum.XXHASH, fsid=fsid)},
+    )
+    before = sha256(src), sha256(donor)
+    result = run(src, d / "foreign.img", "transplant-sb", donor, 1, 1000)
+    assert result.returncode == 0, result.stderr
+    assert (sha256(src), sha256(donor)) == before
+    chosen = selection(d / "foreign.img")
+    mirror1 = chosen.copies[1]
+    assert mirror1.valid  # csum recomputed with the donor's own type (xxhash64)
+    assert mirror1.fields["generation"] == 1000
+    assert mirror1.fields["fsid"] == fsid
+    assert mirror1.fields["csum_type"] == csum.XXHASH
+    assert chosen.selected.mirror == 0
+    assert chosen.foreign == [mirror1]
+    # Only the mirror-1 block changed.
+    a, b = bytearray(src.read_bytes()), bytearray(d.joinpath("foreign.img").read_bytes())
+    off = ondisk.sb_offset(1)
+    a[off : off + 4096] = b[off : off + 4096] = bytes(4096)
+    assert a == b
+
+
+def test_transplant_refuses_an_invalid_donor_copy(source):
+    src, d = source
+    result = run(src, d / "foreign.img", "transplant-sb", src, 2, 1000)  # mirror 2 not present
+    assert result.returncode != 0
+    assert not (d / "foreign.img").exists()
+
+
+def load_mutate():
+    spec = importlib.util.spec_from_file_location("corpus_mutate", MUTATE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    ("offset", "length"),
+    [
+        (5, 10),  # inside the first chunk
+        (16 - 3, 8),  # straddles the chunk boundary at 16
+        (16 * 2 - 1, 16 + 2),  # starts in chunk 1, covers chunk 2, ends in chunk 3
+        (16 * 4 - 6, 6),  # ends exactly at the image end
+    ],
+)
+def test_patches_straddling_chunks_apply_without_growing_them(scratch_src, offset, length):
+    mutate = load_mutate()
+    size = 16 * 4
+    src = write_sparse_image(scratch_src / "src.bin", size, {0: bytes(range(size))})
+    patch = bytes([0xEE]) * length
+    out = scratch_src / "out.bin"
+    with open(src, "rb") as f, open(out, "xb") as o:
+        mutate.write_patched(f, o, size, {offset: patch}, chunk=16)
+    expected = bytearray(range(size))
+    expected[offset : offset + length] = patch
+    assert out.read_bytes() == bytes(expected)
+
+
+def test_patch_beyond_the_image_end_is_refused(scratch_src):
+    mutate = load_mutate()
+    with pytest.raises(SystemExit, match="beyond the image end"):
+        mutate.check_patches(64, {60: bytes(8)})
+
+
+@pytest.fixture
+def scratch_src():
+    with scratch_dir("test_mutate_unit_") as d:
+        yield d
 
 
 def test_refuses_sandbox_img_as_output(source):

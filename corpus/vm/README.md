@@ -48,9 +48,11 @@ Derived images and the manifest (one level up, in `corpus/`):
   command, host mkfs version, guest kernel, sha256. Tests reference images by
   name and skip when absent.
 - `corpus/mutate.py SRC DST OP` writes a damaged copy of a generated image
-  (`set-incompat-bit BIT`, `zero-primary-sb`). It only reads `SRC` and refuses
-  an existing `DST`, a `DST` outside `images/`, or any file named
-  `sandbox.img`.
+  (`set-incompat-bit BIT`, `zero-primary-sb`, `transplant-sb DONOR MIRROR
+  GENERATION`). It only reads `SRC` (and `DONOR`) and refuses an existing
+  `DST`, a `DST` outside `images/`, or any file named `sandbox.img`. All
+  patches are computed and validated before `DST` is created, so a refused
+  run leaves no file.
 
 Notes:
 - `DISCARD=1` alone makes the async row: kernels ≥ 6.2 enable
