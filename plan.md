@@ -1,7 +1,10 @@
 # Build Plan — Btrfs Filesystem-State Archaeology
 
 > Written 2026-08-17 from the verified research in [`research.md`](research.md);
-> **revised 2026-09-15** after the research refresh (research.md §10).
+> **revised 2026-09-15** after the research refresh (research.md §10), then
+> amended the same day after review: all runtime parsing, extent reads and
+> decompression are ours, dissect.btrfs is a test oracle only, and the
+> licence is Apache-2.0 (§3.3, §3.5).
 > History lives in [`catalog.md`](catalog.md). This plan is forward-looking
 > only; update it when decisions change, and log every completed step in the
 > catalog.
@@ -40,7 +43,9 @@ re-checked against new prior art in research.md §10.1–§10.2):
 | C7. First public btrfs deleted-file benchmark corpus (incl. discard and block-group-tree axes) + systematic tool benchmark | G8 | None exists (no btrfs at digitalcorpora/CFReDS; hide-and-seek dataset still offline) |
 
 **Not building (exists elsewhere; reuse or benchmark instead):**
-- raw-image file-stream extraction and decompression plumbing (dissect.btrfs);
+- compression algorithms (stdlib `zlib` and `compression.zstd`; only the
+  small LZO1X decoder is ours, §3.5) and a second general-purpose btrfs
+  reader (dissect.btrfs serves as a test oracle, not a dependency);
 - old-root salvage (`btrfs restore`/find-root) and backup-root deleted-file
   diffing (Beyond Carving, `SecurityRonin/btrfs-forensic`);
 - unreferenced-subvolume restore (btrfscue v0.7 `recover`);
@@ -75,12 +80,11 @@ Six layers; each independently testable.
 │    targeted regions + old-root discovery                     │
 │    (numpy/mmap now → Rust/PyO3 later; identical interface)   │
 ├──────────────────────────────────────────────────────────────┤
-│ 1. Substrate (§3.5): OURS = read-only image/devices, SB +    │
-│    mirrors, validation gate (csum dispatch, header checks,   │
-│    incompat/compat_ro gate), node reader, chunk maps         │
-│    (current + historical), backup roots                      │
-│    BORROWED = dissect.btrfs file streams + zlib/lzo/zstd +   │
-│    item struct definitions, fed only through our reader      │
+│ 1. Substrate (§3.5), all ours: read-only image/devices,      │
+│    SB + mirrors, validation gate (csum dispatch, header      │
+│    checks, incompat/compat_ro gate), `struct` tables, node   │
+│    reader, chunk maps (current + historical), backup roots,  │
+│    extent reads + decompression (stdlib zlib/zstd, own LZO1X)│
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -111,15 +115,19 @@ Design rules:
 
 - **Language:** Python for everything except the scan kernel's fast path.
   `requires-python = ">=3.14"`, matching the existing `.python-version` pin
-  and the stdlib `compression.zstd` that dissect.btrfs uses on 3.14 (no
-  `backports.zstd`); `uv`/`uvx` provision the interpreter, so users need not
+  and giving stdlib `compression.zstd` for zstd extents (verified on 3.14.6:
+  libzstd 1.5.7, round-trip OK; no `backports.zstd`); `uv`/`uvx` provision
+  the interpreter, so users need not
   have it installed. Revisit a lower floor before the first PyPI release.
   Rust (PyO3/maturin) scan core in M8; the numpy path remains as fallback.
   No Go/Zig/C++ (research.md §7).
-- **Core deps:** `dissect.btrfs` (streams/decompression only, §3.5), `numpy`
-  (scan kernel), `crc32c` (SSE4.2 CRC32c), `xxhash`; stdlib `hashlib`
-  (sha256, blake2b), `sqlite3`, `argparse`. Dev: `pytest`, `ruff`, `uv`; CI
-  via GitHub Actions.
+- **Runtime deps:** `numpy` (scan kernel), `crc32c` (SSE4.2 CRC32c),
+  `xxhash`; stdlib `hashlib` (sha256, blake2b), `zlib`, `compression.zstd`,
+  `struct`, `sqlite3`, `argparse`. No btrfs library at runtime (§3.5).
+  Licences are checked in §3.3.
+- **Dev/test deps:** `pytest`, `ruff`; test oracles `dissect.btrfs==1.10.*`
+  (AGPL-3.0-or-later) and `lzallright==0.2.*` (MIT), used only by
+  differential tests (§3.5, §6.3). `uv`; CI via GitHub Actions.
 - **Packaging:** `pyproject.toml` + uv lockfile, src layout, published to
   PyPI so reviewers run `uvx btrfska scan image.dd`.
 - **Catalog:** SQLite, single-file `evidence.db` (hashable, chain-of-custody
@@ -140,14 +148,62 @@ Design rules:
 
 ### 3.3 License
 
-Importing `dissect.btrfs` (AGPL-3.0) makes the tool **AGPL-3.0**. Accepted:
-it is genuinely open source, standard in DFIR (all of Dissect), and doesn't
-hinder the paper. Under §3.5 the AGPL surface shrinks to one adapter module,
-so the boundary is explicit: **all dissect imports live in
-`src/btrfska/substrate/dissect_adapter.py`** (enforced by an
-import-boundary test from M1). If a permissive licence ever becomes a
-goal, only that module is replaced (option C). Permissive Rust references
-exist but are not dependencies to bet on:
+**Decision: Apache-2.0** (revised 2026-09-15). The earlier AGPL-3.0
+decision followed from importing dissect.btrfs at runtime, which §3.5 no
+longer does.
+
+Why Apache-2.0:
+- DFIR and academic reuse: labs, vendors and other researchers can embed the
+  parser or re-run the paper artifact without a copyleft review;
+- an explicit patent grant (Apache-2.0 §3), which MIT and BSD lack;
+- compatible with every remaining runtime dependency (table below), and
+  combinable into a GPLv3/AGPLv3 work if the §3.5 fallback is ever taken;
+- in line with the permissive Rust prior art (SecurityRonin, `btrfs-core`
+  and rustutils are Apache-2.0 or MIT/Apache).
+
+`legacy/` is the project owner's own prototype code and is released under
+the same licence.
+
+**Dependency licence check** (PyPI and GitHub metadata, 2026-09-15):
+
+| Dependency | Scope | Licence | OK for an Apache-2.0 distribution? |
+|---|---|---|---|
+| CPython stdlib (`zlib`, `compression.zstd`, `hashlib`, `sqlite3`, `mmap`) | runtime | PSF-2.0 (bundled zlib: Zlib; libzstd: BSD) | yes |
+| `numpy` 2.5.x | runtime (M2) | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | yes |
+| `xxhash` 4.0.x (python-xxhash) | runtime (M1) | BSD-2-Clause | yes |
+| `crc32c` 2.9 (ICRAR) | runtime (M1) | LGPL-2.1-or-later | yes, as a separately installed, unmodified dependency (our wheel neither bundles nor modifies it). If a frozen single-file binary is ever shipped, swap in `google-crc32c` (Apache-2.0) behind `substrate/csum.py` instead of taking on LGPL relinking terms |
+| PyO3, memmap2, rayon, zerocopy, crc-fast | runtime (M8, Rust) | Apache-2.0 (most dual MIT/Apache-2.0) | yes |
+| `btrfs-diskformat` (layout seed) | reference (M8) | BSD-2-Clause | yes |
+| Starlette, Jinja2 | runtime (M9) | BSD-3-Clause | yes |
+| htmx (vendored static asset) | runtime (M9) | 0BSD | yes |
+| `pytest`, `ruff` | dev | MIT | not distributed |
+| `lzallright` 0.2.x | test oracle | MIT | not distributed |
+| `dissect.btrfs` 1.10 (pulls `dissect.cstruct`, `dissect.util`: Apache-2.0) | test oracle | AGPL-3.0-or-later | not distributed (see below) |
+
+**Test-only use of an AGPL library does not make the distributed package
+AGPL.** The AGPL's conditions attach to conveying the AGPL program or a
+work based on it (§§4–6), and to offering a *modified* version to users
+over a network (§13). Here:
+- `dissect.btrfs` is listed only in `[dependency-groups] dev`, and PEP 735
+  dependency groups are not written into the published `Requires-Dist`
+  metadata;
+- no wheel or sdist contains dissect code; the oracle tests live in
+  `tests/oracle/`, outside the `src/btrfska` package;
+- an import-boundary test (M1) fails if anything under `src/` imports
+  `dissect` or `lzallright`;
+- running the unmodified library on our own machines and in CI is not
+  conveying it.
+
+So `btrfska` as published is Apache-2.0. This is the project's reading of
+the licences, recorded for reviewers. Re-check it before the first PyPI
+release, including the sdist file list (`tar tzf dist/*.tar.gz`).
+
+**Fallback consequence.** If the §3.5 fallback re-adopts dissect.btrfs at
+runtime, the combined tool becomes **AGPL-3.0-or-later** (Apache-2.0 code
+can be combined into an AGPLv3 work, not the reverse). `LICENSE`,
+`pyproject.toml` and README change in that PR, and the catalog records why.
+
+Permissive Rust references (not dependencies):
 - rustutils/btrfsutils — MIT/Apache, stalled since 2026-05-14;
 - `btrfs-core` 0.1.5 — Apache-2.0, single/DUP only, crc32c only
   (research.md §10.6 item 9).
@@ -159,7 +215,7 @@ Repo stays `btrfs-forensics`. Package/CLI name: **`btrfska`**
 404) and §10 found no collision; re-check immediately before the first
 release.
 
-### 3.5 Substrate decision (revised 2026-09-15)
+### 3.5 Substrate decision (revised 2026-09-15, amended after review)
 
 **Finding (research.md §10.2).** dissect.btrfs 1.10 (latest stable,
 2026-02-24; no functional commits since 2025-12):
@@ -170,48 +226,128 @@ release.
 - maps only through the current chunk tree, never reads superblock mirrors,
   and exposes backup roots only as raw bytes.
 
-It does, however, correctly read file streams (inline, regular, sparse;
-zlib/lzo/zstd — zstd verified 10/10 on `s01`), subvolumes, snapshots and
-backup-root historical walks on `sandbox.img`.
+It does correctly read file streams (inline, regular, sparse; zlib/lzo/zstd
+— zstd verified 10/10 on `s01`), subvolumes, snapshots and backup-root
+historical walks on `sandbox.img`.
 
-**Options considered.**
+**Review finding (2026-09-15).** Borrowing only dissect's file streams (the
+first draft of this section) does not work as intended:
+- dissect resolves every extent through *its own* chunk map, built from the
+  current chunk tree. It has no API to route stream reads through our
+  validated node reader or through a historical or reconstructed chunk map,
+  so its streams cannot serve C6 or any orphan-derived extent;
+- M1 already needs our own extent reads (backup-root and historical
+  states), so dissect streams would duplicate them, not replace them;
+- its only unique runtime contribution is therefore decompression. Zlib and
+  zstd are in the Python 3.14 stdlib (`zlib`, `compression.zstd`; verified
+  on 3.14.6 with libzstd 1.5.7), and btrfs LZO is a thin per-sector segment
+  framing around LZO1X.
+
+**Btrfs LZO framing** (kernel v7.0 `fs/btrfs/lzo.c`, header comment and
+decompress path, which calls `lzo1x_decompress_safe`):
+- a 4-byte LE total compressed length;
+- then segments, each a 4-byte LE segment length followed by LZO1X data of
+  at most `lzo1x_worst_compress(sectorsize)` bytes (4 419 for 4 KiB) that
+  decompresses to at most one sector;
+- a segment header never straddles a sector boundary: if fewer than 4 bytes
+  remain in the current sector, they are zero padding and the next header
+  starts at the next sector;
+- inline extents use the same header with a single segment.
+
+**LZO1X decoder options** (evaluated 2026-09-15):
+
+| Option | Licence / state | Behaviour on hostile input (test below) | Verdict |
+|---|---|---|---|
+| `python-lzo` 1.15 | GPL | — | Rejected: GPL, incompatible with the Apache-2.0 decision |
+| `dissect.util` 3.24 `compression.lzo` (pure Python + Rust `_native`) | Apache-2.0, Fox-IT, maintained; the decoder dissect.btrfs uses | Pure Python: a back-reference before the start of output is silently accepted (the crafted stream returned 4 bytes, no error), and only `len == out_len` stops output. Native: **panics** (`pyo3_runtime.PanicException`, not an `Exception` subclass, so `except Exception` does not catch it) on the crafted stream and on 58/300 bit-flipped streams | Rejected at runtime: a forensic reader must fail with a catchable, classified error on adversarial bytes. Its Apache-2.0 test vectors are reused, with attribution |
+| `lzallright` 0.2.6 (Rust bindings of lzokay) | MIT; 2 stars, one maintainer; abi3 wheels | Raises `LZOError` cleanly on crafted, truncated and bit-flipped input | Not a runtime dependency (bus factor; a native wheel for a ~150-line function). **Adopted as an independent test oracle** and as fallback 1 |
+| `lzokay` 2.1.0 (lzokay-rs) | MIT; 1 star, last push 2025-10 | not tested | Rejected: weaker upkeep than `lzallright` |
+| **Own pure-Python LZO1X decoder** (`substrate/lzo.py`) | Ours (Apache-2.0) | Bounds-checked by design: input overrun, output overrun beyond the segment bound, lookbehind overrun, missing end marker; one `LzoError` class | **Chosen** |
+
+Test run (seeded; `uv run --no-project --with dissect.util==3.24 --with
+lzallright==0.2.6`, scratch only):
+- 2 000 round-trip vectors (random, zero, low-entropy and repeated-text
+  data, 1 B–70 KiB), compressed with lzallright, decoded identically by all
+  three decoders;
+- a crafted 10-byte stream `15 41 42 43 44 40 FF 11 00 00` (4 literals, then
+  a match 2 041 bytes back);
+- a truncated stream (all three raise a catchable error);
+- 300 single-bit flips of one compressed 4 KiB sector.
+
+**Also observed:** 139–160 of the 300 bit-flipped streams decoded
+"successfully" to wrong bytes in *every* decoder. LZO carries no integrity
+check, so decode success is never evidence of correct content; only data
+checksums (csum tree, M6) are.
+
+Why our own decoder:
+- decompression was the only thing left to borrow, and it sits on the
+  hostile-input path (the kernel uses the "safe" decoder for the same
+  reason);
+- LZO1X decoding is small and fully specified (kernel
+  `Documentation/staging/lzo.rst`). Output per segment is bounded by one
+  sector, so pure-Python speed is adequate for Track R; M8 can move it to
+  Rust;
+- it is written from the bitstream description and dissect.util's
+  Apache-2.0 code, not translated from GPL sources (kernel
+  `lzo1x_decompress_safe.c`, python-lzo), which keeps the licence clean;
+- correctness is cross-checked three ways: lzallright round-trip fuzz,
+  dissect.btrfs stream bytes, and guest-printed SHA-256s on LZO corpus
+  images (M1).
+
+**Substrate options considered.**
 
 | Option | For | Against |
 |---|---|---|
-| A. dissect.btrfs as the full substrate + thin extensions (the 2026-08-17 decision) | Least code | Its reader sits under every trust decision; validation retrofitted around `_read_node` is monkey-patching a private method of an unmaintained-in-practice library; the current-chunk-map-only design blocks C6 |
-| **B. Split: own parsing/validation, borrow dissect for streams + decompression** | Every byte that feeds a confidence tier passes through code we test; historical chunk maps and mirrors are first-class; dissect keeps doing the fiddly, well-tested part (extent streams, compression) | ~600–900 lines of our own superblock/node/chunk code (but typed, validated, fuzzed); a small adapter so dissect streams read through our validated reader and chunk map |
-| C. Own everything, drop dissect | Permissive licence possible; no AGPL | Re-implements compression/stream edge cases that dissect already handles; delays the novel work |
+| A. dissect.btrfs as the full substrate + thin extensions (the 2026-08-17 decision) | Least code | Its reader sits under every trust decision; validation retrofitted around `_read_node` means monkey-patching a private method; the current-chunk-map-only design blocks C6 |
+| B. Own parsing/validation, borrow dissect streams + decompression (first 2026-09-15 draft) | Less stream code | Streams cannot go through our reader or historical maps (review finding), so they duplicate M1's extent reads; AGPL for what is in effect decompression only |
+| **C. Own all runtime parsing, extent reads and decompression; dissect.btrfs as test oracle only** | Every byte behind a confidence tier or a recovered file passes through code we test; historical and reconstructed chunk maps work for content too; permissive licence (§3.3) | ~600–900 lines of superblock/node/chunk code plus ~300 lines of extent/decompression code (incl. ~150 for LZO1X), all typed, validated and fuzzed |
+| D. Vendor/fork dissect's stream module | Proven stream code | Same chunk-map coupling; AGPL; a fork to maintain |
 
-**Decision: B.**
-- **Ours (`src/btrfska/substrate/`, no dissect import):**
-  - read-only image/device open;
-  - superblock parse + all mirrors + best-copy selection by csum, then
-    generation;
-  - csum dispatch (crc32c/xxhash64/sha256/blake2b) for superblocks, tree
-    blocks and data;
-  - node header validation (bytenr, fsid, chunk-tree uuid, generation ≤
-    SB generation, owner, level) and a node reader returning a
-    `ValidatedNode` with a validation record;
-  - the incompat/compat_ro gate;
-  - sys_chunk_array + chunk-tree map, keyed so historical maps can coexist
-    (M5);
-  - backup roots (sorted by generation);
-  - item-type tables including 172, 230, 234–236.
-- **Borrowed (`src/btrfska/substrate/dissect_adapter.py`, the only dissect
-  import site):** `INode` / file-stream reads and zlib/lzo/zstd
-  decompression, with dissect opened on our read-only handle and cross-checked
-  against our reader. Also cstruct item definitions, used where they save
-  work.
-- **Rationale:** confidence tiers (C4) and "refuse loudly" are only
-  defensible if validation is ours and tested. Streams and decompression
-  carry no trust decision beyond content hashing, which we do ourselves.
-- **Fallback:** if dissect streams prove wrong or drift, (1) pin
-  `dissect.btrfs==1.10.*`; (2) vendor/fork the stream module (AGPL either way);
-  (3) own streams too (option C). Option C also becomes the path if a
-  permissive licence is ever required (§3.3).
-- **Guard:** an M1 test asserts that dissect's
-  stream bytes equal our own extent read for every file in `sandbox.img` and
-  `s01`, so a drift is caught in CI rather than in a case.
+**Decision: C.** Everything lives in `src/btrfska/substrate/`:
+- read-only image/device open;
+- superblock parse + all mirrors + best-copy selection by csum, then
+  generation;
+- csum dispatch (crc32c/xxhash64/sha256/blake2b) for superblocks, tree
+  blocks and data;
+- node header validation (bytenr, fsid, chunk-tree uuid, generation ≤ SB
+  generation, owner, level) and a node reader returning a `ValidatedNode`
+  with a validation record;
+- the incompat/compat_ro gate;
+- sys_chunk_array + chunk-tree map, keyed so historical maps can coexist
+  (M5);
+- backup roots (sorted by generation);
+- `ondisk.py`: our own `struct` format tables for every on-disk structure
+  and item we parse (item keys incl. 172, 230, 234–236), with values
+  asserted against kernel v7.0 headers; no cstruct definitions;
+- `extents.py`: EXTENT_DATA → bytes for inline, regular and prealloc
+  extents and holes, through any `ChunkMap` (current, historical,
+  reconstructed), with a per-extent read record;
+- `compress.py`: zlib (`zlib.decompressobj`) and zstd
+  (`compression.zstd.ZstdDecompressor`), both bounded by `ram_bytes`, plus
+  the btrfs LZO framing over `lzo.py`; every failure is a recorded
+  `DecodeError`, never truncated or padded output.
+
+**dissect.btrfs's role:** a pinned dev/test dependency used only by
+differential tests in `tests/oracle/` (§6.3). It is never imported under
+`src/` (import-boundary test).
+
+**Replacement boundary.** `extents.py` and `compress.py` are the only modules
+that turn extent metadata into file content; everything above them consumes
+their interface. If one proves unreliable, only that module is swapped.
+
+**Fallback** (in order; each step recorded in the catalog):
+1. our LZO1X decoder fails an oracle and cannot be fixed quickly → call
+   `lzallright` (MIT) from `compress.py`; the licence stays Apache-2.0;
+2. our extent/stream code proves unreliable → re-adopt dissect.btrfs at
+   runtime behind the replacement boundary (current-tree reads only; C6
+   content still needs our code). The distributed tool then becomes
+   **AGPL-3.0-or-later** (§3.3).
+
+**Guard:** the M1 task-8 oracle tests assert that, for every file in the
+current tree and snapshots of `sandbox.img`, `m1_xxhash` (zstd), `m1_lzo`
+and `m1_zlib`, our bytes equal dissect.btrfs's stream bytes and the
+guest-printed SHA-256s, so a regression is caught in CI rather than in a
+case.
 
 ---
 
@@ -220,8 +356,9 @@ backup-root historical walks on `sandbox.img`.
 Principle: **most of the prototype is a re-implementation of things
 maintained libraries and btrfs-progs already do — that code is dead weight
 and goes.** Only the parts that encode *our novel logic* or *validated
-empirical results* are worth carrying. Under §3.5 we again own superblock,
-node and chunk parsing, but the prototype's versions are rewritten from
+empirical results* are worth carrying. Under §3.5 we own the whole substrate
+(superblock, node, chunk, extent and decompression code), but the
+prototype's versions are rewritten from
 scratch against the spec (they carry defects #1–#8), not migrated. Nothing
 is physically deleted until its replacement passes the same tests.
 
@@ -240,14 +377,14 @@ logic — port carefully with byte-identical behaviour, golden-tested),
 |---|---|---|---|
 | `utils/crc32c.py` | 33 | **DELETE** | Replaced by `crc32c` PyPI (SSE4.2) behind `substrate/csum.py` dispatch (all 4 types). Keep only the RFC-3720 test vectors as an oracle. |
 | `utils/superblock.py` | 93 | **REWRITE** | `substrate/superblock.py`: all mirrors, csum-validated, best-copy selection, incompat/compat_ro gate, backup roots. The prototype reads only the primary and validates nothing. |
-| `utils/constants.py` | 172 | **REWRITE** | `substrate/ondisk.py`: one table of offsets/keys, each asserted by a test against kernel `btrfs_tree.h` v7.0 values (the hand-kept table caused the DEV_ITEM defect). |
-| `utils/inode_parser.py` | 132 | **DELETE** | dissect's `btrfs_inode_item` struct (via the adapter) or a `struct` format in `ondisk.py`; fixtures migrate as tests. |
+| `utils/constants.py` | 172 | **REWRITE** | `substrate/ondisk.py`: our own `struct` format tables plus offsets/keys, each asserted by a test against kernel `btrfs_tree.h` v7.0 values (the hand-kept table caused the DEV_ITEM defect). |
+| `utils/inode_parser.py` | 132 | **DELETE** | A `struct` format table for `btrfs_inode_item` in `substrate/ondisk.py`; fixtures migrate as tests. |
 | `utils/tree_walker.py` | 87 | **REWRITE** | `substrate/tree.py`: walker over `ValidatedNode`s from any bytenr, with per-hop validation records (dissect's `BTree` validates nothing). |
 | `utils/chunk_parser.py` — chunk map + logical→physical | ~200 of 281 | **REWRITE** | `substrate/chunks.py`: all RAID stripe math for healthy reads, map objects keyed by source (current / historical) so M5 can add reconstructed maps. |
 | `utils/chunk_parser.py` — `build_scan_regions()` (typed chunks + unmapped gaps) | ~80 of 281 | **MIGRATE** | Novel: the typed-region + relocated-chunk-gap logic behind the 21/71 finding. Port to `scan/regions.py`, add the MIXED_GROUPS fix and block-group-tree (tree 11) input. |
 | `utils/btree.py` — raw sweep loop | ~200 of 968 | **REWRITE** | Concept (strided FSID+csum sweep) survives; replaced by the numpy/mmap kernel (`scan/kernel_numpy.py`). |
 | `utils/btree.py` — orphan-item scan (beyond `nritems`), internal key-ptr scan, leaf/internal slack mining | ~400 of 968 | **MIGRATE** | **The crown jewels** — the capability Beyond Carving dismisses as an "edge case" and SecurityRonin lacks. Port to `recover/orphans.py` + `recover/slack.py`, golden-tested against legacy output. |
-| `utils/btree.py` — item parsing + inline/regular extract | ~350 of 968 | **REWRITE** | Parsing on our item tables; extraction via dissect streams. **Keep the ideas:** `(inode, generation)` keying, move/rename tagging, extent dedup. **Defect #8** (EXTENT_ITEM logical address is the key *objectid*; the key offset is the length) must be fixed in the rewrite and must **not** be frozen into golden tests. |
+| `utils/btree.py` — item parsing + inline/regular extract | ~350 of 968 | **REWRITE** | Parsing on our item tables; extraction via `substrate/extents.py` + `compress.py` (the prototype saved compressed extents raw). **Keep the ideas:** `(inode, generation)` keying, move/rename tagging, extent dedup. **Defect #8** (EXTENT_ITEM logical address is the key *objectid*; the key offset is the length) must be fixed in the rewrite and must **not** be frozen into golden tests. |
 | `utils/orphan_scan.py` — live-metadata set via extent tree | 109 | **MIGRATE** | The "currently allocated" complement that defines orphan territory. Reparent onto `substrate/tree.py` in `scan/live_set.py`; also read tree 11. |
 | `utils/recovery_report.py` | 230 | **REWRITE** | Flat counters → the SQLite evidence catalog + provenance/confidence report (M3/M6). |
 | `main.py` | 201 | **REWRITE** | New CLI (subcommands: `info`/`scan`/`catalog`/`recover`/`timeline`/`detect-hiding`) over the new pipeline. |
@@ -261,7 +398,8 @@ logic — port carefully with byte-identical behaviour, golden-tested),
   report, CLI).
 
 The defensible ~590 lines are still what the paper is about. The rewrite
-share grew because validation is now ours (§3.5).
+share grew because validation, extent reads and decompression are now ours
+(§3.5).
 
 ### 4.2 Also delete / untrack (non-code)
 
@@ -275,8 +413,9 @@ share grew because validation is now ours (§3.5).
 - Prototype's "defrag hazard" heuristic — **do not migrate as-is**: it was
   mis-attributed to Wani 2020 (research.md §8.4). Re-derive or drop.
 - `feature/m1-backup-roots` — leave unmerged. Its useful content is carried
-  as spec/tests in M1 (research.md §10.5). Tagging it `m1-prototype` is the
-  recommended non-destructive option (manager action).
+  as spec/tests in M1 (research.md §10.5). **Done 2026-09-15:** annotated
+  tag `m1-prototype` created and pushed to origin, pointing at the branch
+  tip `1e9984e`; the branch is kept.
 
 ### 4.3 Migration-done gate (end of M4)
 
@@ -292,7 +431,8 @@ mirrors, and backup-root walking. When that gate is green, tag
 
 Each milestone = one feature branch + PR + catalog.md entry (+ an
 `experiments/EXP-NNN.md` record for every measured result, §7). Estimates
-assume one focused developer. `corpus/vm/` is used from M0 on (§6.2).
+assume one focused developer. `corpus/vm/` is linted in CI from M0 and
+generates images from M1 on (§6.2).
 
 ### M0 — Reset & scaffolding (~2 days)
 
@@ -306,8 +446,10 @@ forensic logic.
 1. **Freeze legacy.** First run
    `uv run --python 3.14 python -m unittest discover -s tests` on the
    untouched tree and record the test count and result in the M0 catalog
-   entry (the acceptance baseline); that run writes `test_output_*` dirs at
-   the repo root — delete them afterwards. Then
+   entry (the acceptance baseline). The integration and targeted-scan
+   suites create their `test_output_*` dirs at the repo root and remove them
+   again in `tearDownClass`; confirm with `git status` that none are left.
+   Then
    `git mv main.py legacy/main.py && git mv utils legacy/utils && git mv tests legacy/tests`.
    Remove stray `legacy/utils/__pycache__`, `legacy/tests/__pycache__`
    (untracked).
@@ -318,17 +460,24 @@ forensic logic.
    - `legacy/tests/test_integration.py`: `SANDBOX_IMG` → repo root
      (`dirname` ×3); `TEST_OUTPUT` → `<repo>/images/scratch/legacy-tests/integration`.
    - `legacy/tests/test_targeted_scan.py`: `SANDBOX_IMG` → repo root;
-     `TEST_OUT` → `<repo>/images/scratch/legacy-tests/targeted`.
+     `TEST_OUT` → `<repo>/images/scratch/legacy-tests/targeted` (the suite
+     appends `_legacy` / `_targeted` itself).
 
-   Output dirs must be created with `os.makedirs(..., exist_ok=True)`. No
-   other legacy edits.
+   These four constants are the only legacy edits. No `makedirs` change is
+   needed: `test_integration.py` already calls
+   `os.makedirs(TEST_OUTPUT, exist_ok=True)`, `test_targeted_scan.py`
+   removes any old dir and then calls `os.makedirs(d)`, and `os.makedirs`
+   creates the missing `images/scratch/legacy-tests/` parents. The
+   `sys.path.insert(0, dirname(dirname(__file__)))` line in all four legacy
+   test files stays as is: after the move it points at `legacy/`, which is
+   what makes `import utils` resolve.
 3. **Untrack non-code artifacts.**
    - `git rm -r --cached recovery_output`, keeping local files.
    - Add `recovery_output/`, `.pytest_cache/`, `.ruff_cache/` to
      `.gitignore`.
    - `rmdir mnt_sandbox`.
-   - `git rm commands.txt` after task 8 copies its `uv run` lines into
-     README.
+
+   (`commands.txt` is removed in task 8, once README has absorbed it.)
 4. **Package skeleton** (src layout):
    - `src/btrfska/__init__.py` — `__version__ = "0.0.1"`.
    - `src/btrfska/__main__.py` — `from btrfska.cli import main; raise SystemExit(main())`.
@@ -342,8 +491,10 @@ forensic logic.
 5. **`pyproject.toml`** (replace):
    - `[project]` `name = "btrfska"`, `version = "0.0.1"`,
      `requires-python = ">=3.14"`,
-     `license = "AGPL-3.0-or-later"`, `dependencies = []`
-     (dissect/numpy/crc32c/xxhash are added in M1/M2 when first used).
+     `license = "Apache-2.0"`, `license-files = ["LICENSE"]`,
+     `dependencies = []` (`crc32c`/`xxhash` are added in M1 and `numpy` in
+     M2; the dissect.btrfs and lzallright oracles join the `dev` group in
+     M1).
    - `[project.scripts]` `btrfska = "btrfska.cli:main"`.
    - `[build-system]` `requires = ["uv_build>=0.11,<0.12"]`,
      `build-backend = "uv_build"`.
@@ -357,8 +508,20 @@ forensic logic.
    - `[tool.ruff.lint]` `select = ["E", "F", "W", "I", "B", "UP"]`.
 
    Then `uv lock`, which regenerates `uv.lock`.
-6. **LICENSE.** Add the verbatim GNU AGPL-3.0 text as `LICENSE`, copied from
-   `https://www.gnu.org/licenses/agpl-3.0.txt`.
+
+   **Then format `corpus/` (formatting-only change, its own commit).** With
+   the ruff config above in place, `corpus/vm/probe_stale_metadata.py` is
+   the only tracked Python file outside `legacy/` that fails
+   `ruff format --check` (ruff 0.16.7, checked 2026-09-15: a blank line after
+   the docstring and inline-comment spacing). It already passes
+   `ruff check`. Run `uv run ruff format corpus/`, confirm that
+   `git diff --stat` touches only tracked `corpus/**/*.py`, and commit it
+   alone as "Apply ruff formatting to corpus scripts (no functional
+   change)". If `images/scenarios/s01_discard_none.img` exists locally,
+   re-run the probe on it before and after and compare the four numbers.
+   Shell scripts are not reformatted.
+6. **LICENSE.** Add the verbatim Apache License 2.0 text as `LICENSE`,
+   copied from `https://www.apache.org/licenses/LICENSE-2.0.txt` (§3.3).
 7. **New tests** (`tests/`, plus a repo-root `conftest.py` so the hash guard
    also covers `legacy/tests`):
    - `conftest.py` (repo root):
@@ -383,32 +546,45 @@ forensic logic.
    - pointers to `plan.md`, `research.md`, `catalog.md`, `corpus/vm/README.md`.
 
    Drop the prototype feature description (it lives in git history and
-   `legacy/`).
+   `legacy/`). Also:
+   - the licence line (Apache-2.0) and the `corpus/vm` smoke command
+     (below, local only);
+   - fold `commands.txt`'s two "running at once" `uv run` lines into a
+     legacy subsection (paths updated to `legacy/`), drop its `sudo mount`
+     recipe (research.md §10.4), then `git rm commands.txt`.
 9. **CI fixture.** Add `tests/fixtures/sandbox.img.zst`, produced by
    `zstd -19 -c sandbox.img > tests/fixtures/sandbox.img.zst`. It is
-   **~15 KB**, and the round-trip sha256 was verified byte-exact on
-   2026-09-15. Add `tests/fixtures/SHA256SUMS` with the sandbox hash.
-   *Owner sign-off required* (it tracks a compressed copy of an image that
-   is gitignored today). If declined, CI runs without `sandbox`-marked tests
-   (they skip) and the local pre-merge gate below becomes the only sandbox
-   check.
+   **~15 KB** (14 963 bytes), and the round-trip sha256 was verified
+   byte-exact on 2026-09-15. Add `tests/fixtures/SHA256SUMS` with the
+   sandbox hash. **Decided 2026-09-15: tracked.** `sandbox.img` itself stays
+   gitignored; only this compressed copy is committed. The local pre-merge
+   gate (§6.1) still runs too.
 10. **CI** `.github/workflows/ci.yml` (outline):
     - triggers: `push` to `main`, `pull_request`;
     - one job `test` on `ubuntu-24.04`, `permissions: contents: read`;
     - steps:
-      - `actions/checkout@v4`;
-      - `astral-sh/setup-uv@v6` with `enable-cache: true`;
+      - `actions/checkout@v7` (current major; v7.0.1, 2026-07-20);
+      - `astral-sh/setup-uv@v10` (current major; v10.1.0, 2026-09-10) with
+        `enable-cache: true` (v10 only changed the `auto` default, which
+        disables caching for `pull_request_target`, `workflow_run` and
+        `release`);
       - `uv python install 3.14`;
       - `uv sync --locked`;
       - `uv run ruff check .`;
-      - `uv run ruff format --check .`;
-      - restore fixture (only if task 9 landed):
+      - `uv run ruff format --check .` (covers `corpus/` Python);
+      - `corpus/vm` shell syntax check:
+        `for f in corpus/vm/*.sh corpus/vm/scenarios/*.sh corpus/vm/init; do sh -n "$f"; done`
+        (passes today). `shellcheck` is not a gate yet: 0.9.0 reports style
+        notes (SC2086, SC2015) and SC2148 on the sourced `*.guest.sh` files,
+        and fixing those is a script change, not M0 work;
+      - restore fixture:
         `zstd -dc tests/fixtures/sandbox.img.zst > sandbox.img && sha256sum -c tests/fixtures/SHA256SUMS`
         — decompresses to the gitignored repo-root path inside the checkout;
       - `uv run pytest`;
       - `uv run python -m unittest discover -s legacy/tests`;
       - `uv run btrfska --help`.
-    - No KVM/`corpus/vm/` job in M0 (scheduled `vm` job arrives in M7).
+    - No image generation in CI: hosted runners are not assumed to expose
+      `/dev/kvm` (the scheduled `vm` job arrives in M7).
 11. **Catalog entry** for M0 with the acceptance outputs below.
 
 **Commands (canonical, used in README and CI).**
@@ -421,11 +597,17 @@ uv run python -m unittest discover -s legacy/tests     # legacy suite, original 
 uv run --python 3.14 python legacy/main.py sandbox.img -o images/scratch/legacy-out   # legacy CLI
 uv run btrfska --help
 uvx --from . btrfska --version
+# corpus/vm smoke test: local only (needs /dev/kvm), not run in CI; output under images/
+corpus/vm/fetch_vm.sh && corpus/vm/build_initramfs.sh && corpus/vm/make_image.sh smoke_s01
 ```
 
 **Acceptance checks (all must pass, outputs pasted into the catalog entry).**
 - `uv sync --locked` succeeds from a clean clone.
-- `uv run ruff check .` and `uv run ruff format --check .` → no findings.
+- `uv run ruff check .` and `uv run ruff format --check .` → no findings
+  (the task-5 formatting commit changes only tracked `corpus/**/*.py`).
+- The `corpus/vm` `sh -n` loop exits 0. If `/dev/kvm` is available locally,
+  the smoke command prints `images/scenarios/smoke_s01.img`; record this in
+  the catalog, but it is not a merge gate.
 - `uv run pytest` → 0 failures. With `sandbox.img` present, the legacy
   integration and targeted-scan tests **run** (not skip). Confirm with
   `-ra`: the skip summary lists no `sandbox.img not found`.
@@ -434,8 +616,10 @@ uvx --from . btrfska --version
 - `uvx --from . btrfska --version` prints `0.0.1`; `uv run btrfska info
   sandbox.img` prints the sha256 `07ca38d4…5876418`.
 - `sha256sum sandbox.img` unchanged after the whole run.
-- `git status` shows no files created outside `src/ tests/ legacy/
-  .github/ LICENSE README.md pyproject.toml uv.lock .gitignore catalog.md`;
+- `git status` shows no files created or modified outside `src/ tests/
+  legacy/ corpus/ .github/ conftest.py LICENSE README.md pyproject.toml
+  uv.lock .gitignore catalog.md`, apart from the planned removals
+  (`commands.txt`, untracked `recovery_output/`, the moved prototype files);
   test output only under `images/scratch/`.
 - CI green on the PR.
 
@@ -466,7 +650,12 @@ and proven against ground truth.
 
    Record hardening-backlog items as later tasks: backup-root scan
    fallback, SB mirrors, richer second image, TREE_BLOCK_REF coverage.
-2. **On-disk tables** `substrate/ondisk.py`:
+2. **On-disk tables** `substrate/ondisk.py` (our own `struct` format
+   strings; no cstruct definitions):
+   - layouts for superblock, backup root, header, key, item, key pointer,
+     inode item, inode ref/extref, dir item, root item/ref, file extent
+     item, chunk + stripe, dev extent, block group, extent/metadata item and
+     inline refs, with sizes asserted (e.g. inode item 160 B, item 25 B);
    - offsets, csum sizes, item keys incl. 172, 230, 234–236;
    - objectids 11, 12, 13;
    - incompat bits incl. RST `1<<14`, ETv2 `1<<13`, simple quota
@@ -474,7 +663,8 @@ and proven against ground truth.
    - compat_ro bits incl. BGT `1<<3`;
    - values asserted against kernel v7.0 `btrfs_tree.h` / `fs.h`
      (research.md §10.3).
-3. **Csum dispatch** `substrate/csum.py`: crc32c / xxhash64 / sha256 /
+3. **Csum dispatch** `substrate/csum.py` (adds the `crc32c` and `xxhash`
+   runtime deps): crc32c / xxhash64 / sha256 /
    blake2b-256 over `[0x20:]` of superblock and tree blocks, and over data
    sectors. Test vectors: RFC-3720 CRC vectors, plus one known-good block
    per type from generated images.
@@ -503,16 +693,45 @@ and proven against ground truth.
    - walk from any bytenr with per-hop validation;
    - backup roots parsed and **sorted by generation, never slot**;
    - enumerate subvolumes via ROOT_ITEM/ROOT_REF/ROOT_BACKREF.
-8. **dissect adapter** `substrate/dissect_adapter.py`:
-   - add `dissect.btrfs[full]==1.10.*`, `crc32c`, `xxhash` deps;
-   - file streams from a chosen (validated) fs-tree root;
-   - drift test: adapter bytes == our extent read on every file of
-     `sandbox.img` and `s01`;
-   - import-boundary test: no other module imports `dissect`.
+8. **Extent reads + decompression** `substrate/extents.py`,
+   `substrate/compress.py`, `substrate/lzo.py` (§3.5):
+   - EXTENT_DATA → bytes for inline, regular and prealloc extents and holes
+     (explicit and NO_HOLES-implicit), honouring `offset`, `num_bytes` and
+     `ram_bytes`, through any `ChunkMap`; every read carries a record (map
+     source, physical ranges, compression, decode outcome);
+   - zlib via `zlib.decompressobj` and zstd via
+     `compression.zstd.ZstdDecompressor`, both capped at `ram_bytes`; LZO
+     via the btrfs segment framing (§3.5) over `lzo.py`; output length is
+     checked against `ram_bytes`, and failures become `DecodeError(kind)`
+     records, never truncated or padded content;
+   - `lzo.py`: an LZO1X decoder written from the kernel's
+     `Documentation/staging/lzo.rst` bitstream description, with
+     input-overrun, output-overrun, lookbehind-overrun and
+     missing-end-marker checks, raising only `LzoError`;
+   - unit tests (`tests/test_lzo.py`, `tests/test_compress.py`):
+     - dissect.util 3.24 LZO vectors (Apache-2.0, attributed);
+     - the crafted lookbehind stream `15 41 42 43 44 40 FF 11 00 00` and a
+       truncated stream raise `LzoError`;
+     - property test: random and bit-flipped streams raise only
+       `LzoError`/`DecodeError` and never exceed the output bound;
+     - framing tests for the 1–3-byte sector-tail padding;
+   - add `dissect.btrfs==1.10.*` and `lzallright==0.2.*` to the `dev`
+     dependency group (test oracles only, §3.3);
+   - oracle tests (`tests/oracle/`, skipped when the dev group is absent):
+     - lzallright round-trip fuzz (seeded, ≥ 2 000 vectors, identical
+       output);
+     - every file in the current tree and snapshots of `sandbox.img`,
+       `m1_xxhash` (zstd), `m1_lzo` and `m1_zlib`: our bytes == dissect.btrfs
+       stream bytes, and == the guest-printed SHA-256 where the scenario
+       printed one;
+   - import-boundary test: nothing under `src/` imports `dissect` or
+     `lzallright`.
 9. **M1 corpus images via `corpus/vm/`** (all under `images/scenarios/`):
    - `m1_xxhash` (s01, `CSUM=xxhash`);
    - `m1_sha256_bgt` (`CSUM=sha256 MKFS_ARGS="-O block-group-tree"`);
    - `m1_blake2b`;
+   - `m1_lzo` (s01 with `MOUNT_OPTS=compress-force=lzo,commit=5`) and
+     `m1_zlib` (`compress-force=zlib,commit=5`), for task 8;
    - `m1_badnode`: copy of `m1_xxhash` with one leaf byte flipped by a
      committed script `corpus/mutate.py` that writes only to a new file under
      `images/`;
@@ -539,6 +758,9 @@ and proven against ground truth.
   `UNSUPPORTED_INCOMPAT` line.
 - `m1_badnode` reports a csum failure for that node instead of items.
 - `m1_mirror_damage` selects mirror 1 and reports it.
+- Task-8 oracle tests are green: every file on `sandbox.img`, `m1_xxhash`
+  (zstd), `m1_lzo` and `m1_zlib` reads byte-identical to dissect.btrfs and
+  to the guest SHA-256s; the LZO property tests pass.
 - Import-boundary and read-only tests pass; `sandbox.img` hash unchanged.
 
 ### M2 — Scan kernel v1 (~1 week)
@@ -553,10 +775,18 @@ and proven against ground truth.
   instead of stdout. Also record owner-13 (remap) and owner-12 (RST) blocks
   when present, unparsed.
 - Discard axis first use: scan the three `s01_discard_{none,async,sync}`
-  images; the stale-block count must match `probe_stale_metadata.py` within
-  the documented ±2 jitter (EXP-002).
+  images (EXP-002).
+  - On each image, our stale-block count must *equal*
+    `probe_stale_metadata.py` run on that same image: this is a
+    deterministic parse, so no tolerance applies.
+  - Across regenerated images, counts are compared with EXP-000's per-column
+    median and range from ≥ 5 runs. Any tolerance is that measured range,
+    not a fixed number: the two cited runs already differ by 2 in columns
+    1–3 and by 4 in column 4.
 - **DoD:**
   - sandbox parity: 71 orphans, 21 outside map, identical offsets;
+  - discard trio: exact per-image agreement with the probe; cross-run
+    numbers reported as median and range next to EXP-000;
   - ≥200 MB/s single-core on a synthetic 10 GiB image generated under
     `images/`;
   - benchmark script committed.
@@ -582,8 +812,8 @@ and proven against ground truth.
   flow through it; reverse queries answered without re-reading the image.
 
 ### M4 — Recovery engines (~1–2 weeks)
-- Anchored recovery: extract files from any cataloged root via the dissect
-  adapter (compression handled), `-m`-style metadata, xattrs (0x18),
+- Anchored recovery: extract files from any cataloged root via
+  `substrate/extents.py` (compression handled), `-m`-style metadata, xattrs (0x18),
   INODE_EXTREF (0x0D); `FT_ENCRYPTED` 0x80 masked; encrypted extents
   refused with a report line.
 - Archaeology port: beyond-`nritems` orphan items (leaf + internal),
@@ -661,11 +891,20 @@ and proven against ground truth.
   - **discard {none: no virtio unmap; async quick-unmount: `DISCARD=1`;
     async idle: `DISCARD=1` + ≥ 130 s idle before unmount; sync:
     `discard=sync`}** plus a `nodiscard` mount-option control row;
+  - **reclaim {off: kernel default, `bg_reclaim_threshold` 0 and dynamic/
+    periodic reclaim off; on: enabled inside the guest through the per-fs
+    `allocation/data/` sysfs knobs before the churn phase}** (research.md
+    §10.3, §10.6 item 3). Exact knob names are confirmed against v7.0
+    `fs/btrfs/sysfs.c` when the scenario is written. Reclaim is automatic
+    relocation, so it is the unattended counterpart of the explicit
+    `balance` operation;
   - MIXED_GROUPS small fs;
   - multi-device RAID1.
 
   Use a full factorial only where the axis interacts with recovery
-  (discard × operation; BGT × balance); otherwise one-factor-at-a-time from
+  (discard × operation; BGT × balance; reclaim × discard, because a
+  reclaimed, now-unused block group becomes async-discard-eligible after
+  10 s); otherwise one-factor-at-a-time from
   a base configuration.
 - **btrfs-specific recoverability axes** (Bhat & Wani 2018, research.md
   §4.6):
@@ -803,8 +1042,10 @@ Views:
 ### 6.2 Corpus from M0/M1 onward
 
 - `corpus/vm/` (rootless QEMU/KVM, stock 7.0.0-31 guest; research.md §10.4)
-  is the only image generator. M1 uses it for csum-type, BGT, corrupted and
-  mirror-damage images; M2 uses the discard trio; M4 the beyond-4-generations
+  is the only image generator. M0 lints it in CI (`ruff` for its Python,
+  `sh -n` for its shell scripts) and documents a local smoke command; image
+  generation starts in M1, which uses it for csum-type, BGT, compression,
+  corrupted and mirror-damage images; M2 uses the discard trio; M4 the beyond-4-generations
   image; M5 the balance image; M7 scales it to the full matrix.
 - Every generated image gets a `corpus/manifest.tsv` row (name, command,
   host mkfs version, guest kernel, sha256); tests reference images by name
@@ -817,9 +1058,14 @@ Views:
 
 ### 6.3 Other test layers
 
-- **Differential testing:** our anchored listings vs `btrfs inspect-internal
-  dump-tree` on healthy images; dissect stream bytes vs our extent reads
-  (M1 drift test).
+- **Differential testing** (oracles are dev-only, never runtime):
+  - our anchored listings vs `btrfs inspect-internal dump-tree` on healthy
+    images;
+  - our file bytes vs dissect.btrfs streams and guest-printed SHA-256s;
+  - our LZO1X decoder vs `lzallright` (M1 task 8).
+
+  Oracle tests live in `tests/oracle/` and skip when the dev group is not
+  installed.
 - **Property tests** on parsers: random valid+corrupt nodes must never
   crash (adversarial-input safety, also a paper claim).
 - CI runs the full suite on small images; 100 GiB and full-matrix scenarios
@@ -842,21 +1088,35 @@ and copies its headline numbers.
 3. **Image / scenario** — `corpus/manifest.tsv` row(s): generator command,
    guest kernel, host mkfs version, csum, features, mount/discard options,
    image sha256.
-4. **Exact command** — copy-pasteable, from repo root, with the tool
-   version / git commit.
-5. **Result numbers** — a table with N repetitions, and median plus min–max
-   (or ± spread). State N.
-6. **Threats to validity** — internal (timing jitter, host caching,
+4. **Environment record**, pasted verbatim from a committed
+   `experiments/env.sh` (added with EXP-000):
+   - host CPU model/cores, RAM, and the storage device and filesystem
+     backing `images/`;
+   - host kernel (`uname -r`);
+   - QEMU version;
+   - guest kernel;
+   - btrfs-progs version (host mkfs and guest `btrfs --version`);
+   - Python version and `uv.lock` sha256;
+   - tool git commit, with a dirty-tree flag;
+   - image sha256 before and after.
+5. **Exact command** — copy-pasteable, from repo root.
+6. **Result numbers** — a table with N repetitions giving, for each reported
+   column, the median and the range (min–max). State N.
+7. **Threats to validity** — internal (timing jitter, host caching,
    single-image effects), external (stock kernel, virtio vs real SSD/HDD,
    image size), construct (does the metric measure recoverability?).
-7. **Status** — supports / refutes / inconclusive; follow-ups.
+8. **Status** — supports / refutes / inconclusive; follow-ups.
 
 **Reproducibility rule.** A number may enter the paper **only if a committed
 script regenerates it** from a committed or generated image. Guest-driven
-scenarios are not bit-stable: the §10.4 discard table varied by ~±2 blocks
-across repetitions (367/355/18/832 vs 365/353/16/828). So:
+scenarios are not bit-stable. Two runs of the §10.4 "no discard" row gave
+367/355/18/832 and 365/353/16/828: a difference of 2 in columns 1–3 and of 4
+in column 4. The spread differs per column, so no single "± N blocks" figure
+is used. Rules:
 - run every guest-driven measurement ≥ 5 times;
-- report median and range;
+- report, per column, the median and the range (min–max);
+- set any DoD or test tolerance from the measured per-column range of those
+  runs (recorded in the EXP record), never from a fixed number;
 - claim effects at the resolution the spread supports;
 - never quote a single run as a constant.
 
@@ -900,15 +1160,17 @@ and need one run plus the image hash.
 |---|---|
 | **Realised:** a Rust forensic library (`SecurityRonin/btrfs-forensic`) ships backup-root deletion diffing and graded findings | Claims C3/C4 re-worded (§1); move M5 early; benchmark it (M7); keep C1/C6 btrfs-specific |
 | Beyond Carving team ships their future work first (code repo created, still empty) | M4/M5 prototyped; watch repo; publish corpus fast (C7 uncontested) |
-| Our own parsing/validation layer has bugs dissect didn't | Differential tests vs `dump-tree` and dissect streams; property tests; csum-type images from M1 |
-| dissect.btrfs drift / abandonment / AGPL concerns | Single adapter module + drift test; pin `1.10.*`; fallback §3.5 |
+| Our own parsing, extent-read or LZO/stream code has bugs a mature library would not | Differential tests vs `dump-tree`, dissect.btrfs streams, `lzallright` and guest SHA-256s; property tests on hostile input; csum-type and compression images from M1; §3.5 fallback ladder (lzallright at runtime, then dissect.btrfs at runtime with an AGPL relicence) |
+| dissect.btrfs (test oracle) drifts or is abandoned | Pinned `1.10.*` in the `dev` group; guest SHA-256s and `dump-tree` are independent oracles, so losing it costs one cross-check, not a runtime feature |
+| Decoding "succeeds" on corrupted compressed data (LZO has no integrity check: 139–160 of 300 bit-flipped streams decoded to wrong bytes in all three decoders tested, §3.5) | Decode success never raises confidence; content is Confirmed only by a data-checksum match (M6); decoder errors are recorded, not hidden |
+| Licence ambiguity from test-only AGPL use | Oracle confined to the `dev` group and `tests/oracle/`; import-boundary test on `src/`; sdist contents checked before release (§3.3) |
 | New format features mis-read (remap tree, RST, fscrypt) | Incompat gate refuses unknown/unsupported bits (M1); later research items |
 | Discard destroys evidence on real media (sync: ~91 % stale metadata gone) | Discard axis in corpus + observed-discard input to overwrite-risk score and report caveat |
 | Scan performance disappoints on real HDD images | Kernel interface frozen — Rust core can be pulled forward |
 | Ambiguity explosion in orphan graph on real-world images | Confidence tiers are the *product* of ambiguity; cap reconstruction depth, report Unattached honestly |
 | Guest-scenario jitter undermines numbers | §7 repetition + spread rule; deterministic claims only from fixed images |
 | Corpus not representative (stock 7.0 guest, virtio) | Mirror Kim et al. methodology + btrfs axes; state as threat to validity; DFRWS artifact review feedback |
-| `sandbox.img` not tracked in git → CI blind to golden numbers | ~15 KB `.zst` fixture (owner sign-off, M0 task 9) or local pre-merge gate |
+| `sandbox.img` not tracked in git → CI blind to golden numbers | Resolved: the ~15 KB `.zst` fixture is tracked (M0 task 9) and hash-checked in CI, plus the local pre-merge gate |
 | Single maintainer bandwidth | Track R before Track P; GUI only after CLI stabilises; every milestone independently shippable |
 
 ## 10. Working Conventions

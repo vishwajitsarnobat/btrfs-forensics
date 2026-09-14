@@ -42,7 +42,10 @@
    three compressions, and `BTree(root_offset=…)` opens a tree at **any
    bytenr** — exactly the primitive anchored historical walking needs. It
    has **no recovery logic and no checksum verification** — which is the
-   space our contribution occupies (§2.2).
+   space our contribution occupies (§2.2). **Refined in plan.md §3.5
+   (2026-09-15):** dissect.btrfs maps only through its own current chunk
+   tree, so it is kept as a test oracle only; all runtime parsing, extent
+   reads and decompression are ours, and the tool is Apache-2.0 (§10.6).
 4. **Sleuth Kit upstream has no Btrfs support at all** — PR #413 (2015) was
    closed unmerged in Oct 2024; only the dead FKIE fork (last push 2022) has
    it. "TSK can't parse Btrfs" is the standard baseline claim in this
@@ -119,6 +122,8 @@ Verified by reading `btrfs.py`, `tree.py`, `stream.py`:
   verification** of nodes, xattr public API, degraded RAID56.
 - **Verdict: library / fork-extend — the strongest Python substrate.**
   Constraint: AGPL-3.0 propagates to a tool that imports it.
+  **Refined 2026-09-15 (plan.md §3.3, §3.5):** used as a test oracle only,
+  not imported at runtime.
 
 ### 2.3 The Sleuth Kit — C/C++, CPL/IBM-PL, **no upstream Btrfs**
 
@@ -819,6 +824,10 @@ rejected for now (kills notebook-driven research iteration and slows the
 paper); all-Go and Zig rejected; building on dissect.btrfs adopted with the
 AGPL-3.0 consequence accepted (see plan.md §3.3 for the license analysis).
 
+> **Superseded 2026-09-15:** plan.md §3.5 now owns all runtime parsing,
+> extent reads and decompression, keeps dissect.btrfs as a test oracle only,
+> and plan.md §3.3 licenses the tool Apache-2.0 (see §10.6).
+
 ---
 
 ## 8. Prototype Audit (carried forward from 2026-08-14, still open)
@@ -1096,7 +1105,8 @@ Note: the `docs/*.pdf` files are **tracked in git**, not ignored.
   LFS — need `git lfs pull`.
 - Verdict unchanged (substrate), but **the trust layer is entirely ours**:
   node validation wrapper, csum dispatch, incompat-flag gate, mirror
-  selection, historical chunk maps.
+  selection, historical chunk maps. (Refined further by plan.md §3.5: test
+  oracle only; see §10.6.)
 
 **rustutils/btrfsutils** — **stalled**. Last push and release v0.13.0 on
 2026-05-14, nothing since; 14 stars. Crates `btrfs-disk`, `btrfs-fs`
@@ -1334,9 +1344,12 @@ The whole pipeline was re-run end to end on 2026-09-15: a fresh
 first measurement (355/355/31, 18/18/2, 832/832/107) on that run.
 - **Run-to-run jitter:** the rows are not bit-stable. In an independent
   review re-run of 4 repetitions, one "none" row gave 365/353/16/828 (the
-  others 367/355/18/832): commit timing inside the guest shifts a couple of
-  blocks. Report these as representative values (±2 blocks), not constants;
-  the order-of-magnitude effect of `discard=sync` is the finding.
+  others 367/355/18/832): commit timing inside the guest shifts a few
+  blocks, by 2 in columns 1–3 and by 4 in column 4. Report these as
+  representative values, not constants; the spread is per column, so
+  plan.md §7 requires a per-column median and range from ≥ 5 runs rather
+  than a fixed "±2". The order-of-magnitude effect of `discard=sync` is the
+  finding.
 - Column 1 is one lower than first reported (368/368/44). The committed
   probe skips superblock copies (0x10000, and 64 MiB on these 512 MiB
   images); why the original ad-hoc probe (not kept) counted exactly one more
@@ -1426,9 +1439,25 @@ block-group tree (objectid 11).
   (4) the hardening backlog items — backup-root scan fallback, SB mirrors,
   richer second image, TREE_BLOCK_REF coverage — which plan.md M1/M7 mostly
   already cover. Recommend a `catalog.md` note and leaving the branch
-  unmerged (optionally tag it `m1-prototype` for reference).
+  unmerged (optionally tag it `m1-prototype` for reference). **Done
+  2026-09-15:** annotated tag `m1-prototype` pushed to origin, pointing at
+  `1e9984e`; the branch is kept.
 
 ### 10.6 Impact on plan (recommended changes to plan.md, ranked)
+
+> **Refined by plan.md (2026-09-15, after review).** Item 1's "trust layer
+> over dissect.btrfs" and the §10.2 substrate verdict were narrowed to
+> **dissect.btrfs as a test oracle only** (plan.md §3.5). Reasons:
+> dissect maps every read through its own current chunk tree, with no API to
+> route reads through a validated reader or a historical chunk map; M1 needs
+> our own extent reads anyway; and zlib/zstd are in the Python 3.14 stdlib.
+> The last piece, LZO1X, is decoded by our own bounds-checked decoder:
+> dissect.util's native LZO decoder panicked on corrupt input
+> (`PanicException`, 58/300 bit-flipped streams), and its pure-Python
+> decoder silently accepted an out-of-range back-reference. All runtime
+> parsing, extent reads and decompression are ours, and the tool is
+> licensed **Apache-2.0** (plan.md §3.3). Item 9's AGPL concern is therefore
+> moot unless the plan's runtime fallback is taken.
 
 1. **M1 — add a node-validation trust layer over dissect.btrfs, and make it
    the M1 DoD.**
@@ -1442,7 +1471,7 @@ block-group tree (objectid 11).
      (block-group tree) wherever block groups are needed.
    - DoD additions: an unknown-flag image is refused; a corrupted-node image
      reports a csum failure instead of items.
-2. **§1 claims table + §7 positioning — re-word C3 and C4, and cite the new
+2. **plan §1 claims table + plan §8 positioning — re-word C3 and C4, and cite the new
    prior art.**
    - Rationale: backup-root deletion diffing is now shipped by
      `SecurityRonin/btrfs-forensic` (and Beyond Carving); graded findings /
@@ -1453,9 +1482,9 @@ block-group tree (objectid 11).
      anchored *and* unanchored artifacts, csum-tree verified".
    - Keep C1/C6 explicitly btrfs-specific; cite Prade 2020 / Bonnet 2026 /
      Oh & Hwang 2025 as CoW analogs.
-   - Update §8 Risks: "a Rust forensic library adds our anchored features" is
-     now a realised risk — mitigation is to move M5 (orphan graph, historical
-     chunk maps) earlier, as §8 already suggests.
+   - Update plan §9 Risks: "a Rust forensic library adds our anchored
+     features" is now a realised risk — mitigation is to move M5 (orphan
+     graph, historical chunk maps) earlier, as plan §9 already suggests.
 3. **M7 corpus — adopt the rootless QEMU/KVM generator (§10.4) now, and add
    discard as a first-class axis.**
    - Rationale: measured stale-metadata survival is 355 → 31 under
@@ -1468,7 +1497,7 @@ block-group tree (objectid 11).
      outputs (tooling, images, logs) stay under the gitignored `images/`
      per the project-owner rule.
    - Use the generator from M1 on for the xxhash/zstd/relocation DoD images
-     (plan §6 already asks for this).
+     (plan §6.2 already asks for this).
 4. **M5/C6 — widen historical chunk-map reconstruction to also cover
    remap-tree evidence (optional, forward-looking).**
    - Parse REMAP 235 / REMAP_BACKREF 236 / IDENTITY_REMAP 234 and zero-stripe
@@ -1486,7 +1515,8 @@ block-group tree (objectid 11).
      `target_file.txt`, gen 13 has `large_target.txt`", replacing
      "gen-13 state";
    - sort backup roots by generation, not slot.
-   - Leave the branch unmerged; optionally tag it.
+   - Leave the branch unmerged; optionally tag it (done: `m1-prototype`,
+     2026-09-15).
 6. **M7 baselines — extend the harness.**
    - Add `SecurityRonin/btrfs-forensic` `recover_deleted`, btrfscue v0.7
      `recover`, a TSK `develop` build (experimental btrfs), and btrfs-progs
@@ -1498,12 +1528,12 @@ block-group tree (objectid 11).
      subvolume-attribution signal for deleted extents (C3/C4).
    - Mask FT_ENCRYPTED 0x80.
    - Refuse encrypted extents with a report line.
-8. **§7 Paper plan — update citations and venues.**
+8. **plan §8 Paper plan — update citations and venues.**
    - Replace the SSRN Toolan & Humphries citation with FSI:DI 58:302198.
    - Add `fkie-cad/mind-the-slack` as the framework URL.
    - Re-check DFRWS APAC 2026 (19–22 Oct) accepted papers in October.
    - Re-run this watch before M5 starts.
-9. **§3.3 License fallback note.**
+9. **plan §3.3 License fallback note.**
    - rustutils/btrfsutils has stalled since 2026-05-14.
    - `btrfs-core` (Apache-2.0) is a second permissive Rust reader, but
      immature: 0.1.x, single/DUP chunks only, crc32c only. Verified in the
@@ -1512,15 +1542,18 @@ block-group tree (objectid 11).
      single/DUP chunks" via `stripes[0]` ("Multi-device / striped RAID
      mapping is deferred to a later phase"); `src/crc.rs` verifies crc32c
      only and returns `None` (deferred) for xxhash64 / sha256 / blake2.
-   - Re-evaluate both only if the AGPL boundary becomes a problem; no change
-     to the dissect decision.
+   - Re-evaluate both only if the AGPL licence becomes a problem; no change
+     to the dissect decision. (Superseded: the plan now licenses the tool
+     Apache-2.0 with dissect.btrfs as a test oracle only; see the note at the
+     top of this section.)
 
 **Open questions needing a human decision.**
 - (a) ~~Adopt the QEMU generator scripts into a tracked `corpus/` path now?~~
   Resolved: tracked in `corpus/vm/` (outputs remain under `images/`).
 - (b) Build a `CONFIG_BTRFS_EXPERIMENTAL=y` guest kernel to cover
   RST/remap-tree images (in or out of scope for paper 1)?
-- (c) Tag or delete `feature/m1-backup-roots`?
+- (c) ~~Tag or delete `feature/m1-backup-roots`?~~ Resolved: tagged
+  `m1-prototype` (pushed to origin) and the branch kept.
 - (d) Obtain the three blocked OA papers (Toolan & Humphries 2026, Plum &
   Dewald 2018, Oh & Hwang 2025) via a browser session.
 - (e) Should the `docs/*.pdf` files stay tracked in git (they are, contrary
