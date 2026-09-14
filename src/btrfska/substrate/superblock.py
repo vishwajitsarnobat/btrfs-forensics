@@ -7,6 +7,24 @@ Kernel v7.0 references:
   bytes [32:4096] matches (disk-io.c:153-169 btrfs_check_super_csum);
 - the kernel mounts only incompat bits in BTRFS_FEATURE_INCOMPAT_SUPP (fs.h:299-330); unknown
   compat_ro bits only prevent writing, so a read-only reader may proceed.
+
+Geometry sanity mirrors part of btrfs_validate_super (disk-io.c:2360-2580). The kernel rejects on
+every one of these checks. A copy is marked invalid when the check guards values that later
+readers slice or recurse by, so trusting them would be unsafe or meaningless:
+- sectorsize a power of two in [4096, 65536] (l.2404-2408);
+- nodesize a power of two in [sectorsize, 65536] (l.2417-2421);
+- root_level, chunk_root_level, log_root_level < BTRFS_MAX_LEVEL 8 (l.2384-2398);
+- sys_chunk_array_size in [97, 2048] (l.2548-2561): the bootstrap chunk map is read from it;
+- a known csum_type (open_ctree, l.3345-3351): no csum means no trust at all.
+Other checks only warn. They are recorded in `problems`, but the copy stays valid, because its
+identity, backup roots and sys_chunk_array remain usable evidence, and a node reader bounds-checks
+each address anyway:
+- root, chunk_root and log_root aligned to sectorsize (l.2429-2443);
+- num_devices != 0 (l.2527-2530) and <= 2^31 (l.2524-2526, a kernel warning too).
+Not mirrored: super flags (l.2372), leafsize == nodesize (l.2422), the page-size limit on
+sectorsize (l.2410, a host limit), fsid vs the mounted device set (l.2445-2467), feature
+dependencies (l.2473-2508), bytes_used and stripesize (l.2514-2523), and
+validate_sys_chunk_array (l.2542, M1b parses the array).
 """
 
 from dataclasses import dataclass
@@ -26,6 +44,8 @@ class SuperblockCopy:
     magic_ok: bool = False
     bytenr_ok: bool = False
     csum_ok: bool = False
+    geometry_ok: bool = False
+    # Every failed check. On a valid copy these are warnings only (see the module docstring).
     problems: tuple[str, ...] = ()
 
     @property
@@ -34,7 +54,50 @@ class SuperblockCopy:
 
     @property
     def valid(self) -> bool:
-        return self.magic_ok and self.bytenr_ok and self.csum_ok
+        return self.magic_ok and self.bytenr_ok and self.csum_ok and self.geometry_ok
+
+
+def _is_pow2(value: int) -> bool:
+    return value > 0 and value & (value - 1) == 0
+
+
+def geometry_problems(fields: dict) -> tuple[list[str], list[str]]:
+    """(invalidating, warning) problems from the btrfs_validate_super checks we mirror.
+
+    Kernel v7.0 fs/btrfs/disk-io.c line numbers are given per check.
+    """
+    invalid, warn = [], []
+    for name in ("root_level", "chunk_root_level", "log_root_level"):  # l.2384-2398
+        if fields[name] >= ondisk.MAX_LEVEL:
+            invalid.append(f"{name} {fields[name]} >= {ondisk.MAX_LEVEL}")
+
+    sectorsize, nodesize = fields["sectorsize"], fields["nodesize"]
+    sectorsize_ok = (
+        _is_pow2(sectorsize) and ondisk.MIN_BLOCKSIZE <= sectorsize <= ondisk.MAX_METADATA_BLOCKSIZE
+    )  # l.2404-2408
+    if not sectorsize_ok:
+        invalid.append(f"invalid sectorsize {sectorsize}")
+    if not (
+        _is_pow2(nodesize) and sectorsize <= nodesize <= ondisk.MAX_METADATA_BLOCKSIZE
+    ):  # l.2417-2421
+        invalid.append(f"invalid nodesize {nodesize}")
+
+    size = fields["sys_chunk_array_size"]  # l.2548-2561
+    if size > ondisk.SYSTEM_CHUNK_ARRAY_SIZE:
+        invalid.append(f"sys_chunk_array_size {size} > {ondisk.SYSTEM_CHUNK_ARRAY_SIZE}")
+    elif size < ondisk.MIN_SYS_CHUNK_ARRAY_SIZE:
+        invalid.append(f"sys_chunk_array_size {size} < {ondisk.MIN_SYS_CHUNK_ARRAY_SIZE}")
+
+    if sectorsize_ok:  # alignment against a garbage sectorsize says nothing; l.2429-2443
+        for name in ("root", "chunk_root", "log_root"):
+            if fields[name] % sectorsize:
+                warn.append(f"{name} {fields[name]} not aligned to sectorsize {sectorsize}")
+
+    if fields["num_devices"] == 0:  # l.2527-2530 (kernel: error)
+        warn.append("num_devices is 0")
+    elif fields["num_devices"] > 1 << 31:  # l.2524-2526 (kernel: warning)
+        warn.append(f"suspicious num_devices {fields['num_devices']}")
+    return invalid, warn
 
 
 def parse_copy(block, mirror: int) -> SuperblockCopy:
@@ -58,8 +121,22 @@ def parse_copy(block, mirror: int) -> SuperblockCopy:
     else:
         if not csum_ok:
             problems.append("csum mismatch")
+    geometry_ok = False
+    if magic_ok:  # same reason as bytenr: judge geometry only on real copies
+        invalid, warn = geometry_problems(fields)
+        geometry_ok = not invalid
+        problems += invalid + warn
 
-    return SuperblockCopy(mirror, expected, fields, magic_ok, bytenr_ok, csum_ok, tuple(problems))
+    return SuperblockCopy(
+        mirror,
+        expected,
+        fields,
+        magic_ok=magic_ok,
+        bytenr_ok=bytenr_ok,
+        csum_ok=csum_ok,
+        geometry_ok=geometry_ok,
+        problems=tuple(problems),
+    )
 
 
 def read_copies(img: ImageHandle) -> list[SuperblockCopy]:
