@@ -4,6 +4,9 @@ import ast
 import fcntl
 import hashlib
 import os
+import shutil
+import signal
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -27,6 +30,62 @@ def scratch_image():
     path.write_bytes(data)
     yield path, data
     path.unlink()
+
+
+@pytest.fixture
+def scratch_dir():
+    """A fresh directory under the gitignored images/scratch/ (pytest's tmp_path is in /tmp)."""
+    SCRATCH.mkdir(parents=True, exist_ok=True)
+    path = Path(tempfile.mkdtemp(prefix="test_readonly_", dir=SCRATCH))
+    yield path
+    shutil.rmtree(path)
+
+
+def test_directory_is_rejected(scratch_dir):
+    with pytest.raises(ValueError, match="not a regular file or block device"):
+        open_image(scratch_dir)
+
+
+def test_fifo_is_rejected_without_blocking(scratch_dir):
+    fifo = scratch_dir / "fifo"
+    os.mkfifo(fifo)
+
+    def blocked(signum, frame):
+        raise TimeoutError("open_image blocked on a FIFO")
+
+    previous = signal.signal(signal.SIGALRM, blocked)
+    signal.alarm(5)
+    try:
+        with pytest.raises(ValueError, match="not a regular file or block device"):
+            open_image(fifo)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_empty_file_is_rejected(scratch_dir):
+    empty = scratch_dir / "empty.img"
+    empty.touch()
+    with pytest.raises(ValueError, match="empty image"):
+        open_image(empty)
+
+
+def test_symlink_to_regular_file_opens(scratch_image, scratch_dir):
+    path, data = scratch_image
+    link = scratch_dir / "link.img"
+    link.symlink_to(path)
+    with open_image(link) as img:
+        assert img.size == len(data)
+        assert img.sha256() == hashlib.sha256(data).hexdigest()
+
+
+def test_close_is_idempotent(scratch_image):
+    path, _ = scratch_image
+    img = open_image(path)
+    img.close()
+    img.close()
+    with img:
+        pass
 
 
 def test_open_image_is_o_rdonly(scratch_image):
