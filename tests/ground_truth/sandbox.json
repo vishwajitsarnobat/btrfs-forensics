@@ -24,6 +24,18 @@
     "sys_array_size": 129,
     "num_devices": 1
   },
+  "chunk_tree": {
+    "oracle": "btrfs inspect-internal dump-tree -t chunk (btrfs-progs v6.6.3) on the 0444 copy",
+    "root": 22036480,
+    "generation": 8,
+    "chunk_tree_uuid": "56a8f651-2836-4359-a780-6a4a40920320",
+    "dev_uuid": "d01a43d6-3c1c-4a58-8174-8e3f68f1d422"
+  },
+  "chunks": [
+    {"logical": 13631488, "length": 8388608, "type": "DATA|single", "stripes": [[1, 13631488]]},
+    {"logical": 22020096, "length": 8388608, "type": "SYSTEM|DUP", "stripes": [[1, 22020096], [1, 30408704]]},
+    {"logical": 30408704, "length": 33554432, "type": "METADATA|DUP", "stripes": [[1, 38797312], [1, 72351744]]}
+  ],
   "backup_roots_by_slot": [
     {"slot": 0, "tree_root": 30572544, "tree_root_gen": 13, "chunk_root": 22036480, "chunk_root_gen": 8,
      "extent_root": 30474240, "extent_root_gen": 13, "fs_root": 30539776, "fs_root_gen": 13,
