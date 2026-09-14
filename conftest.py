@@ -8,7 +8,19 @@ from btrfska.substrate.image import open_image
 
 REPO_ROOT = Path(__file__).resolve().parent
 SANDBOX_IMG = REPO_ROOT / "sandbox.img"
-SANDBOX_SHA256 = "07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418"
+SHA256SUMS = REPO_ROOT / "tests" / "fixtures" / "SHA256SUMS"
+
+
+def _expected_sha256(name: str) -> str:
+    """The pinned hash for `name` in SHA256SUMS, the single source shared with CI."""
+    for line in SHA256SUMS.read_text().splitlines():
+        digest, _, filename = line.partition("  ")
+        if filename == name:
+            return digest
+    raise LookupError(f"{name} not listed in {SHA256SUMS}")
+
+
+SANDBOX_SHA256 = _expected_sha256("sandbox.img")
 
 
 def _sha256(path: Path) -> str:
