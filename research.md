@@ -1572,3 +1572,44 @@ block-group tree (objectid 11).
   Dewald 2018, Oh & Hwang 2025) via a browser session.
 - (e) Should the `docs/*.pdf` files stay tracked in git (they are, contrary
   to earlier notes)?
+
+### 10.7 Format notes from M1a (2026-09-15)
+
+Observed while building the superblock trust layer (catalog.md, M1a entry).
+Kernel references are to tag v7.0.
+
+- **Superblock copies agree on healthy images.** On `sandbox.img` and the five
+  generated `m1_*` images, mirror 0 (64 KiB) and mirror 1 (64 MiB) carry the
+  same generation, and every field except `bytenr` and `csum` is identical.
+  This is expected: the kernel writes every copy in the same commit, setting
+  `bytenr` and recomputing the csum per copy (`disk-io.c:3795-3810`). A
+  disagreement between copies therefore points to an interrupted commit,
+  damage or tampering, and `btrfska info` reports it.
+- **Edge rule.** The kernel ignores a copy whose last byte is the device's
+  last byte: `bytenr + BTRFS_SUPER_INFO_SIZE >= size` rejects it
+  (`volumes.c:1356`, and `disk-io.c:3806` when writing). btrfska follows the
+  same rule.
+- **Where the feature bits live.** Incompat and compat_ro bits are defined in
+  `include/uapi/linux/btrfs.h:298-339`, not in `btrfs_tree.h`. Bit 15 is
+  unassigned in v7.0. The mount masks are in `fs/btrfs/fs.h:286-330`; RST,
+  extent-tree-v2 and remap tree are in `INCOMPAT_SUPP` only under
+  `CONFIG_BTRFS_EXPERIMENTAL`.
+- **`dump-super` prints csum bytes in disk order.** It does not print the
+  integer value. For `sandbox.img` it shows `0xeadc2eaa`; the CRC-32C value
+  stored little-endian in those bytes is `0xaa2edcea`. Cross-checks against
+  btrfs-progs must compare bytes.
+- **Backup roots track subvolume 5 only.** In every s01 image (`m1_xxhash`,
+  `m1_sha256_bgt`, `m1_blake2b`, `m1_lzo`, `m1_zlib`), all four backup slots
+  (gens 35–38) name the same `backup_fs_root` (gen 19). The scenario's
+  writes and deletions all happen inside subvolume `sv1`, whose tree is
+  reachable only through ROOT_ITEMs in each backup's `tree_root`. Two
+  consequences:
+  - a diff of `backup_fs_root` states sees nothing of a deletion in any other
+    subvolume. That is the method attributed to Beyond Carving and
+    SecurityRonin `recover_deleted` in plan.md §1. Per-subvolume history needs
+    a walk of each backup's root tree (M1 task 7);
+  - the deletions already predate all four backup roots. Inferred from the
+    scenario order: the deletion commit precedes the six churn commits, and
+    those precede the balance, which had rewritten the chunk root by gen 30.
+    So even this small scenario is a natural beyond-4-generations case
+    (plan.md M7).
