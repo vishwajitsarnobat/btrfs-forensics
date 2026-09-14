@@ -259,7 +259,7 @@ decompress path, which calls `lzo1x_decompress_safe`):
 | Option | Licence / state | Behaviour on hostile input (test below) | Verdict |
 |---|---|---|---|
 | `python-lzo` 1.15 | GPL | — | Rejected: GPL, incompatible with the Apache-2.0 decision |
-| `dissect.util` 3.24 `compression.lzo` (pure Python + Rust `_native`) | Apache-2.0, Fox-IT, maintained; the decoder dissect.btrfs uses | Pure Python: a back-reference before the start of output is silently accepted (the crafted stream returned 4 bytes, no error), and only `len == out_len` stops output. Native: **panics** (`pyo3_runtime.PanicException`, not an `Exception` subclass, so `except Exception` does not catch it) on the crafted stream and on 58/300 bit-flipped streams | Rejected at runtime: a forensic reader must fail with a catchable, classified error on adversarial bytes. Its Apache-2.0 test vectors are reused, with attribution |
+| `dissect.util` 3.24 `compression.lzo` (pure Python + Rust `_native`) | Apache-2.0, Fox-IT, maintained; the decoder dissect.btrfs uses | Pure Python: a back-reference before the start of output is silently accepted (the crafted stream returned 4 bytes, no error), and only `len == out_len` stops output. Native: **panics** (`pyo3_runtime.PanicException`, not an `Exception` subclass, so `except Exception` does not catch it) on the crafted stream and on 58/300 bit-flipped streams (single seeded run; counts are seed-dependent — the harness is committed in M1 as `tests/oracle/lzo_hostile.py` before any number is cited) | Rejected at runtime: a forensic reader must fail with a catchable, classified error on adversarial bytes. Its Apache-2.0 test vectors are reused, with attribution |
 | `lzallright` 0.2.6 (Rust bindings of lzokay) | MIT; 2 stars, one maintainer; abi3 wheels | Raises `LZOError` cleanly on crafted, truncated and bit-flipped input | Not a runtime dependency (bus factor; a native wheel for a ~150-line function). **Adopted as an independent test oracle** and as fallback 1 |
 | `lzokay` 2.1.0 (lzokay-rs) | MIT; 1 star, last push 2025-10 | not tested | Rejected: weaker upkeep than `lzallright` |
 | **Own pure-Python LZO1X decoder** (`substrate/lzo.py`) | Ours (Apache-2.0) | Bounds-checked by design: input overrun, output overrun beyond the segment bound, lookbehind overrun, missing end marker; one `LzoError` class | **Chosen** |
@@ -274,7 +274,7 @@ lzallright==0.2.6`, scratch only):
 - a truncated stream (all three raise a catchable error);
 - 300 single-bit flips of one compressed 4 KiB sector.
 
-**Also observed:** 139–160 of the 300 bit-flipped streams decoded
+**Also observed** (single seeded run, see above): 139–160 of the 300 bit-flipped streams decoded
 "successfully" to wrong bytes in *every* decoder. LZO carries no integrity
 check, so decode success is never evidence of correct content; only data
 checksums (csum tree, M6) are.
@@ -534,7 +534,9 @@ forensic logic.
    - `tests/test_cli.py`: `--version` exits 0 and prints the version;
      `btrfska info sandbox.img` prints the expected sha256 (`@pytest.mark.sandbox`).
    - `tests/test_readonly.py`:
-     - `open_image` on a temp file under `images/scratch/` opens `O_RDONLY`;
+     - `open_image` on a temp file under `images/scratch/` opens `O_RDONLY`
+       (the test creates `images/scratch/` with `mkdir(parents=True,
+       exist_ok=True)`; it does not exist on a clean CI clone);
      - a write through the mmap raises `TypeError`;
      - no module under `src/` other than `substrate/image.py` calls `open(`
        with a write mode or `os.open` (AST scan).
@@ -1109,7 +1111,7 @@ and copies its headline numbers.
 
 **Reproducibility rule.** A number may enter the paper **only if a committed
 script regenerates it** from a committed or generated image. Guest-driven
-scenarios are not bit-stable. Two runs of the §10.4 "no discard" row gave
+scenarios are not bit-stable. Two runs of the research.md §10.4 "no discard" row gave
 367/355/18/832 and 365/353/16/828: a difference of 2 in columns 1–3 and of 4
 in column 4. The spread differs per column, so no single "± N blocks" figure
 is used. Rules:
@@ -1123,7 +1125,7 @@ is used. Rules:
 Pure-parse results on a fixed image (e.g. sandbox 71/21) are deterministic
 and need one run plus the image hash.
 
-**Backfill.** EXP-000 = the §10.4 discard table: re-run
+**Backfill.** EXP-000 = the research.md §10.4 discard table: re-run
 `corpus/vm/discard_table.sh` ×5 and record it under this template during M2.
 
 ## 8. Paper Plan
