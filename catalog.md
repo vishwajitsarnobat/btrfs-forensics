@@ -121,11 +121,52 @@ Maintenance rules:
   (`checkout@v7`, `setup-uv@v10`) were taken from the plan. On the first PR run, CI failed at job setup because `astral-sh/setup-uv` has no floating `v10` tag; the workflow now pins `setup-uv@v10.1.0` and CI passes (run 34904950286, 17 s). These pins were not otherwise
   re-checked here.
 
+**Review fixes** (commits `1d402c2`, `e275410`, `631f904`; each test
+written and seen failing before the fix):
+- **Import mode:** pytest `addopts` gains `--import-mode=importlib`, plus
+  `pythonpath = ["."]`. A throwaway `tests/test_crc32c.py` failed collection
+  before the change and collected cleanly after.
+- **Single hash source:** `conftest.py` parses `tests/fixtures/SHA256SUMS`
+  (the file CI checks); `tests/test_cli.py` imports `SANDBOX_SHA256` from
+  conftest. No Python file holds the hash literal any more.
+- **Write scan** (`tests/test_readonly.py`):
+  - resolves imports, so aliased `os.open` is caught;
+  - flags write-capable APIs by qualified name (`os.fdopen`,
+    `os.truncate`/`ftruncate`, `io.FileIO`, `shutil.copy*`/`move`,
+    `tempfile.*`) and write-only method names on any receiver
+    (`write_bytes`, `write_text`, `truncate`, …);
+  - flags `mmap` unless `access` is literally `ACCESS_READ`.
+  - One `WRITE_ALLOWLIST` holds only `substrate/image.py`; M4 `recover`
+    writers join it explicitly.
+  - Deviation: `copy`/`move` are matched only when they resolve to `shutil`,
+    not on any receiver, because `dict.copy()` would be a false positive.
+  - 24 new self-test cases (19 failed before the fix). A new test proves the
+    allowlist matters only for `image.py`'s one `os.open` call; its read-only
+    mmap passes the scan.
+- **File-type gate** (`substrate/image.py`):
+  - opens with `O_RDONLY | O_NONBLOCK`, so a FIFO cannot block;
+  - then `fstat`s the fd and requires `S_ISREG`/`S_ISBLK`, otherwise closes
+    it and raises `ValueError("not a regular file or block device: …")`;
+  - restores blocking mode afterwards;
+  - rejects empty images with `ValueError("empty image: …")`;
+  - makes `close()` idempotent.
+  - Tests use dirs under `images/scratch/`, not `tmp_path`: directory (was
+    ENOMEM), FIFO under a 5 s `SIGALRM` guard (was a hang), empty file,
+    symlink to a regular file, double close. The first four failed before
+    the fix; the symlink case already passed.
+  - `btrfska info images/scratch` now prints the clear error and exits 1.
+- **Verification:**
+  - `uv run pytest -q`: `84 passed` (54 + 30 new);
+  - `uv run ruff check .`: `All checks passed!`;
+  - `uv run ruff format --check .`: `14 files already formatted`;
+  - `uv run --python 3.14 python -m unittest discover -s legacy/tests`:
+    `Ran 37 tests`, `OK`;
+  - `sandbox.img` sha256 is still `07ca38d4…5876418`, mtime still
+    2026-04-26; no `test_readonly_*` scratch dirs are left behind.
+
 **Follow-ups for M1.**
-- `tests/` and `legacy/tests/` are both rootless test dirs collected in
-  pytest's default `prepend` import mode, so a new test file with the same
-  basename as a legacy one (e.g. `test_crc32c.py`) will fail collection. Use
-  distinct names or switch to `--import-mode=importlib`.
+- ~~Test basename collisions between `tests/` and `legacy/tests/`~~: resolved
+  by `--import-mode=importlib` (review fixes above).
 - The hash guard runs under pytest only. The original `unittest` runner for
   `legacy/tests` has no guard.
 
