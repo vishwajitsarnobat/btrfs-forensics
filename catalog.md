@@ -20,6 +20,116 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-15 — Plan revision after research refresh
+
+- **Branch:** `main` working tree (docs only: `plan.md`, this entry); no code
+  changed.
+- **Context:** folds every finding of `research.md` §10 into `plan.md`,
+  following the ranked recommendations in §10.6, and turns M0 into an
+  executable task list.
+
+**What changed in the plan, and why.**
+1. **Novelty claims (§1).**
+   - **C3** reworded to *full-state, multi-source, per-inode lifecycle
+     timelines* (backup roots + scan-discovered old roots + reconstructed
+     fragments).
+   - **C4** reworded to *evidence-rule-derived tiers with provenance chains
+     across anchored and unanchored artifacts, csum-tree verified*.
+   - **C1/C6** made explicitly btrfs-specific, with ReFS (`forefst`, Prade
+     2020) and F2FS (Oh & Hwang 2025) cited as CoW analogs.
+   - **C5** now cites Toolan & Humphries FSI:DI 58:302198 and SecurityRonin's
+     tamper findings.
+   - Why: `SecurityRonin/btrfs-forensic` ships backup-root deletion diffs and
+     graded findings (§10.1 claim table, §10.2). It is added to "exists
+     elsewhere" together with btrfscue v0.7 subvolume restore.
+2. **Substrate (§3.5, new).**
+   - Decision: **split**. We own image open, superblock + mirrors, csum
+     dispatch (4 types), node-header validation, incompat/compat_ro gate,
+     chunk maps and backup roots.
+   - dissect.btrfs is kept only for file streams + zlib/lzo/zstd, behind a
+     single `substrate/dissect_adapter.py` (the AGPL boundary), with a
+     byte-equality drift test.
+   - Fallback: pin 1.10.* → vendor stream module → own streams.
+   - Why: dissect.btrfs 1.10 validates no csum, header field or incompat bit
+     and maps only via the current chunk tree (§10.2). §3.3 (License) and
+     §4 verdicts were updated to match; superblock/tree-walker/chunk-map
+     code moved from DELETE to REWRITE.
+3. **M1 = trust layer** (csum dispatch, header checks, incompat gate that
+   refuses unknown bits and RST/ETv2/REMAP `1<<17`, mirror selection,
+   tree 11) (§10.3, §10.6 item 1).
+   - Branch salvage as spec/tests (§10.5):
+     - defect #8, the EXTENT_ITEM objectid-vs-offset fix;
+     - gen 11–14 ground truth, which replaces "gen-13 state";
+     - backup roots sorted by generation;
+     - the hardening backlog.
+   - M1 DoD images come from `corpus/vm/`: xxhash, sha256+BGT, blake2b, bad
+     node, unknown incompat, mirror damage.
+4. **Corpus from M0/M1 onward (§6.2).**
+   - `corpus/vm/` is the only generator, with a `corpus/manifest.tsv` per
+     image.
+   - New matrix axes: **discard** (none / async quick-unmount / async idle /
+     sync, plus a `nodiscard` control) and **block-group tree** (off/on),
+     because host mkfs 6.6.3 defaults BGT off (§10.3, §10.4).
+5. **Later research items.**
+   - Remap tree and RAID stripe tree are gate-refused until picked up.
+   - The `CONFIG_BTRFS_EXPERIMENTAL` guest kernel is deferred (§10.3,
+     §10.6 items 4 and open question b).
+6. **Baselines (M7):** SecurityRonin `recover_deleted`, a TSK `develop`
+   build, btrfscue v0.7 `recover`, btrfs-progs ≥ 7.1 `restore` (§10.2,
+   §10.6 item 6).
+7. **M9 GUI (new, Track P).**
+   - A read-only local web UI (`btrfska serve`, Starlette + Jinja2 + htmx)
+     over `evidence.db`, after M6 and a stable schema.
+   - Datasette, Qt and Tauri/Electron were considered and rejected, with
+     reasons.
+8. **Test policy (§6.1).**
+   - `sandbox.img` is the primary regression image (read-only; sha256
+     `07ca38d4…5876418` is asserted before/after every test session).
+   - Extra images only under the gitignored `images/`, via `corpus/vm/`.
+   - Nothing is created outside the repo.
+9. **Research method (§7, new).**
+   - EXP-NNN protocol: hypothesis → method → image/scenario → exact command →
+     results → threats to validity.
+   - Records go to `experiments/EXP-NNN.md` plus a committed regeneration
+     script.
+   - Numbers enter the paper only if a script regenerates them.
+   - Guest-driven measurements need ≥ 5 runs with median and range (the
+     §10.4 discard table jitters by ~±2 blocks).
+10. **M0 made executable** (11 ordered tasks):
+    - legacy moved to `legacy/`, with its sandbox/output paths re-pointed so
+      tests don't silently skip;
+    - `src/btrfska` skeleton with a single read-only open site;
+    - pyproject with `uv_build`, pytest, ruff;
+    - AGPL LICENSE, README rewrite;
+    - CI outline;
+    - exact commands and acceptance checks.
+
+    M1 is broken into 11 ordered tasks.
+11. Sections renumbered: §3.5 Substrate decision added (License stays §3.3,
+    so research.md §7.4's pointer still holds); §7 Research Method inserted,
+    so Paper Plan → §8, Risks → §9 (SecurityRonin marked as a realised risk),
+    Working Conventions → §10. research.md §10.6 references to the old §7/§8
+    refer to the pre-revision numbering.
+
+**Checks made while revising (read-only).**
+- PyPI `btrfska` → HTTP 404 (no collision); the name is kept.
+- `sandbox.img` sha256 `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`
+  (matches §10.4). `zstd -19` compresses it to 14 963 bytes, and the piped
+  round-trip reproduces the same hash with no file written. This is the basis
+  for the proposed CI fixture (M0 task 9, owner sign-off).
+- dissect.btrfs 1.10 metadata: `requires-python >=3.10`, zstd via
+  `backports.zstd` only below 3.14.
+- `recovery_output/` (8 files) is still tracked in git → untracked in M0.
+- There is no `.github/` yet.
+- `mmap.ACCESS_READ` write raises `TypeError` (basis for the M0 read-only
+  test).
+
+**Open items for the owner:**
+- (a) approve tracking `tests/fixtures/sandbox.img.zst`;
+- (b) tag `feature/m1-backup-roots` as `m1-prototype`;
+- (c) gen-12 contents of `sandbox.img` are not yet recorded anywhere
+  (M1 task 1 captures them).
+
 ## 2026-09-15 — Research refresh (post-reset prior-art watch)
 
 - **Branch:** `docs/research-refresh-2026-09` (PR #5): `research.md` §10,
