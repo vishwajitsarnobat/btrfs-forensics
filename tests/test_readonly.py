@@ -12,7 +12,10 @@ from btrfska.substrate.image import open_image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
-OPEN_SITE = SRC / "btrfska" / "substrate" / "image.py"
+IMAGE_MODULE = SRC / "btrfska" / "substrate" / "image.py"
+# The only modules allowed to open, create or writably map files. The M4 `recover`
+# output writers will join this allowlist explicitly; nothing else should.
+WRITE_ALLOWLIST = frozenset({IMAGE_MODULE})
 SCRATCH = REPO_ROOT / "images" / "scratch"
 
 
@@ -71,25 +74,91 @@ def _is_write_mode(call: ast.Call) -> bool:
     return any(c in mode.value for c in "wax+")
 
 
-def open_violations(source: str) -> list[int]:
-    """Line numbers of `os.open(...)` calls and `open(...)`/`x.open(...)` calls in a write mode."""
+# Import-resolved calls that open, create, replace or resize files.
+WRITE_CALLS = frozenset(
+    {
+        "os.open",
+        "os.fdopen",
+        "os.truncate",
+        "os.ftruncate",
+        "io.FileIO",
+        "shutil.copyfile",
+        "shutil.copy",
+        "shutil.copy2",
+        "shutil.copytree",
+        "shutil.move",
+        "tempfile.NamedTemporaryFile",
+        "tempfile.TemporaryFile",
+        "tempfile.SpooledTemporaryFile",
+        "tempfile.mkstemp",
+    }
+)
+# Write-only method names, flagged on any receiver (`Path(p).write_bytes()`, `x.fdopen()`).
+# `copy` and `move` are left to WRITE_CALLS because `dict.copy()` is everywhere.
+WRITE_ATTRS = frozenset(
+    {
+        "write_bytes",
+        "write_text",
+        "fdopen",
+        "truncate",
+        "ftruncate",
+        "copyfile",
+        "copy2",
+        "copytree",
+        "FileIO",
+        "NamedTemporaryFile",
+        "TemporaryFile",
+        "SpooledTemporaryFile",
+        "mkstemp",
+    }
+)
+READ_ONLY_MMAP_ACCESS = frozenset({"mmap.ACCESS_READ", "ACCESS_READ"})
+
+
+def _import_aliases(tree: ast.AST) -> dict[str, str]:
+    """Local name -> dotted origin, so `import os as x` and `from os import open as o` resolve."""
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def _qualname(node: ast.expr, aliases: dict[str, str]) -> str | None:
+    """Dotted name of a Name/Attribute chain with imports resolved; None for anything else."""
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        base = _qualname(node.value, aliases)
+        return f"{base}.{node.attr}" if base else None
+    return None
+
+
+def write_violations(source: str) -> list[int]:
+    """Line numbers of calls that could open, create, modify or writably map a file."""
+    tree = ast.parse(source)
+    aliases = _import_aliases(tree)
     lines = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        if (
-            isinstance(func, ast.Attribute)
-            and func.attr == "open"
-            and isinstance(func.value, ast.Name)
-            and func.value.id == "os"
-        ):
-            lines.append(node.lineno)
-        elif (
-            isinstance(func, ast.Name | ast.Attribute)
-            and (func.id if isinstance(func, ast.Name) else func.attr) == "open"
-            and _is_write_mode(node)
-        ):
+        name = _qualname(node.func, aliases)
+        attr = node.func.attr if isinstance(node.func, ast.Attribute) else None
+        if name in WRITE_CALLS or attr in WRITE_ATTRS:
+            flagged = True
+        elif name in {"mmap.mmap", "mmap"}:
+            access = next((kw.value for kw in node.keywords if kw.arg == "access"), None)
+            flagged = access is None or _qualname(access, aliases) not in READ_ONLY_MMAP_ACCESS
+        elif name in {"open", "io.open"} or attr == "open":
+            flagged = _is_write_mode(node)
+        else:
+            flagged = False
+        if flagged:
             lines.append(node.lineno)
     return lines
 
@@ -107,18 +176,52 @@ def open_violations(source: str) -> list[int]:
         ("open(p, 'rb')", False),
         ("Path(p).open('rb')", False),
         ("io.open(p, 'rb')", False),
+        # Bypasses of the original scan: aliases, other write APIs, writable maps.
+        ("from os import open as oopen\noopen(p, 1)", True),
+        ("import os as x\nx.open(p, 0)", True),
+        ("os.fdopen(fd, 'wb')", True),
+        ("Path(p).write_bytes(b'')", True),
+        ("Path(p).write_text('')", True),
+        ("io.FileIO(p, 'w')", True),
+        ("from io import FileIO\nFileIO(p, 'w')", True),
+        ("shutil.copyfile(a, b)", True),
+        ("shutil.copy(a, b)", True),
+        ("shutil.copy2(a, b)", True),
+        ("shutil.move(a, b)", True),
+        ("from shutil import copy\ncopy(a, b)", True),
+        ("import shutil as s\ns.move(a, b)", True),
+        ("os.truncate(p, 0)", True),
+        ("os.ftruncate(fd, 0)", True),
+        ("mmap.mmap(fd, 0, access=mmap.ACCESS_WRITE)", True),
+        ("mmap.mmap(fd, 0)", True),
+        ("from mmap import mmap\nmmap(fd, 0)", True),
+        ("mmap.mmap(fd, 0, access=mode)", True),
+        ("tempfile.NamedTemporaryFile()", True),
+        # Legitimate patterns stay allowed.
+        ("mmap.mmap(fd, size, access=mmap.ACCESS_READ)", False),
+        ("from mmap import ACCESS_READ, mmap\nmmap(fd, 0, access=ACCESS_READ)", False),
+        ("d.copy()", False),
+        ("shutil.which('btrfs')", False),
     ],
 )
-def test_open_scanner_detects_write_opens(source, flagged):
-    assert bool(open_violations(source)) is flagged
+def test_write_scanner_flags_write_capable_calls(source, flagged):
+    assert bool(write_violations(source)) is flagged
 
 
-def test_only_image_module_opens_files():
+def test_image_module_needs_the_allowlist_only_for_os_open():
+    """Its read-only mmap passes the scan; the lone flagged call is the O_RDONLY os.open."""
+    source = IMAGE_MODULE.read_text()
+    flagged = [source.splitlines()[n - 1] for n in write_violations(source)]
+    assert len(flagged) == 1
+    assert "os.open(" in flagged[0]
+
+
+def test_only_allowlisted_modules_write():
     offenders = {}
     for path in sorted(SRC.rglob("*.py")):
-        if path == OPEN_SITE:
+        if path in WRITE_ALLOWLIST:
             continue
-        lines = open_violations(path.read_text())
+        lines = write_violations(path.read_text())
         if lines:
             offenders[str(path.relative_to(REPO_ROOT))] = lines
     assert offenders == {}
