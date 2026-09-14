@@ -371,7 +371,7 @@ literature after 2018 is essentially the Hilgert line plus btrfs papers.
 
 | Work | Citation | Role |
 |---|---|---|
-| Kim, Kim, Shin, Jo, Lee & Shon 2021 | Electronics 10(18):2310, DOI 10.3390/electronics10182310 (OA) | **The evaluation template** (§5.3): before/after images, TSK + UFS Explorer + R-Studio baselines, recovery rate + hash-match accuracy |
+| Kim, Kim, Shin, Jo, Lee & Shon 2021 | Electronics 10(18):2310, DOI 10.3390/electronics10182310 (OA) | **The evaluation template** (§5.2): before/after images, TSK + UFS Explorer + R-Studio baselines, recovery rate + hash-match accuracy |
 | Lee, Jo, Eo & Shon, "ExtSFR" | Multimedia Tools & Appl. 79:16093–16111 (2019), DOI 10.1007/s11042-019-7199-y (paywalled) | DB-backed scalable ext recovery; 1 TB eval; criticized by Kim et al. for no hash verification |
 | ForTrace framework | Göbel et al., FSI:DI 40:301344 (DFRWS EU 2022); github.com/dasec/ForTrace; ForTrace++ fork on GitLab | Synthetic user-trace dataset generation (btrfs arrived only via the 2024 IFIP work) |
 | Carrier 2005, *File System Forensic Analysis* | book | Layer model (our scan regions = Carrier's layers) |
