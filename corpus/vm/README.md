@@ -43,6 +43,17 @@ python3 corpus/vm/probe_stale_metadata.py images/scenarios/x.img
 | `scenarios/discard_{none,async,sync}.sh` | The three §10.4 discard rows |
 | `probe_stale_metadata.py` | Prints `fsid_blocks stale_blocks needle_copies nonzero_blocks` (definitions in its docstring) |
 
+Derived images and the manifest (one level up, in `corpus/`):
+- `corpus/manifest.tsv` has one row per generated image: name, generator
+  command, host mkfs version, guest kernel, sha256. Tests reference images by
+  name and skip when absent.
+- `corpus/mutate.py SRC DST OP` writes a damaged copy of a generated image
+  (`set-incompat-bit BIT`, `zero-primary-sb`, `transplant-sb DONOR MIRROR
+  GENERATION`). It only reads `SRC` (and `DONOR`) and refuses an existing
+  `DST`, a `DST` outside `images/`, or any file named `sandbox.img`. All
+  patches are computed and validated before `DST` is created, so a refused
+  run leaves no file.
+
 Notes:
 - `DISCARD=1` alone makes the async row: kernels ≥ 6.2 enable
   `discard=async` automatically on a discard-capable device. The log line

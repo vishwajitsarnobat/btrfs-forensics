@@ -8,8 +8,11 @@ goal is to catalog all of it, with provenance and confidence, and answer what
 existed, when, what changed, what can be recovered, and whether anything was
 hidden.
 
-**Status:** M0 scaffolding. The package skeleton, read-only image access and
-CI are in place; there is no forensic logic in `btrfska` yet. The earlier
+**Status:** M1a (trust foundations). `btrfska info IMAGE` validates every
+superblock copy (all four checksum types), selects the best one, reports
+disagreements, backup roots by generation, and refuses unsupported or unknown
+incompat features (exit 2, `UNSUPPORTED_INCOMPAT <name>`; override with
+`--allow-unsupported`). Tree walking and file recovery come next. The earlier
 prototype is frozen, still runnable, under `legacy/`.
 
 **Licence:** Apache-2.0 (see `LICENSE`).
@@ -47,7 +50,8 @@ tracked `tests/fixtures/sandbox.img.zst` and checks it against
   `src/btrfska/substrate/image.py` (`O_RDONLY`, read-only mmap), and the test
   session asserts the image's sha256 before and after every run.
 - Markers: `sandbox` (needs `sandbox.img`, skipped when absent) and `vm`
-  (needs `corpus/vm` images).
+  (needs the `corpus/vm` images listed in `corpus/manifest.tsv`, skipped when
+  absent; run them with `uv run pytest -m vm`).
 - Full policy: `plan.md` §6.1.
 
 ### Image rule
