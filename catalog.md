@@ -20,6 +20,507 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-15 — M1a: on-disk tables, checksums, superblock trust gate
+
+- **Branch:** `feature/m1a-trust-foundations` (from `main` at `85cbc07`).
+  This is the first of three M1 PRs. It covers plan.md §5 M1 tasks 1–4, the
+  task-9 images these need (plus `m1_lzo` and `m1_zlib`), and the `info`
+  half of task 10.
+- **Commits:**
+  - `d393c1e` Record defect #8 and the sandbox.img ground truth
+  - `5efc964` Add on-disk struct tables checked against kernel v7.0 headers
+  - `4a1317a` Add checksum dispatch for crc32c, xxhash64, sha256 and blake2b-256
+  - `e34ae6e` Add superblock mirrors, best-copy selection and the incompat gate
+  - `fda8316` Show superblock copies, gate verdict and backup roots in btrfska info
+  - `00c93ea` Add the M1a corpus images, corpus/mutate.py and the image manifest
+  - `d8140fa` Add an import-boundary test keeping test oracles out of src/
+  - `5d61695` Record M1a format notes and update the README status
+  - this catalog entry (the commit after `5d61695`)
+
+**What was done.** Each module's tests were written and seen failing
+(ImportError or assertion) before the implementation.
+1. **Ground truth (task 1).**
+   - research.md §8.1 gains **defect #8**: legacy uses the EXTENT_ITEM key
+     offset as the address, but the offset is the length. Evidence is below.
+   - `tests/ground_truth/sandbox.json` holds the superblock copies, the four
+     backup roots by slot, and the gen 11–14 fs-tree contents.
+   - `tests/test_ground_truth.py` asserts the superblock facts (green) and
+     has four strict xfails for the per-generation fs trees
+     (`reason="tree walker lands in M1b"`).
+2. **`substrate/ondisk.py` (task 2).**
+   - A small `Layout` (named little-endian `struct` fields, `.size`,
+     `.offset()`, `.unpack_from()`).
+   - Layouts: superblock, backup root, header, key, item, key pointer, dev
+     item, chunk and stripe, inode item/ref/extref, dir item, root item/ref,
+     file extent item, dev extent, extent item and inline refs (incl. owner
+     ref 172), block group item v1/v2, free-space info, remap item.
+   - Constants: objectids 1–13 and the negative ones, all item keys incl.
+     172, 230 and 234–236, incompat/compat_ro/block-group bits, csum table,
+     mirror offsets, FT and extent constants.
+   - `flag_names()` names unknown bits `UNKNOWN_BIT_<n>`.
+3. **`substrate/csum.py` (task 3).**
+   - `compute()` and `block_csum_ok()` follow kernel `btrfs_csum()`
+     (`fs.c:44-62`): crc32c stored as LE u32, XXH64 seed 0 stored as LE u64,
+     SHA-256, and BLAKE2b with `digest_size=32`.
+   - The test proves the BLAKE2b result is not a truncated BLAKE2b-512; the
+     test value was checked with `printf abc | b2sum -l 256`.
+   - Runtime deps: `crc32c>=2.9` (locked 2.9.post0) and `xxhash>=4.0`
+     (locked 4.0.1).
+4. **`substrate/superblock.py` (task 4).**
+   - `read_copies()` covers all three mirror slots; slots that do not fit
+     the image are marked not present.
+   - `parse_copy()` checks magic, then bytenr (only when the magic matches),
+     then csum (unknown csum types reported).
+   - `select()` takes the valid copy with the highest generation, lowest
+     mirror on a tie. Each disagreement is reported: invalid copy, older
+     generation, or same generation with differing fields (named). This is
+     btrfs-progs recover-mode behaviour (`btrfs_read_dev_super` with
+     `SBREAD_RECOVER`), not the kernel's: the kernel mounts mirror 0 only.
+     The review fixes below add the progs fsid anchor.
+   - `backup_roots()` returns the slots sorted by generation, each keeping
+     its slot.
+   - `gate()` refuses EXTENT_TREE_V2, RAID_STRIPE_TREE, REMAP_TREE and
+     unknown bits, with `UNSUPPORTED_INCOMPAT <name>` lines;
+     `allow_unsupported` gives status `OVERRIDDEN`.
+   - The compat_ro BLOCK_GROUP_TREE bit is noted ("block groups are read
+     from tree 11"). Unknown compat_ro bits are listed but do not refuse.
+   - A property-style test feeds 300 random and 300 mutated blocks; none
+     raises, and no mutated block validates.
+5. **CLI (task 10, `info` half).** `btrfska info IMAGE [--allow-unsupported]`
+   prints:
+   - path, size and sha256;
+   - each superblock copy (valid with generation and csum, `INVALID
+     (reasons)`, or not present);
+   - the selected copy and the disagreements;
+   - the fields: fsid, generation, roots, csum type, compat/compat_ro/incompat
+     flags;
+   - the backup roots by generation;
+   - `gate:` and any `UNSUPPORTED_INCOMPAT` lines.
+
+   Exit 0 when OK or overridden, 2 when refused (gate or
+   `NO_VALID_SUPERBLOCK`), 1 on I/O errors.
+6. **Corpus (task 9).**
+   - Five images generated with `corpus/vm/make_image.sh`; two derived with
+     the new `corpus/mutate.py`.
+   - `mutate.py` only reads its source and creates the output with `open(...,
+     "xb")`. It refuses an existing path or symlink, a path outside `images/`
+     (after resolving `..`), any file named `sandbox.img`, and output equal to
+     the source. All-zero 1 MiB chunks stay sparse.
+   - `corpus/manifest.tsv` has seven rows; `corpus/vm/README.md` documents
+     both.
+   - `tests/test_vm_images.py` (18 tests, `@pytest.mark.vm`) skips when an
+     image is absent.
+7. **Import boundary.** `tests/test_import_boundary.py` scans `src/` for
+   `dissect`/`lzallright` imports: static imports plus `import_module` and
+   `__import__` with a string. It includes 8 scanner self-tests. Plan task 8
+   lists this test, but it is part of the M1a DoD, so it lands here.
+8. **Shared helpers.** `tests/helpers.py` provides the synthetic superblock
+   builder, sparse scratch images and a scratch-dir context under
+   `images/scratch/`. No test uses `/tmp` or `tmp_path`.
+
+**Ground-truth capture** (btrfs-progs v6.6.3, host; outputs in
+`images/scratch/m1a/`). To rule out any write by btrfs-progs, dump-tree ran on
+a byte-identical read-only copy, not on `sandbox.img` itself:
+
+```sh
+cp sandbox.img images/scratch/m1a/sandbox-ro.img && chmod 0444 images/scratch/m1a/sandbox-ro.img
+sha256sum images/scratch/m1a/sandbox-ro.img     # 07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418
+btrfs inspect-internal dump-super -fa images/scratch/m1a/sandbox-ro.img
+btrfs inspect-internal dump-tree -t root images/scratch/m1a/sandbox-ro.img
+btrfs inspect-internal dump-tree -t 5 -b 30785536 images/scratch/m1a/sandbox-ro.img   # gen 11
+btrfs inspect-internal dump-tree -t 5 -b 30867456 images/scratch/m1a/sandbox-ro.img   # gen 12
+btrfs inspect-internal dump-tree -t 5 -b 30539776 images/scratch/m1a/sandbox-ro.img   # gen 13
+btrfs inspect-internal dump-tree -t 5 -b 30703616 images/scratch/m1a/sandbox-ro.img   # gen 14
+btrfs inspect-internal dump-tree -b 30474240 images/scratch/m1a/sandbox-ro.img        # gen-13 extent tree (defect #8)
+```
+
+- **Superblock** (`dump-super -fa`): two copies, both `[match]`.
+  - bytenr 65536, csum `0xeadc2eaa`, generation 14;
+  - bytenr 67108864, csum `0x4abd0664`, generation 14;
+  - the 256 GiB mirror does not fit.
+  - Shared fields: root 30720000, chunk_root 22036480,
+    chunk_root_generation 8, total_bytes 268435456, bytes_used 163840,
+    csum_type 0, compat_ro 0xb (FST, FST_VALID, BGT), incompat 0x361.
+- **Backup roots** (slot: tree_root gen / fs_root):
+  - 0: 30572544 **13** / 30539776;
+  - 1: 30720000 **14** / 30703616;
+  - 2: 30801920 **11** / 30785536;
+  - 3: 30883840 **12** / 30867456.
+
+  All four share chunk_root 22036480 gen 8 and backup_total_bytes
+  268435456.
+- **Gen 11** (leaf 30785536, 8 items):
+  - inode 256 is a dir (size 30) with DIR_ITEM/DIR_INDEX 2
+    `target_file.txt` → 257;
+  - inode 257 has size 31, nbytes 31, and INODE_REF index 2
+    `target_file.txt`;
+  - XATTR `security.selinux`;
+  - `EXTENT_DATA 0` `type 0 (inline)`, `inline extent data size 31 ram_bytes
+    31 compression 0`.
+- **Gen 12** (not asserted on the old branch; captured now), full leaf:
+  ```
+  leaf 30867456 items 2 free space 16061 generation 12 owner FS_TREE
+      item 0 key (256 INODE_ITEM 0) itemoff 16123 itemsize 160
+          generation 3 transid 12 size 0 nbytes 16384
+          block group 0 mode 40755 links 1 uid 1000 gid 1000 rdev 0
+          sequence 3 flags 0x0(none)
+      item 1 key (256 INODE_REF 256) itemoff 16111 itemsize 12
+          index 0 namelen 2 name: ..
+  ```
+  So the gen-12 state is the root directory only, now empty (size 0).
+  `target_file.txt` was deleted in transaction 12, not "by gen 14".
+- **Gen 13** (leaf 30539776, 8 items):
+  - inode 256 dir (size 32) → `large_target.txt` 257;
+  - inode 257 has size 5242880 and INODE_REF `large_target.txt`;
+  - `EXTENT_DATA 0` `type 1 (regular)`, disk byte 13631488, nr 5242880,
+    ram 5242880, no compression.
+- **Gen 14** (leaf 30703616): 2 items, the root dir only (size 0).
+- **Defect #8 evidence** (gen-13 extent tree): `item 0 key (13631488
+  EXTENT_ITEM 5242880) ... extent data backref root FS_TREE objectid 257`.
+  The objectid is the address that EXTENT_DATA points to; the offset is the
+  length.
+- **Plan values checked.** Slot order 13, 14, 11, 12; chunk-root gen 8;
+  total_bytes 268435456; newest backup tree_root == SB root 30720000; gen 11
+  inode 257 31 B inline; gen 13 5 242 880 B; gen 14 root only. All are
+  correct, and none is wrong. research.md §10.5's "both deleted by gen 14"
+  is loose for `target_file.txt`, which is already gone at gen 12.
+
+**Constant sources.** Linux tag `v7.0` (tag object `3131ff5a1174`), fetched as
+`https://raw.githubusercontent.com/torvalds/linux/v7.0/<path>` into
+`images/scratch/m1a/kernel/`:
+- `include/uapi/linux/btrfs_tree.h`: structs l.473–1354, objectids l.38–130,
+  keys l.143–377, csum enum l.386–391;
+- `include/uapi/linux/btrfs.h`: feature bits l.298–339, sizes l.33 and
+  l.62–63;
+- `fs/btrfs/fs.h`: SB offset/size and static_assert l.80–82, masks l.286–330;
+- `fs/btrfs/fs.c`: csum sizes and names l.12–17, `btrfs_csum()` l.44–62;
+- `fs/btrfs/disk-io.h`: mirrors l.26–43;
+- `fs/btrfs/disk-io.c`: `btrfs_check_super_csum` l.153–169, backup ring
+  l.1596–1607, SB write l.3795–3810;
+- `fs/btrfs/volumes.c`: `btrfs_read_disk_super` edge rule l.1356 and
+  magic/bytenr check l.1378–1379.
+
+Every size, offset and value is asserted in `tests/test_ondisk.py` with its
+file:line.
+
+**Checksum library choice: `crc32c` (ICRAR) 2.9.post0, as planned.** Checked
+2026-09-15:
+
+| | `crc32c` 2.9.post0 | `google-crc32c` 1.8.0 |
+|---|---|---|
+| Licence | LGPL-2.1-or-later (plan §3.3: fine as a separate, unmodified dep) | Apache-2.0 |
+| cp314 wheels | 24: manylinux/musllinux x86_64, aarch64, riscv64; macOS; Windows; free-threaded `cp314t` too | 5; no musllinux or `cp314t` |
+| Last release | 2026-09-11 | 2025-12-16 |
+| `memoryview` input | accepted (zero-copy over the image mmap) | `TypeError: argument 1 must be read-only bytes-like object, not memoryview` |
+| Speed (16 KiB blocks, this host) | ~20.8 GB/s, `hardware_based=True` | ~24.7 GB/s |
+| `crc32c(b"123456789")` | `0xe3069283` | `0xe3069283` |
+
+`crc32c` is simpler for us: it hashes mmap slices without copying, and it has
+wheels for every platform and free-threaded build we might meet. The
+`google-crc32c` swap stays documented in plan §3.3 for a frozen binary.
+`xxhash` 4.0.1 (BSD-2-Clause) has cp314 and cp314t wheels.
+
+**Generated images** (under `images/scenarios/`; host mkfs btrfs-progs
+v6.6.3; guest kernel `7.0.0-31-generic`; QEMU 8.2.2; scenario s01; all
+512 MiB):
+
+| Name | Generator | Superblock | sha256 |
+|---|---|---|---|
+| `m1_xxhash` | `CSUM=xxhash corpus/vm/make_image.sh m1_xxhash` | xxhash64, gen 38, compat_ro 0x3, incompat 0x371 | `8f4190c9dc500bbdaa15f65fc7994ec8d5476a19b35aa07456f5bab336e98bf7` |
+| `m1_sha256_bgt` | `CSUM=sha256 MKFS_ARGS="-O block-group-tree" corpus/vm/make_image.sh m1_sha256_bgt` | sha256, gen 38, compat_ro 0xb (BGT), incompat 0x371 | `f29c1e819d00f77816c3d7181eb38a3ea01c8ceffa7e9e16b6d0161cb93800b6` |
+| `m1_blake2b` | `CSUM=blake2 corpus/vm/make_image.sh m1_blake2b` | blake2b, gen 38, compat_ro 0x3 | `909d7573e9725b2fec2dc07c7caaa6f9c3895de30feca759ea65ba89abc470db` |
+| `m1_lzo` | `CSUM=xxhash MOUNT_OPTS=compress-force=lzo,commit=5 corpus/vm/make_image.sh m1_lzo` | xxhash64, incompat 0x369 (COMPRESS_LZO) | `fb6f3a0ad7a96244897a4b3e78d084899f8638b4ea0eeda7f584d2965efe7190` |
+| `m1_zlib` | `CSUM=xxhash MOUNT_OPTS=compress-force=zlib,commit=5 corpus/vm/make_image.sh m1_zlib` | xxhash64, incompat 0x361 | `91a0140dd93310323281d99a3b79f130e0b02093fdea2282d570a49b924fbfc4` |
+| `m1_unknown_incompat` | `uv run python corpus/mutate.py images/scenarios/m1_xxhash.img images/scenarios/m1_unknown_incompat.img set-incompat-bit 40` | both copies valid, incompat 0x10000000371 | `aa6d133f6600803eecf50506b86fd15ac74030c98b19c270b6e88427fd9f63c7` |
+| `m1_mirror_damage` | `uv run python corpus/mutate.py images/scenarios/m1_xxhash.img images/scenarios/m1_mirror_damage.img zero-primary-sb` | mirror 0 zeroed, mirror 1 valid | `22472b300e20aca37c333e6e2030448ffbaedda237c46f63ebdb124325b546a7` |
+
+- All five guest logs end in `=== SCENARIO-DONE`, and the balance line reads
+  "had to relocate 3 out of 3 chunks".
+- Guest-printed SHA-256s are identical across the five runs:
+  - `keep.txt` `f6351f5e…9587a`;
+  - `deleted_big.txt` `44969d02…3e5fd4`;
+  - `deleted_inline.txt` `df6ff35a…5db2`.
+- The five s01 generations are bit-unstable across reruns (§7). The manifest
+  pins this run, and `test_local_image_matches_manifest_sha256` fails if an
+  image is regenerated without updating the manifest.
+
+**`btrfska info` per image** (full outputs in `images/scratch/m1a/info/`):
+
+| Image | Copies | Selected / disagreements | csum type | compat_ro | Gate | Exit |
+|---|---|---|---|---|---|---|
+| `sandbox.img` | m0 valid `eadc2eaa`, m1 valid `4abd0664`, m2 not present | mirror 0 (gen 14) / none | 0 crc32c | 0xb, BGT note | OK | 0 |
+| `m1_xxhash` | m0 `076c0ab4c57738b5`, m1 `103e07ea76928450` valid | mirror 0 (gen 38) / none | 1 xxhash64 | 0x3 | OK | 0 |
+| `m1_sha256_bgt` | m0 `215d22af…abebd9c`, m1 `4ab60866…17497132` valid | mirror 0 (gen 38) / none | 2 sha256 | 0xb, BGT note | OK | 0 |
+| `m1_blake2b` | m0 `a6b01c3d…441ec5dd`, m1 `c34dd59f…7299a54e` valid | mirror 0 (gen 38) / none | 3 blake2b | 0x3 | OK | 0 |
+| `m1_lzo` | both valid | mirror 0 (gen 38) / none | 1 xxhash64 | 0x3 | OK | 0 |
+| `m1_zlib` | both valid | mirror 0 (gen 38) / none | 1 xxhash64 | 0x3 | OK | 0 |
+| `m1_unknown_incompat` | both valid | mirror 0 (gen 38) / none | 1 xxhash64 | 0x3 | `REFUSED` + `UNSUPPORTED_INCOMPAT UNKNOWN_BIT_40` | 2 |
+| same, `--allow-unsupported` | | | | | `OVERRIDDEN (--allow-unsupported: derived rows are unsupported_format=1)` + the same line | 0 |
+| `m1_mirror_damage` | m0 `INVALID (magic mismatch, csum mismatch)`, m1 valid | **mirror 1** (gen 38) / `mirror 0 invalid: magic mismatch, csum mismatch` | 1 xxhash64 | 0x3 | OK | 0 |
+
+The vm test `test_superblock_csums_agree_with_dump_super` also checks that
+`btrfs inspect-internal dump-super -a` prints the same csum bytes with
+`[match]` for every copy on the three non-crc32c csum images.
+
+**Deviations** (none changes a plan decision; `plan.md` is not edited):
+- **dump-tree ran on a read-only copy.** It ran on a hash-identical 0444
+  copy of `sandbox.img` under `images/scratch/`, not on the file itself,
+  so btrfs-progs could not write the evidence.
+- **`m1_unknown_incompat` sets bit 40 in every copy.** The plan says "bit
+  1<<40 set and superblock csum recomputed". Both copies get the bit, each
+  with a recomputed csum. Patching only the primary would make best-copy
+  selection report a disagreement, which mixes two effects into a test aimed
+  at the gate. Both mutated images derive from `m1_xxhash` (the plan names no
+  source), so the csum recompute is exercised on a non-crc32c type.
+- **`m1_badnode` is deferred to M1b.** Metadata in the s01 images is DUP.
+  Whether one or both copies of the leaf must be flipped depends on whether
+  M1b's node reader falls back to the second stripe, and M1b owns that
+  decision. `m1_lzo` and `m1_zlib` were trivial and are added now.
+- **mkfs csum name.** `m1_blake2b` uses `CSUM=blake2`, the btrfs-progs 6.6.3
+  mkfs spelling.
+- **Device-end rule.** A superblock copy that ends exactly at the image end is
+  treated as not present, as the kernel does (`volumes.c:1356`).
+- **Unknown compat_ro bits are reported but not refused.** compat_ro only
+  forbids writing, and the plan's gate specifies incompat bits only.
+- **`NO_VALID_SUPERBLOCK`.** An image without any valid superblock exits 2
+  with this line; the plan does not specify this case.
+- **Bytenr check needs the magic.** The bytenr problem is reported only when
+  the magic matches, so a zeroed copy reads "magic mismatch, csum mismatch"
+  rather than three reasons.
+- **Import-boundary test moved forward.** It lands here (plan task 8) because
+  it is in the M1a DoD. The dissect.btrfs and lzallright oracles are not yet
+  in the `dev` group.
+- **Placeholder walker API.** The strict-xfail fs-tree tests import
+  `btrfska.substrate.tree.fs_tree_inventory`, a placeholder name. M1b may
+  rename it, but must make the four tests pass and remove the marker.
+- **Sparse copies are coarser.** `mutate.py` keeps only all-zero 1 MiB
+  chunks sparse, so derived images use 17–18 MiB on disk against ~10 MiB for
+  their source (apparent size identical, 536 870 912 B).
+- **Header citation.** research.md §10.3 cites `btrfs_tree.h` for
+  incompat-bit values; they are defined in `btrfs.h`. This is recorded in
+  §10.7, and §10.3 is not rewritten.
+
+**Research notes.** Added as research.md §10.7:
+- superblock copies agree on all healthy images, so a disagreement is
+  evidence;
+- the kernel's device-end rule;
+- the feature bits live in `btrfs.h`;
+- dump-super prints csum bytes in disk order;
+- in every s01 image all four `backup_fs_root` slots are the same gen-19
+  subvolume-5 tree. Deletions inside other subvolumes are invisible to
+  `backup_fs_root` diffing, and the scenario's deletions already predate all
+  four backups.
+
+**Verification** (local, branch `feature/m1a-trust-foundations`; logs under
+`images/scratch/m1a/verify/`).
+
+| Check | Command | Result |
+|---|---|---|
+| `sandbox.img` before | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime 2026-04-26 18:49:36 |
+| Tests (all, images present) | `uv run pytest -q` | `244 passed, 4 xfailed` (the four `test_fs_tree_contents_per_generation[11..14]`, reason `tree walker lands in M1b`) |
+| Tests without vm | `uv run pytest -q -m "not vm"` | `226 passed, 18 deselected, 4 xfailed` |
+| vm tests | `uv run pytest -m vm -q` | `18 passed, 230 deselected` |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `26 files already formatted` |
+| Legacy runner | `uv run python -m unittest discover -s legacy/tests` | `Ran 37 tests`, `OK` |
+| Shell syntax | `for f in corpus/vm/*.sh corpus/vm/scenarios/*.sh corpus/vm/init; do sh -n "$f"; done` | exit 0 |
+| Lockfile | `uv lock --check` | `Resolved 10 packages` (consistent) |
+| Info | `uv run btrfska info <image>` for `sandbox.img` and the seven `m1_*` images | table above |
+| Scope | `git diff --stat main..HEAD` | 21 files: `src/btrfska/{cli.py,substrate/{ondisk,csum,superblock}.py}`, `tests/…`, `corpus/{mutate.py,manifest.tsv,vm/README.md}`, `pyproject.toml`, `uv.lock`, `README.md`, `research.md` (+ this catalog) |
+| `sandbox.img` after | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime still 2026-04-26 18:49:36 |
+
+The default count went from 84 (end of M0) to 248 collected. Of those, 18 are
+vm tests; in CI, without images, all but `test_manifest_lists_every_m1a_image`
+skip.
+
+### Review fixes (2026-09-15)
+
+The reviewer approved PR #8 with fixes. They checked the code against
+btrfs-progs `kernel-shared/disk-io.c` and kernel v7.0 `fs/btrfs/disk-io.c`.
+Every fix is test-first: the new tests were run and seen failing
+(AttributeError or assertion) before the code changed. Kernel line numbers
+refer to the v7.0 files in `images/scratch/m1a/kernel/`. btrfs-progs line
+numbers refer to tag `v7.1` (identical in the checked-out `v7.1-56-g4d02bee`).
+
+- **Commits:**
+  - `a018b41` Check superblock geometry against the kernel's validate_super rules
+  - `52d11a9` Anchor superblock selection on the first valid copy's fsid
+  - `527e976` Validate mutate.py patches before creating the output
+  - `3cd7199` Tighten the ground-truth xfails to ImportError and zip copies strictly
+  - `ef94dd2` Add the m1_foreign_mirror image and note foreign superblock residue
+  - this catalog update
+
+1. **HIGH: a foreign mirror could win selection.**
+   - **Before:** `select()` took the highest generation among csum-valid
+     copies, whatever their fsid. A leftover 64 MiB copy of an earlier
+     filesystem with a higher generation would have been reported as this
+     image's identity and roots.
+   - **Progs rule:** in recover mode, `btrfs_read_dev_super`
+     (l.2022-2064) sets the fsid from the first accepted copy, and the
+     metadata_uuid too when that copy has `METADATA_UUID` set (l.2037-2045).
+     It then skips every later copy whose fsid or metadata_uuid differs
+     (l.2046-2056), with the comment "contain data of different
+     filesystems".
+   - **Now:** `superblock.same_filesystem()` implements that rule. The
+     lowest-offset valid copy anchors the identity. Only copies of the same
+     filesystem compete on generation.
+   - **Foreign copies:** valid copies of another filesystem go to
+     `Selection.foreign`. They are reported as `mirror N foreign superblock
+     at <offset> (fsid …[, metadata_uuid …], generation …)`, and `info` marks
+     the copy line `(foreign fsid …)`.
+   - **Differing fields:** an older same-filesystem copy now also names the
+     other fields that differ: `mirror 0 generation 5 != selected generation
+     6, differs in: root`.
+   - **Tests:** synthetic cases cover a higher-generation foreign mirror,
+     anchoring on mirror 1 when mirror 0 is damaged, metadata_uuid anchoring
+     with and without the feature bit, and the CLI marker.
+   - **Image:** `m1_foreign_mirror` (new `corpus/mutate.py transplant-sb`
+     op). `m1_sha256_bgt`'s mirror-1 copy is placed into mirror 1 of a copy
+     of `m1_xxhash`, with generation 1000 and the csum recomputed as
+     sha256. sha256
+     `a5c3e65a6b34f1668b432f6ed70d2135f4a67e515e7c752294cffe49b2f40ea2`.
+   - **Oracle:** host btrfs-progs v6.6.3 `dump-super -a` prints
+     `csum_type 2 (sha256)`, `[match]`, fsid
+     `55692877-4e8d-4649-a76d-370de1420992` and generation 1000 for that copy.
+     The vm test `test_superblock_csums_agree_with_dump_super` now includes
+     the image.
+   - **Research:** research.md §10.7 gains a dated note on foreign copies as
+     evidence of a prior filesystem.
+2. **MEDIUM: policy attribution.**
+   - **Kernel:** it reads only mirror 0 at mount, via `open_ctree` →
+     `btrfs_read_disk_super(bdev, 0, false)` (`disk-io.c:3333`).
+     Highest-generation selection is btrfs-progs recover behaviour.
+   - **Now:** the module docstring, the `select()` docstring and the
+     catalog bullet above say so.
+   - **CLI:** `btrfska info` prints `kernel would mount: mirror 0 (valid,
+     generation N)` or `(invalid: reasons)` whenever the selection is not
+     mirror 0, or when mirror 0 carries any problem. Warnings count, because
+     the kernel rejects on every check btrfska mirrors.
+   - **Tests:** a synthetic CLI test, and the vm test on `m1_mirror_damage`.
+3. **MEDIUM: geometry sanity.**
+   - **Scope:** `superblock.geometry_problems()` mirrors the
+     `btrfs_validate_super` checks (`disk-io.c:2360-2580`) that matter to a
+     read-only reader.
+   - **When:** checks run only when the magic matches, like the bytenr check.
+   - **New fields:** `SuperblockCopy.geometry_ok` joins `valid`. Every
+     violation is recorded in `problems`.
+   - **New constants** (asserted in `test_ondisk.py`): `MIN_BLOCKSIZE` 4096
+     (`fs.h:59-62`, non-debug), `MAX_METADATA_BLOCKSIZE` 65536
+     (`btrfs_tree.h:380`), and `MIN_SYS_CHUNK_ARRAY_SIZE` 97 = disk_key +
+     btrfs_chunk with its embedded stripe (`disk-io.c:2554-2555`).
+
+   | Check (v7.0 `disk-io.c`) | btrfska | Why |
+   |---|---|---|
+   | sectorsize power of two, 4096 ≤ s ≤ 65536 (l.2404-2408) | invalidates | all later slicing uses it |
+   | nodesize power of two, sectorsize ≤ n ≤ 65536 (l.2417-2421) | invalidates | node reads slice by it |
+   | root/chunk_root/log_root level < 8 (l.2384-2398) | invalidates | bounds walker recursion |
+   | sys_chunk_array_size ≤ 2048 and ≥ 97 (l.2548-2561) | invalidates | the bootstrap chunk map is sliced from it |
+   | known csum_type (`open_ctree` l.3345-3351) | invalidates (unchanged) | without a csum nothing is trusted |
+   | root/chunk_root/log_root aligned to sectorsize (l.2429-2443) | warns | identity, backup roots and sys array stay usable; the node reader bounds-checks addresses; skipped when sectorsize is itself invalid |
+   | num_devices == 0 (l.2527-2530) / > 2^31 (l.2524-2526) | warns | no slicing depends on it |
+
+   - **Not mirrored:** super flags (l.2372), `leafsize == nodesize`
+     (l.2422), the host page-size limit (l.2410), fsid vs the mounted device
+     set (l.2445-2467), feature dependencies (l.2473-2508), `bytes_used`
+     and stripesize (l.2514-2523), and `validate_sys_chunk_array` (l.2542;
+     M1b parses the array).
+   - **Output:** a valid copy with warnings prints `valid, … (warnings: …)`.
+   - **Tests:** parametrised negatives (13 invalidating, 5 warning-only),
+     plus a truncated-image test with sizes 1, 65536 and 69631, all below
+     64 KiB + 4096. The truncated test passed at once: `read_copies()`
+     already marks such slots not present. It stays as a guard.
+   - **Helper change:** `tests/helpers.make_block` now builds realistic
+     geometry (4096/16384, sys array 97, aligned root) and accepts
+     field overrides.
+4. **MEDIUM: xfails could mask M1b failures.**
+   - **Now:** `xfail(strict=True, raises=ImportError, …)`.
+   - **Probe:** `images/scratch/review-fixes/test_xfail_raises_probe.py`
+     shows the marker works. The missing-module case gives `1 xfailed`; an
+     AssertionError under the same marker gives `1 failed`.
+5. **LOW: tree fsid.**
+   - **Now:** `superblock.tree_fsid()` follows `btrfs_sb_fsid_ptr`
+     (`volumes.c:734-740`): metadata_uuid when `METADATA_UUID` is set, else
+     fsid. `info` prints `tree fsid:`.
+   - **Tests:** synthetic with and without the bit; sandbox asserts tree
+     fsid == fsid.
+6. **LOW: mutate.py created the output before validating.**
+   - **Now:** `main()` computes every patch and runs `check_patches()`
+     before `open(dst, "xb")`.
+   - **Test:** `test_invalid_source_leaves_no_output`.
+7. **LOW: straddling patches.**
+   - **Now:** `write_patched()` applies only the overlap of each patch with
+     each chunk, and asserts the chunk length is unchanged.
+     `check_patches()` refuses a patch past the image end.
+   - **Tests:** a unit test with a 16-byte chunk: a patch inside one chunk,
+     one straddling a boundary, one spanning three chunks, and one ending at
+     EOF. A second test covers the past-EOF refusal.
+8. **NIT.** `test_two_valid_copies_and_mirror_2_beyond_the_image` asserts
+   the ground truth has two copies, then zips `copies[:2]` with
+   `strict=True`. Mirror 2's absence is asserted just above.
+
+**`btrfska info` after the fixes** (full outputs in
+`images/scratch/review-fixes/info/`):
+```
+$ uv run btrfska info images/scenarios/m1_mirror_damage.img      # exit 0
+  mirror 0 @ 65536: INVALID (magic mismatch, csum mismatch)
+  mirror 1 @ 67108864: valid, generation 38, csum xxhash64 103e07ea76928450
+  mirror 2 @ 274877906944: not present (beyond image end)
+selected: mirror 1 (generation 38)
+kernel would mount: mirror 0 (invalid: magic mismatch, csum mismatch)
+disagreements:
+  mirror 0 invalid: magic mismatch, csum mismatch
+fsid: 554bf995-913e-4d56-9f61-5ce4f5e03ebf
+tree fsid: 554bf995-913e-4d56-9f61-5ce4f5e03ebf
+
+$ uv run btrfska info images/scenarios/m1_foreign_mirror.img     # exit 0
+  mirror 0 @ 65536: valid, generation 38, csum xxhash64 076c0ab4c57738b5
+  mirror 1 @ 67108864: valid, generation 1000, csum sha256 41c053c6…16204d498 (foreign fsid 55692877-4e8d-4649-a76d-370de1420992)
+  mirror 2 @ 274877906944: not present (beyond image end)
+selected: mirror 0 (generation 38)
+disagreements:
+  mirror 1 foreign superblock at 67108864 (fsid 55692877-4e8d-4649-a76d-370de1420992, generation 1000)
+fsid: 554bf995-913e-4d56-9f61-5ce4f5e03ebf
+tree fsid: 554bf995-913e-4d56-9f61-5ce4f5e03ebf
+gate: OK
+```
+With selection by generation alone, `m1_foreign_mirror` would have reported
+generation 1000 and `m1_sha256_bgt`'s fsid and roots.
+
+**Verification** (logs in `images/scratch/review-fixes/verify/`):
+
+| Check | Command | Result |
+|---|---|---|
+| `sandbox.img` before | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime 2026-04-26 18:49:36 |
+| Tests | `uv run pytest -q` | `288 passed, 4 xfailed` (was 244 + 4) |
+| vm tests | `uv run pytest -m vm -q` | `21 passed, 271 deselected` (was 18) |
+| Tests without vm | `uv run pytest -q -m "not vm"` | `267 passed, 21 deselected, 4 xfailed` |
+| Read-only scan and import boundary | `uv run pytest -q tests/test_readonly.py tests/test_import_boundary.py` | `53 passed`; `grep -rn 'dissect\|lzallright' src/` finds nothing |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `26 files already formatted` |
+| Legacy runner | `uv run python -m unittest discover -s legacy/tests` | `Ran 37 tests`, `OK` |
+| Lockfile | `uv lock --check` | `Resolved 10 packages` |
+| Scope | `git diff --stat 8632164..HEAD` | 14 files, +712/−64: `src/btrfska/{cli.py,substrate/{ondisk,superblock}.py}`, `corpus/{mutate.py,manifest.tsv,vm/README.md}`, `research.md`, `tests/…` (+ this catalog) |
+| `sandbox.img` after | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime unchanged |
+
+**For M1b (node reader, chunk maps, tree walker).**
+- Tree block headers must carry `superblock.tree_fsid(fields)`, not `fsid`.
+  Validate node headers against it.
+- The fs-tree xfails now accept only ImportError. Once the walker module
+  exists, a wrong inventory fails the run.
+- Make the four strict xfails in `tests/test_ground_truth.py` pass. The
+  expected inode inventories are in `tests/ground_truth/sandbox.json` under
+  `fs_tree_by_generation`; adapt the placeholder
+  `fs_tree_inventory(img, bytenr)` call to the real API.
+- Use `ondisk.HEADER`, `ITEM`, `KEY_PTR`, `CHUNK`/`STRIPE`, and
+  `csum.block_csum_ok(csum_type, node)` over `[32:nodesize]`. The csum type
+  comes from the selected superblock (`Selection.selected.fields`).
+- Generate `m1_badnode` once the DUP-mirror read policy is decided, and add
+  a `flip-byte` operation to `corpus/mutate.py` behind the same guards.
+- On s01 images the backup `fs_root` never changes (§10.7). Walk subvolumes
+  through each backup `tree_root`'s ROOT_ITEMs to see `sv1` history.
+- A gate refusal must stop the walkers too: `superblock.gate(...).refused`,
+  or `unsupported_format=1` rows when overridden.
+
 ## 2026-09-15 — M0: reset and scaffolding
 
 - **Branch:** `feature/m0-scaffolding` (from `main` at `b55dae2`). Implements

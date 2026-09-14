@@ -857,6 +857,20 @@ AGPL-3.0 consequence accepted (see plan.md §3.3 for the license analysis).
    ROOT_REF/BACKREF (0x9C/0x90), SHARED_*_REF (0xB6/0xB8),
    TREE_BLOCK_REF (0xB0), BLOCK_GROUP_ITEM (0xC0), DEV_EXTENT (0xCC),
    FREE_SPACE_* (0xDD–0xDF), DIR_LOG_* (0x3C/0x48), STRING_ITEM (0xFD).
+8. **EXTENT_ITEM address taken from the wrong key field** (added
+   2026-09-15, found on `feature/m1-backup-roots` commit `1d48203`, §10.5).
+   An EXTENT_ITEM key is `(logical address, EXTENT_ITEM 168, length in
+   bytes)`: the *objectid* is the extent's logical start and the *offset*
+   its length (METADATA_ITEM 169 stores the tree level in the offset
+   instead). `legacy/utils/btree.py:888` sets
+   `current_extent_laddr = key_offset`, so every EXTENT_DATA_REF backref it
+   prints carries the extent length as its address. On `sandbox.img` the
+   gen-13 extent tree (leaf 30474240) holds
+   `key (13631488 EXTENT_ITEM 5242880)` for `large_target.txt`, whose
+   EXTENT_DATA says `disk byte 13631488 nr 5242880`, so legacy would report
+   address 0x500000 instead of 0xD00000. The M4 rewrite must use the
+   objectid, and golden tests must not freeze legacy backref addresses
+   (plan.md §4.1, §4.3).
 
 ### 8.2 What the prototype got right (the parts worth porting)
 
@@ -1558,3 +1572,63 @@ block-group tree (objectid 11).
   Dewald 2018, Oh & Hwang 2025) via a browser session.
 - (e) Should the `docs/*.pdf` files stay tracked in git (they are, contrary
   to earlier notes)?
+
+### 10.7 Format notes from M1a (2026-09-15)
+
+Observed while building the superblock trust layer (catalog.md, M1a entry).
+Kernel references are to tag v7.0.
+
+- **Superblock copies agree on healthy images.** On `sandbox.img` and the five
+  generated `m1_*` images, mirror 0 (64 KiB) and mirror 1 (64 MiB) carry the
+  same generation, and every field except `bytenr` and `csum` is identical.
+  This is expected: the kernel writes every copy in the same commit, setting
+  `bytenr` and recomputing the csum per copy (`disk-io.c:3795-3810`). A
+  disagreement between copies therefore points to an interrupted commit,
+  damage or tampering, and `btrfska info` reports it.
+- **Edge rule.** The kernel ignores a copy whose last byte is the device's
+  last byte: `bytenr + BTRFS_SUPER_INFO_SIZE >= size` rejects it
+  (`volumes.c:1356`, and `disk-io.c:3806` when writing). btrfska follows the
+  same rule.
+- **Where the feature bits live.** Incompat and compat_ro bits are defined in
+  `include/uapi/linux/btrfs.h:298-339`, not in `btrfs_tree.h`. Bit 15 is
+  unassigned in v7.0. The mount masks are in `fs/btrfs/fs.h:286-330`; RST,
+  extent-tree-v2 and remap tree are in `INCOMPAT_SUPP` only under
+  `CONFIG_BTRFS_EXPERIMENTAL`.
+- **`dump-super` prints csum bytes in disk order.** It does not print the
+  integer value. For `sandbox.img` it shows `0xeadc2eaa`; the CRC-32C value
+  stored little-endian in those bytes is `0xaa2edcea`. Cross-checks against
+  btrfs-progs must compare bytes.
+- **Backup roots track subvolume 5 only.** In every s01 image (`m1_xxhash`,
+  `m1_sha256_bgt`, `m1_blake2b`, `m1_lzo`, `m1_zlib`), all four backup slots
+  (gens 35–38) name the same `backup_fs_root` (gen 19). The scenario's
+  writes and deletions all happen inside subvolume `sv1`, whose tree is
+  reachable only through ROOT_ITEMs in each backup's `tree_root`. Two
+  consequences:
+  - a diff of `backup_fs_root` states sees nothing of a deletion in any other
+    subvolume. That is the method attributed to Beyond Carving and
+    SecurityRonin `recover_deleted` in plan.md §1. Per-subvolume history needs
+    a walk of each backup's root tree (M1 task 7);
+  - the deletions already predate all four backup roots. Inferred from the
+    scenario order: the deletion commit precedes the six churn commits, and
+    those precede the balance, which had rewritten the chunk root by gen 30.
+    So even this small scenario is a natural beyond-4-generations case
+    (plan.md M7).
+- **Foreign superblock copies are residue of a prior filesystem**
+  (2026-09-15, M1a review). mkfs writes only the mirrors that fit the new
+  filesystem, and other tools that reformat a disk overwrite only their own
+  metadata. So a valid copy at 64 MiB or 256 GiB whose fsid differs from the
+  primary's can be left over from an earlier btrfs on the same device.
+  It survives because nothing else writes those offsets unless data lands on
+  them. btrfs-progs already treats such copies as foreign: in recover mode
+  `btrfs_read_dev_super` (v7.1 `kernel-shared/disk-io.c:2037-2056`) anchors
+  the fsid (and metadata_uuid when `METADATA_UUID` is set) on the first
+  accepted copy and skips any copy that differs, because the copies "contain
+  data of different filesystems". Selecting by generation alone would let
+  such residue override the live filesystem's identity and roots. The kernel
+  is not exposed to this, since it mounts mirror 0 only (`disk-io.c:3333`).
+  btrfska follows the progs rule, never selects a foreign copy, and reports
+  it as `foreign superblock at <offset> (fsid …, generation …)`. For an
+  examiner this is positive evidence: the device held another filesystem
+  before, with that fsid and at least that generation. The foreign copy's
+  own backup roots and sys_chunk_array may point at metadata that still
+  survives. Synthetic case: `m1_foreign_mirror` (corpus/manifest.tsv).
