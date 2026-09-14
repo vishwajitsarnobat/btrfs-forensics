@@ -19,6 +19,8 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 VM=${VM_DIR:-$REPO/images/vm}
 KVER=${KVER:-7.0.0-31-generic}
 IMG=$1
+# the guest writes to IMG: refuse the golden evidence image
+case $(basename "$IMG") in sandbox.img) echo "refusing to mutate sandbox.img" >&2; exit 1;; esac
 SCENARIO=${SCENARIO:-s01}
 MOUNT_OPTS=${MOUNT_OPTS-compress=zstd,commit=5}
 

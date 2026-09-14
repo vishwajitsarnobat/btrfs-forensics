@@ -12,6 +12,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 OUT=$REPO/images/scenarios
 NAME=$1
+# NAME is a plain file stem: never let it escape images/scenarios/
+case $NAME in ''|*/*|.*) echo "invalid scenario name: $NAME" >&2; exit 1;; esac
 mkdir -p "$OUT"
 
 rm -f "$OUT/$NAME.img"
