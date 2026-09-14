@@ -857,6 +857,20 @@ AGPL-3.0 consequence accepted (see plan.md §3.3 for the license analysis).
    ROOT_REF/BACKREF (0x9C/0x90), SHARED_*_REF (0xB6/0xB8),
    TREE_BLOCK_REF (0xB0), BLOCK_GROUP_ITEM (0xC0), DEV_EXTENT (0xCC),
    FREE_SPACE_* (0xDD–0xDF), DIR_LOG_* (0x3C/0x48), STRING_ITEM (0xFD).
+8. **EXTENT_ITEM address taken from the wrong key field** (added
+   2026-09-15, found on `feature/m1-backup-roots` commit `1d48203`, §10.5).
+   An EXTENT_ITEM key is `(logical address, EXTENT_ITEM 168, length in
+   bytes)`: the *objectid* is the extent's logical start and the *offset*
+   its length (METADATA_ITEM 169 stores the tree level in the offset
+   instead). `legacy/utils/btree.py:888` sets
+   `current_extent_laddr = key_offset`, so every EXTENT_DATA_REF backref it
+   prints carries the extent length as its address. On `sandbox.img` the
+   gen-13 extent tree (leaf 30474240) holds
+   `key (13631488 EXTENT_ITEM 5242880)` for `large_target.txt`, whose
+   EXTENT_DATA says `disk byte 13631488 nr 5242880`, so legacy would report
+   address 0x500000 instead of 0xD00000. The M4 rewrite must use the
+   objectid, and golden tests must not freeze legacy backref addresses
+   (plan.md §4.1, §4.3).
 
 ### 8.2 What the prototype got right (the parts worth porting)
 
