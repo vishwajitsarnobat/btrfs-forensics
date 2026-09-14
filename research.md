@@ -1613,3 +1613,22 @@ Kernel references are to tag v7.0.
     those precede the balance, which had rewritten the chunk root by gen 30.
     So even this small scenario is a natural beyond-4-generations case
     (plan.md M7).
+- **Foreign superblock copies are residue of a prior filesystem**
+  (2026-09-15, M1a review). mkfs writes only the mirrors that fit the new
+  filesystem, and other tools that reformat a disk overwrite only their own
+  metadata. So a valid copy at 64 MiB or 256 GiB whose fsid differs from the
+  primary's can be left over from an earlier btrfs on the same device.
+  It survives because nothing else writes those offsets unless data lands on
+  them. btrfs-progs already treats such copies as foreign: in recover mode
+  `btrfs_read_dev_super` (v7.1 `kernel-shared/disk-io.c:2037-2056`) anchors
+  the fsid (and metadata_uuid when `METADATA_UUID` is set) on the first
+  accepted copy and skips any copy that differs, because the copies "contain
+  data of different filesystems". Selecting by generation alone would let
+  such residue override the live filesystem's identity and roots. The kernel
+  is not exposed to this, since it mounts mirror 0 only (`disk-io.c:3333`).
+  btrfska follows the progs rule, never selects a foreign copy, and reports
+  it as `foreign superblock at <offset> (fsid …, generation …)`. For an
+  examiner this is positive evidence: the device held another filesystem
+  before, with that fsid and at least that generation. The foreign copy's
+  own backup roots and sys_chunk_array may point at metadata that still
+  survives. Synthetic case: `m1_foreign_mirror` (corpus/manifest.tsv).

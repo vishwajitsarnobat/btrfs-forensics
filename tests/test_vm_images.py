@@ -4,6 +4,7 @@ import csv
 import re
 import shutil
 import subprocess
+import uuid
 
 import pytest
 
@@ -43,15 +44,18 @@ def manifest_rows() -> dict[str, dict]:
         return {row["name"]: row for row in csv.DictReader(f, delimiter="\t")}
 
 
+DERIVED = ["m1_unknown_incompat", "m1_mirror_damage", "m1_foreign_mirror"]
+
+
 def test_manifest_lists_every_m1a_image():
     rows = manifest_rows()
-    for name in [*HEALTHY, "m1_unknown_incompat", "m1_mirror_damage"]:
+    for name in [*HEALTHY, *DERIVED]:
         assert name in rows
         assert re.fullmatch(r"[0-9a-f]{64}", rows[name]["sha256"])
         assert rows[name]["command"]
 
 
-@pytest.mark.parametrize("name", [*HEALTHY, "m1_unknown_incompat", "m1_mirror_damage"])
+@pytest.mark.parametrize("name", [*HEALTHY, *DERIVED])
 def test_local_image_matches_manifest_sha256(name):
     path = image(name)
     with open_image(path) as img:
@@ -77,7 +81,7 @@ def test_superblock_csum_validates_on_every_copy(name):
     assert len({r["tree_root_gen"] for r in sb.backup_roots(fields)}) == 4
 
 
-@pytest.mark.parametrize("name", ["m1_xxhash", "m1_sha256_bgt", "m1_blake2b"])
+@pytest.mark.parametrize("name", ["m1_xxhash", "m1_sha256_bgt", "m1_blake2b", "m1_foreign_mirror"])
 def test_superblock_csums_agree_with_dump_super(name):
     """Independent oracle: btrfs-progs computes and prints the same csum with [match]."""
     if shutil.which("btrfs") is None:
@@ -120,3 +124,25 @@ def test_mirror_damage_image_selects_mirror_1_and_reports_it(capsys):
     assert f"selected: mirror 1 (generation {generation})" in lines
     assert "  mirror 0 invalid: magic mismatch, csum mismatch" in lines
     assert "kernel would mount: mirror 0 (invalid: magic mismatch, csum mismatch)" in lines
+
+
+def test_foreign_mirror_image_keeps_the_primary_and_reports_the_residue(capsys):
+    """Mirror 1 holds m1_sha256_bgt's copy at generation 1000 (sha256 csum, other fsid)."""
+    path = image("m1_foreign_mirror")
+    selection = read("m1_foreign_mirror")
+    primary, mirror1 = selection.copies[0], selection.copies[1]
+    assert primary.valid and mirror1.valid
+    assert mirror1.fields["generation"] == 1000 > primary.fields["generation"]
+    assert mirror1.fields["csum_type"] == csum.SHA256
+    assert mirror1.fields["fsid"] != primary.fields["fsid"]
+    assert selection.selected is primary
+    assert selection.foreign == [mirror1]
+    assert main(["info", str(path)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    foreign_fsid = str(uuid.UUID(bytes=mirror1.fields["fsid"]))
+    assert f"selected: mirror 0 (generation {primary.fields['generation']})" in lines
+    assert (
+        f"  mirror 1 foreign superblock at 67108864 (fsid {foreign_fsid}, generation 1000)" in lines
+    )
+    assert f"fsid: {uuid.UUID(bytes=primary.fields['fsid'])}" in lines
+    assert not any(line.startswith("kernel would mount") for line in lines)
