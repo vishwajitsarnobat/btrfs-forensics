@@ -1,0 +1,8 @@
+name	command	host_mkfs	guest_kernel	sha256
+m1_xxhash	CSUM=xxhash corpus/vm/make_image.sh m1_xxhash	btrfs-progs v6.6.3	7.0.0-31-generic	8f4190c9dc500bbdaa15f65fc7994ec8d5476a19b35aa07456f5bab336e98bf7
+m1_sha256_bgt	CSUM=sha256 MKFS_ARGS="-O block-group-tree" corpus/vm/make_image.sh m1_sha256_bgt	btrfs-progs v6.6.3	7.0.0-31-generic	f29c1e819d00f77816c3d7181eb38a3ea01c8ceffa7e9e16b6d0161cb93800b6
+m1_blake2b	CSUM=blake2 corpus/vm/make_image.sh m1_blake2b	btrfs-progs v6.6.3	7.0.0-31-generic	909d7573e9725b2fec2dc07c7caaa6f9c3895de30feca759ea65ba89abc470db
+m1_lzo	CSUM=xxhash MOUNT_OPTS=compress-force=lzo,commit=5 corpus/vm/make_image.sh m1_lzo	btrfs-progs v6.6.3	7.0.0-31-generic	fb6f3a0ad7a96244897a4b3e78d084899f8638b4ea0eeda7f584d2965efe7190
+m1_zlib	CSUM=xxhash MOUNT_OPTS=compress-force=zlib,commit=5 corpus/vm/make_image.sh m1_zlib	btrfs-progs v6.6.3	7.0.0-31-generic	91a0140dd93310323281d99a3b79f130e0b02093fdea2282d570a49b924fbfc4
+m1_unknown_incompat	uv run python corpus/mutate.py images/scenarios/m1_xxhash.img images/scenarios/m1_unknown_incompat.img set-incompat-bit 40	btrfs-progs v6.6.3 (via m1_xxhash)	7.0.0-31-generic (via m1_xxhash)	aa6d133f6600803eecf50506b86fd15ac74030c98b19c270b6e88427fd9f63c7
+m1_mirror_damage	uv run python corpus/mutate.py images/scenarios/m1_xxhash.img images/scenarios/m1_mirror_damage.img zero-primary-sb	btrfs-progs v6.6.3 (via m1_xxhash)	7.0.0-31-generic (via m1_xxhash)	22472b300e20aca37c333e6e2030448ffbaedda237c46f63ebdb124325b546a7
