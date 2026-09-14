@@ -12,5 +12,8 @@ wheels/
 # User added
 sandbox.img
 
-# Paper PDFs and other bulk files stay out of the repo;
-# the development catalog (docs/catalog.md) IS tracked.
+# Reference paper PDFs in docs/ are tracked; catalog.md, plan.md and
+# research.md live at the repo root.
+
+# Generated test images, mount points, VM tooling and scratch files (never outside the repo)
+images/
