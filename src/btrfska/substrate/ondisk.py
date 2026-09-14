@@ -32,6 +32,10 @@ SUPER_INFO_OFFSET = 0x10000
 SUPER_INFO_SIZE = 4096
 SUPER_MIRROR_MAX = 3
 SUPER_MIRROR_SHIFT = 12
+# Geometry bounds used by btrfs_validate_super (fs/btrfs/disk-io.c:2404-2421, 2554-2555).
+MIN_BLOCKSIZE = 4096  # fs.h:59-62; 2K only on CONFIG_BTRFS_DEBUG kernels
+MAX_METADATA_BLOCKSIZE = 65536
+MIN_SYS_CHUNK_ARRAY_SIZE = 17 + 48 + 32  # disk_key + btrfs_chunk incl. its one stripe
 
 
 def sb_offset(mirror: int) -> int:

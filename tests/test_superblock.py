@@ -50,6 +50,92 @@ def test_flipped_byte_breaks_csum():
     assert copy.problems == ("csum mismatch",)
 
 
+# ---------------------------------------------------------------------------
+# Geometry sanity (kernel v7.0 disk-io.c:2360-2580 btrfs_validate_super)
+# ---------------------------------------------------------------------------
+def test_helper_block_has_sane_geometry():
+    assert sb.parse_copy(make_block(), 0).geometry_ok
+
+
+# (field overrides, expected problem). Each one invalidates the copy.
+INVALIDATING = [
+    pytest.param({"sectorsize": 0}, "invalid sectorsize 0", id="sectorsize-0"),
+    pytest.param({"sectorsize": 2048}, "invalid sectorsize 2048", id="sectorsize-below-min"),
+    pytest.param({"sectorsize": 6000}, "invalid sectorsize 6000", id="sectorsize-not-pow2"),
+    pytest.param(
+        {"sectorsize": 131072, "nodesize": 131072},
+        "invalid sectorsize 131072",
+        id="sectorsize-above-max",
+    ),
+    pytest.param({"nodesize": 0}, "invalid nodesize 0", id="nodesize-0"),
+    pytest.param({"nodesize": 20000}, "invalid nodesize 20000", id="nodesize-not-pow2"),
+    pytest.param(
+        {"sectorsize": 8192, "nodesize": 4096, "root": 0x100000},
+        "invalid nodesize 4096",
+        id="nodesize-below-sectorsize",
+    ),
+    pytest.param({"nodesize": 131072}, "invalid nodesize 131072", id="nodesize-above-max"),
+    pytest.param({"root_level": 8}, "root_level 8 >= 8", id="root-level"),
+    pytest.param({"chunk_root_level": 9}, "chunk_root_level 9 >= 8", id="chunk-root-level"),
+    pytest.param({"log_root_level": 255}, "log_root_level 255 >= 8", id="log-root-level"),
+    pytest.param(
+        {"sys_chunk_array_size": 2049},
+        "sys_chunk_array_size 2049 > 2048",
+        id="sys-array-too-big",
+    ),
+    pytest.param(
+        {"sys_chunk_array_size": 96}, "sys_chunk_array_size 96 < 97", id="sys-array-too-small"
+    ),
+]
+
+
+@pytest.mark.parametrize(("overrides", "problem"), INVALIDATING)
+def test_geometry_violation_invalidates_the_copy(overrides, problem):
+    copy = sb.parse_copy(make_block(**overrides), mirror=0)
+    assert copy.magic_ok and copy.bytenr_ok and copy.csum_ok
+    assert not copy.geometry_ok
+    assert not copy.valid
+    assert problem in copy.problems
+
+
+# Recorded as a problem, but the copy stays valid (see the module docstring for why).
+WARNING_ONLY = [
+    pytest.param({"root": 0x100001}, "root 1048577 not aligned to sectorsize 4096", id="root"),
+    pytest.param(
+        {"chunk_root": 0x200200}, "chunk_root 2097664 not aligned to sectorsize 4096", id="chunk"
+    ),
+    pytest.param({"log_root": 12345}, "log_root 12345 not aligned to sectorsize 4096", id="log"),
+    pytest.param({"num_devices": 0}, "num_devices is 0", id="no-devices"),
+    pytest.param(
+        {"num_devices": (1 << 31) + 1}, "suspicious num_devices 2147483649", id="many-devices"
+    ),
+]
+
+
+@pytest.mark.parametrize(("overrides", "problem"), WARNING_ONLY)
+def test_geometry_warning_keeps_the_copy_valid(overrides, problem):
+    copy = sb.parse_copy(make_block(**overrides), mirror=0)
+    assert copy.valid and copy.geometry_ok
+    assert copy.problems == (problem,)
+
+
+def test_alignment_is_not_judged_against_an_invalid_sectorsize():
+    copy = sb.parse_copy(make_block(sectorsize=6000), mirror=0)
+    assert copy.problems == ("invalid sectorsize 6000",)
+
+
+def test_geometry_is_not_judged_without_the_magic():
+    copy = sb.parse_copy(make_block(magic=0, sectorsize=0), mirror=0)
+    assert copy.problems == ("magic mismatch",)
+
+
+def test_unknown_csum_type_is_rejected_like_the_kernel():
+    # disk-io.c:3345-3351 open_ctree(): btrfs_supported_super_csum() before the csum check.
+    copy = sb.parse_copy(make_block(csum_type=4), mirror=0)
+    assert not copy.valid
+    assert copy.problems == ("unknown csum_type 4",)
+
+
 def test_parse_copy_never_raises_on_hostile_input():
     """Property-style: random blocks and mutated valid blocks parse to a (usually invalid) copy."""
     rng = random.Random(20260915)
@@ -141,6 +227,21 @@ def test_copy_ending_at_image_end_is_not_used(scratch):
     )
     with open_image(image) as img:
         assert [c.present for c in sb.read_copies(img)] == [True, False, False]
+
+
+@pytest.mark.parametrize(
+    "size", [1, ondisk.SUPER_INFO_OFFSET, ondisk.SUPER_INFO_OFFSET + ondisk.SUPER_INFO_SIZE - 1]
+)
+def test_image_too_small_for_the_primary_has_no_copies(scratch, size):
+    # A truncated acquisition: even the primary copy (64 KiB + 4096) does not fit.
+    image = write_sparse_image(scratch / "truncated.img", size, {})
+    with open(image, "r+b") as f:
+        f.write(make_block(0)[: max(0, size - 1)])
+    with open_image(image) as img:
+        selection = sb.read_superblock(img)
+    assert [c.present for c in selection.copies] == [False, False, False]
+    assert selection.selected is None
+    assert selection.disagreements == []
 
 
 def test_read_superblock_returns_selection(scratch):

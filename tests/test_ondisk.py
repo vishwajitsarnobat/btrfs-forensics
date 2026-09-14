@@ -122,6 +122,12 @@ def test_superblock_constants():
     assert od.SUPER_INFO_SIZE == 4096  # fs.h:81
     assert od.SUPER_MIRROR_MAX == 3  # disk-io.h:26
     assert od.SUPER_MIRROR_SHIFT == 12  # disk-io.h:27
+    assert od.MIN_BLOCKSIZE == 4096  # fs.h:59-62 (SZ_4K unless CONFIG_BTRFS_DEBUG)
+    assert od.MAX_METADATA_BLOCKSIZE == 65536  # btrfs_tree.h:380
+    # disk-io.c:2554-2555: sizeof(struct btrfs_disk_key) + sizeof(struct btrfs_chunk), and
+    # struct btrfs_chunk ends in one embedded btrfs_stripe.
+    assert od.MIN_SYS_CHUNK_ARRAY_SIZE == od.DISK_KEY.size + od.CHUNK.size + od.STRIPE.size == 97
+    assert od.INCOMPAT["METADATA_UUID"] == 1 << 10  # btrfs.h:333
 
 
 def test_superblock_mirror_offsets():
