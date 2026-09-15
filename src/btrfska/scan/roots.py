@@ -9,7 +9,8 @@ root-tree block it finds), fed into records instead of stdout:
    generation, exactly superblock + 1, is indexed too: that is the log rule (node.py), so
    superseded log commits that no walk reaches stay visible. Every other log candidate that fails
    is counted as rejected. Owner 12 (RAID stripe tree) and 13 (remap tree) candidates are kept as
-   raw, unparsed records.
+   raw, unparsed records. Every candidate not indexed is kept as (bytenr, generation, physical)
+   only, to classify missing blocks (step 3).
 2. **Groups and candidate roots.** A distinct block is (bytenr, generation, level, owner); its
    physical copies are rows. A block is *referenced* when an indexed internal block one level up,
    of an owner the kernel's owner check accepts for it and of the block's generation or a newer
@@ -27,9 +28,17 @@ root-tree block it finds), fed into records instead of stdout:
    generation, level) is *found* when a valid scanned block carries exactly that bytenr, generation
    and level, an owner the kernel's owner check accepts (node.owner_ok), and the pointer's first
    key. So a state whose chunks have since moved still resolves. A referenced block that is not
-   found is read through the current chunk map and given a node.FAILURE_CLASSES class (`reused`
-   is a newer tree's block at that address, `corrupt` is damage), or `not_scanned` when that read
-   is valid (a range the scan plan skipped), or `changed` when the indexed bytes no longer match.
+   found gets a node.FAILURE_CLASSES class (`reused` is a newer tree's block at that address,
+   `corrupt` a failed integrity check) from every source that has it, and the most informative
+   class wins, in FAILURE_CLASSES order:
+   - a read through the current chunk map;
+   - when the current map does not place the address, a read through the state's own chunk
+     items (step 4), so a block of a pre-balance state is read where that state had it;
+   - the invalid scanned copies whose header carries the block's bytenr and generation (at most
+     MAX_LISTED), checked against the same expectations: a present but invalid block is
+     `corrupt` or `mismatch`, never `unmapped`.
+   A valid read is `not_scanned` (a range the scan plan skipped); `changed` means the indexed bytes
+   no longer match; `unmapped` means no map places the address and no invalid copy was scanned.
    - `referenced` counts the distinct blocks named by the state's found blocks: its root-tree
      blocks, every tree root its ROOT_ITEMs name, and every pointer below a found block;
    - `completeness` = found / referenced. Nothing is known below a missing block, so this is an
@@ -44,7 +53,8 @@ root-tree block it finds), fed into records instead of stdout:
 5. **Rediscovery.** Every superblock and backup-slot root (`known_roots`) is looked up: indexed,
    and a candidate root of its owner and generation.
 
-Bounds. Memory holds the index columns (about 50 bytes per valid copy), per-node arrays, at most
+Bounds. Memory holds the index columns (about 50 bytes per valid copy, 24 per invalid one), per-node
+arrays, at most
 MAX_STATES evaluated states with at most MAX_PROBLEMS problems each, MAX_LISTED bytenrs per group,
 MAX_RAW raw records, and caches memoised per subtree, never per tree root:
 - the outcome of each reference (bytenr, generation, level, owner class, first key): found,
@@ -75,10 +85,14 @@ from btrfska.substrate.chunks import ChunkMap, MappingError, parse_chunk
 from btrfska.substrate.fs import Filesystem
 from btrfska.substrate.image import ImageHandle
 from btrfska.substrate.node import (
+    FAILURE_CLASSES,
     Expect,
     Key,
     NodeContext,
+    NodeCopy,
     NodeReader,
+    check_block,
+    copy_failure,
     is_subvolume_tree,
     node_failure,
     owner_ok,
@@ -134,8 +148,20 @@ class BlockIndex:
     """Valid scanned tree blocks: one row per physical copy, sorted by (bytenr, generation, level,
     owner, physical). A node is a distinct (bytenr, generation, level, owner)."""
 
-    def __init__(self, columns: dict[str, array], stats: dict[str, int], raw: list[dict]):
+    def __init__(
+        self,
+        columns: dict[str, array],
+        stats: dict[str, int],
+        raw: list[dict],
+        invalid: dict[str, array] | None = None,
+    ):
         self.stats, self.raw = stats, raw
+        invalid = invalid or {name: array("Q") for name in ("bytenr", "generation", "physical")}
+        bad = {name: np.frombuffer(col, np.uint64) for name, col in invalid.items()}
+        bad_order = np.lexsort((bad["physical"], bad["generation"], bad["bytenr"]))
+        self.invalid_bytenr = bad["bytenr"][bad_order]
+        self.invalid_generation = bad["generation"][bad_order]
+        self.invalid_physical = bad["physical"][bad_order]
         view = {name: np.frombuffer(col, np.uint64 if col.typecode == "Q" else np.uint8)
                 for name, col in columns.items()}  # fmt: skip
         order = np.lexsort(
@@ -183,6 +209,18 @@ class BlockIndex:
         last = int(np.searchsorted(self.node_start, hi, "left"))
         return list(range(first, last)) if lo < hi else []
 
+    def invalid_copies(self, bytenr: int, generation: int, limit: int) -> list[int]:
+        """Physical offsets of up to `limit` invalid scanned copies with this header bytenr and
+        generation."""
+        if not (0 <= bytenr < 1 << 64 and 0 <= generation < 1 << 64):
+            return []
+        lo = int(np.searchsorted(self.invalid_bytenr, np.uint64(bytenr), "left"))
+        hi = int(np.searchsorted(self.invalid_bytenr, np.uint64(bytenr), "right"))
+        gens = self.invalid_generation[lo:hi]
+        first = lo + int(np.searchsorted(gens, np.uint64(generation), "left"))
+        end = lo + int(np.searchsorted(gens, np.uint64(generation), "right"))
+        return [int(p) for p in self.invalid_physical[first : min(end, first + limit)]]
+
     def find_generation(self, bytenr: int, generation: int) -> list[int]:
         """Node indices with this bytenr and generation, at any level, in (level, owner) order."""
         if not (0 <= bytenr < 1 << 64 and 0 <= generation < 1 << 64):
@@ -204,9 +242,12 @@ def index_records(records: Iterable[NodeRecord], ctx: NodeContext) -> BlockIndex
     """Index valid candidates (and log blocks one generation ahead); see the module docstring."""
     columns = {name: array("Q") for name in ("bytenr", "generation", "owner", "physical")}
     columns["level"] = array("B")
+    invalid = {name: array("Q") for name in ("bytenr", "generation", "physical")}
     stats = dict.fromkeys(
-        ("candidates", "indexed_copies", "log_accepted", "log_rejected", *RAW_OWNERS.values()), 0
-    )
+        ("candidates", "indexed_copies", "log_accepted", "log_rejected", *RAW_OWNERS.values(),
+         "invalid_copies"),
+        0,
+    )  # fmt: skip
     raw = []
     for record in records:
         stats["candidates"] += 1
@@ -228,7 +269,11 @@ def index_records(records: Iterable[NodeRecord], ctx: NodeContext) -> BlockIndex
             for name in ("bytenr", "generation", "owner", "physical"):
                 columns[name].append(getattr(record, name))
             columns["level"].append(record.level)
-    return BlockIndex(columns, stats, raw)
+        elif record.bytenr is not None and record.generation is not None:
+            stats["invalid_copies"] += 1
+            for name in ("bytenr", "generation", "physical"):
+                invalid[name].append(getattr(record, name))
+    return BlockIndex(columns, stats, raw, invalid)
 
 
 @dataclass(frozen=True)
@@ -344,6 +389,8 @@ class _Walk:
     items: list = field(default_factory=list)  # (item, leaf bytenr) of the wanted item type
     problems: list[str] = field(default_factory=list)
     classify: bool = True  # False: missing references are only counted (chunk-item walks)
+    historical: ChunkMap | None = None  # the state's own chunk items, when not the current ones
+    map_id: tuple | None = None  # the chunk root `historical` was read from
 
 
 @dataclass(frozen=True)
@@ -578,22 +625,40 @@ class _Discoverer:
             self.counts[memo] = result
         return result
 
-    def _missing(self, key, owner: int, first_key: Key | None) -> str:
+    def _missing(self, key, owner: int, first_key: Key | None, historical=None) -> str:
+        """Read a referenced block that no indexed block matches; see the module docstring."""
         bytenr, generation, level = key
         expect = Expect(level=level, owner=owner, generation=generation, first_key=first_key)
         if level >= ondisk.MAX_LEVEL:
             expect = Expect(owner=owner, generation=generation, first_key=first_key)
-        node = self.reader.read(bytenr, expect)
-        failure = node_failure(node, expect)
-        if failure is None:
-            return "not_scanned" if level < ondisk.MAX_LEVEL else "mismatch"
-        return failure
+        classes = set()
+        for chunk_map in (self.chunk_map, historical):
+            if chunk_map is None:
+                continue
+            node = NodeReader(self.img, chunk_map, self.ctx).read(bytenr, expect)
+            failure = node_failure(node, expect)
+            if failure is None:
+                return "not_scanned" if level < ondisk.MAX_LEVEL else "mismatch"
+            if failure != "unmapped":
+                classes.add(failure)
+                break
+        for physical in self.index.invalid_copies(bytenr, generation, MAX_LISTED):
+            if physical + self.ctx.nodesize > self.img.size:
+                continue
+            block = bytes(self.img.mmap[physical : physical + self.ctx.nodesize])
+            header = ondisk.HEADER.unpack_from(block)
+            copy = NodeCopy(
+                0, 0, physical, check_block(block, self.ctx, bytenr, expect),
+                header["generation"], header["owner"], header["level"], not any(block),
+            )  # fmt: skip
+            classes.add(copy_failure(copy, expect) or "mismatch")
+        return next((name for name in FAILURE_CLASSES if name in classes), "unmapped")
 
-    def _classify(self, key, owner: int, first_key: Key | None) -> str:
-        """The class of a missing block, read once per reference across all states."""
-        memo = (key, _owner_class(owner), first_key)
+    def _classify(self, key, owner: int, first_key: Key | None, walk: _Walk) -> str:
+        """The class of a missing block, read once per reference and chunk root across states."""
+        memo = (key, _owner_class(owner), first_key, walk.map_id)
         if memo not in self.classes:
-            self.classes[memo] = self._missing(key, owner, first_key)
+            self.classes[memo] = self._missing(key, owner, first_key, walk.historical)
         return self.classes[memo]
 
     def _note_missing(self, walk: _Walk, key, owner: int, first_key: Key | None, failure=None):
@@ -602,7 +667,7 @@ class _Discoverer:
         if not walk.classify or len(walk.missing) >= MAX_MISSING:
             walk.unchecked += 1
             return
-        walk.missing[key] = failure or self._classify(key, owner, first_key)
+        walk.missing[key] = failure or self._classify(key, owner, first_key, walk)
 
     def _dangling(self, walk: _Walk, node: int, links: _Links, owner: int, tree: int, label: str):
         slots = links.dangling
@@ -718,7 +783,12 @@ class _Discoverer:
     def state(self, node: int, known_as: tuple[str, ...]) -> State:
         bytenr, generation, level, _ = self.index.node(node)
         root_key = (bytenr, generation, level)
-        walk = _Walk()
+        chunk_root = self._chunk_root(known_as, generation)
+        historical = map_id = None
+        if chunk_root is not None and chunk_root.differs_from_current:
+            historical = self._historical_map(chunk_root)
+            map_id = (chunk_root.bytenr, chunk_root.generation, chunk_root.level)
+        walk = _Walk(historical=historical, map_id=map_id)
         self._walk(walk, root_key, ondisk.ROOT_TREE_OBJECTID, 0, K["ROOT_ITEM"])
         root_blocks, root_missing = self._count(root_key, ondisk.ROOT_TREE_OBJECTID, None)
         item_problems, trees = [], []
@@ -751,10 +821,6 @@ class _Discoverer:
             counts[failure] = counts.get(failure, 0) + 1
         if walk.unchecked:
             counts["unchecked"] = walk.unchecked
-        chunk_root = self._chunk_root(known_as, generation)
-        historical = None
-        if chunk_root is not None and chunk_root.differs_from_current:
-            historical = self._historical_map(chunk_root)
         placed_current = placed_historical = neither = 0
         for (block_bytenr, _, _), block in walk.found.items():
             here = self._placed(self.chunk_map, block_bytenr, block)

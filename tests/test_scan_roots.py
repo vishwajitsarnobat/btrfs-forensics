@@ -1,6 +1,7 @@
 """Old-root discovery (scan/roots.py), reuse-versus-damage classes of unreachable blocks, and the
 log-tree and raw-tree groups."""
 
+import shutil
 import struct
 import time
 import tracemalloc
@@ -344,6 +345,57 @@ def test_old_leaves_of_a_multi_leaf_root_tree_that_newer_parents_still_use_are_n
     )  # fmt: skip
 
 
+def test_missing_blocks_outside_the_current_map_use_the_state_chunk_items_and_invalid_copies():
+    # A generation-70 state whose chunk tree (generation 60) maps logical GIB.. to physical MIB..,
+    # a range the current map covers only under other logical addresses.
+    chunk, far, nowhere = a(0), 5 * GIB, 6 * GIB
+    leaf, extent, zeroed, damaged = (GIB + i * SECTOR for i in range(1, 5))
+    blocks = {
+        chunk: make_node(chunk, owner=3, generation=60,
+                         items=[((256, CHUNK_ITEM, GIB), chunk_item(MIB, 15 * MIB))]),
+        a(1): make_node(leaf, owner=1, generation=70, items=root_items(
+            (2, extent, 70), (7, zeroed, 70), (9, damaged, 70), (10, far, 70), (11, nowhere, 70),
+        )),
+        a(2): make_node(extent, owner=2, generation=70, items=[inode(1)]),
+        # a(3), logical `zeroed`, holds nothing.
+        a(4): flip(make_node(damaged, owner=9, generation=70, items=[inode(1)]), 300),
+        # Scanned, but no chunk map places logical 5 GiB: only the invalid copy tells.
+        a(5): flip(make_node(far, owner=10, generation=70, items=[inode(1)]), 300),
+    }  # fmt: skip
+    found = discover_blocks("test_scan_roots_outside_", blocks)
+    assert found.stats["invalid_copies"] == 2
+    (state,) = found.states
+    assert state.chunk_root == ChunkRoot(chunk, 60, 0, "inferred", differs_from_current=True)
+    assert [(t.tree_id, t.status) for t in state.trees] == [
+        (2, "found"), (7, "zeroed"), (9, "corrupt"), (10, "corrupt"), (11, "unmapped"),
+    ]  # fmt: skip
+    assert state.missing == {"zeroed": 1, "corrupt": 2, "unmapped": 1}
+
+
+GEN3_CSUM_LEAF = 1130496  # sandbox.img: logical = physical, generation 1, owner 7, an empty leaf
+
+
+@pytest.mark.sandbox
+def test_a_present_but_invalid_block_of_an_old_state_is_not_reported_unmapped(sandbox_img):
+    """The generation-3 state's csum tree root lies in an mkfs chunk that the current chunk map no
+    longer covers. Damaged in a copy of sandbox.img, it must read as corrupt, not unmapped."""
+    with scratch_dir("test_scan_roots_gen3_") as d:
+        path = d / "gen3.img"
+        shutil.copyfile(sandbox_img, path)
+        with open(path, "r+b") as f:
+            f.seek(GEN3_CSUM_LEAF + 200)
+            byte = f.read(1)[0]
+            f.seek(GEN3_CSUM_LEAF + 200)
+            f.write(bytes([byte ^ 0xFF]))
+        with open_image(path) as img:
+            run = discover_image(img, open_filesystem(img))
+    state = {s.generation: s for s in run.discovery.states}[3]
+    tree = {t.tree_id: t for t in state.trees}[7]
+    assert (tree.bytenr, tree.generation, tree.status) == (GEN3_CSUM_LEAF, 1, "corrupt")
+    assert (state.found, state.referenced, state.missing) == (6, 7, {"corrupt": 1})
+    assert state.maps_current == 0 and state.chunk_root.source == "inferred"
+
+
 # ---------------------------------------------------------------------------
 # The index: log context, raw trees, rejected log candidates
 # ---------------------------------------------------------------------------
@@ -389,6 +441,7 @@ def test_log_blocks_one_generation_ahead_are_indexed_and_other_log_candidates_re
         "log_rejected": 3,
         "raid_stripe_blocks": 1,
         "remap_blocks": 1,
+        "invalid_copies": 5,  # a(1), a(2), a(4), a(5) and a(7): kept to classify missing blocks
     }
     assert [(r["owner"], r["physical"], r["valid"]) for r in index.raw] == [
         (ondisk.RAID_STRIPE_TREE_OBJECTID, a(6), True),
