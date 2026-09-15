@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -427,3 +428,103 @@ def test_walk_without_a_valid_superblock_is_refused(capsys):
     with scratch_dir("test_cli_") as d:
         assert main(["walk", _image_with(d, "zero.img", {})]) == 2
         assert "NO_VALID_SUPERBLOCK" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# btrfska cat
+# ---------------------------------------------------------------------------
+def _stderr_records(err: bytes) -> list[dict]:
+    return [json.loads(line) for line in err.decode().splitlines() if line.startswith("{")]
+
+
+EXTENT_RECORD_KEYS = {
+    "record", "root", "inode", "unsupported_format", "kind", "file_offset", "length", "leaf",
+    "slot", "generation", "compression", "ram_bytes", "disk_bytenr", "disk_num_bytes", "offset",
+    "num_bytes", "chunk_map", "ranges", "decoded_bytes", "sha256", "error_kind", "error_detail",
+    "problems",
+}  # fmt: skip
+FILE_RECORD_KEYS = {
+    "record", "root", "inode", "unsupported_format", "size", "complete", "extents", "errors",
+    "problems",
+}  # fmt: skip
+RANGE_KEYS = {"logical", "length", "copies"}
+DATA_COPY_KEYS = {"mirror", "devid", "physical", "readable", "used", "matches"}
+
+
+@pytest.mark.sandbox
+def test_cat_writes_only_file_bytes_to_stdout(sandbox_img, capsysbinary):
+    args = ["cat", str(sandbox_img), "--root", "backup:11", "--tree", "fs", "--inode", "257"]
+    assert main(args) == 0
+    captured = capsysbinary.readouterr()
+    assert len(captured.out) == 31
+    extent, file_record = _stderr_records(captured.err)
+    assert extent["record"] == "extent" and extent["kind"] == "inline"
+    assert extent["sha256"] == hashlib.sha256(captured.out).hexdigest()
+    assert extent["root"]["source"] == "backup:11" and extent["root"]["via"] == "backup slot 2"
+    assert (extent["leaf"], extent["compression"], extent["ranges"]) == (30785536, "none", [])
+    assert file_record["record"] == "file" and file_record["complete"] is True
+    assert file_record["size"] == 31
+    assert "btrfska cat: inode 257, 31 bytes, 1 extents" in captured.err.decode()
+
+
+@pytest.mark.sandbox
+def test_cat_regular_extent_records_its_physical_copy(sandbox_img, capsysbinary):
+    assert main(["cat", str(sandbox_img), "--root", "backup:13", "--inode", "257"]) == 0
+    captured = capsysbinary.readouterr()
+    assert len(captured.out) == 5242880
+    extent, _ = _stderr_records(captured.err)
+    assert (extent["kind"], extent["disk_bytenr"], extent["chunk_map"]) == (
+        "regular", 13631488, "current",
+    )  # fmt: skip
+    (piece,) = extent["ranges"]
+    assert piece["copies"] == [
+        {"mirror": 1, "devid": 1, "physical": 13631488, "readable": True, "used": True,
+         "matches": None}
+    ]  # fmt: skip
+    for record in _stderr_records(captured.err):
+        keys = EXTENT_RECORD_KEYS if record["record"] == "extent" else FILE_RECORD_KEYS
+        assert set(record) == keys
+    assert set(piece) == RANGE_KEYS and set(piece["copies"][0]) == DATA_COPY_KEYS
+
+
+@pytest.mark.sandbox
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--inode", "257"], "no INODE_ITEM for inode 257"),  # deleted by generation 14
+        (["--root", "backup:11", "--inode", "256"], "inode 256 is a directory"),
+    ],
+)
+def test_cat_refuses_incomplete_reads_with_nothing_on_stdout(sandbox_img, capsysbinary, args,
+                                                             message):  # fmt: skip
+    assert main(["cat", str(sandbox_img), *args]) == 1
+    captured = capsysbinary.readouterr()
+    assert captured.out == b""
+    assert message in captured.err.decode()
+    (file_record,) = [r for r in _stderr_records(captured.err) if r["record"] == "file"]
+    assert file_record["complete"] is False
+
+
+@pytest.mark.sandbox
+def test_cat_rejects_unknown_roots(sandbox_img, capsysbinary):
+    assert main(["cat", str(sandbox_img), "--root", "backup:99", "--inode", "257"]) == 1
+    assert b"no backup root with generation 99" in capsysbinary.readouterr().err
+    with pytest.raises(SystemExit):
+        main(["cat", str(sandbox_img), "--root", "backup:11"])  # --inode is required
+
+
+def test_cat_applies_the_incompat_gate(capsysbinary):
+    with scratch_dir("test_cli_") as d:
+        block = make_block(incompat=SANDBOX_INCOMPAT | 1 << 40)
+        image = _image_with(d, "unknown.img", {ondisk.sb_offset(0): block})
+        assert main(["cat", image, "--inode", "257"]) == 2
+        captured = capsysbinary.readouterr()
+        assert captured.out == b""
+        assert b"UNSUPPORTED_INCOMPAT UNKNOWN_BIT_40" in captured.err
+
+
+def test_readme_documents_every_cat_key():
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    section = readme.split("### `btrfska cat` output", 1)[1].split("\n## ", 1)[0]
+    keys = EXTENT_RECORD_KEYS | FILE_RECORD_KEYS | RANGE_KEYS | DATA_COPY_KEYS
+    assert {key for key in keys if f"`{key}`" not in section} == set()

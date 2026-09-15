@@ -4,9 +4,11 @@ import argparse
 import json
 import sys
 import uuid
+from dataclasses import asdict
 
 from btrfska import __version__
 from btrfska.substrate import csum, ondisk, superblock
+from btrfska.substrate.extents import read_file
 from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat, open_filesystem
 from btrfska.substrate.image import open_image
 from btrfska.substrate.items import KEY_TYPE_NAMES, summary
@@ -214,28 +216,38 @@ def _start(fs, args: argparse.Namespace) -> tuple[TreeRoot, dict]:
     return start, record
 
 
+def _note(line: str) -> None:
+    print(line, file=sys.stderr)
+
+
+def _open_checked(img, args: argparse.Namespace):
+    """The filesystem, or None after reporting NO_VALID_SUPERBLOCK or a gate refusal on stderr."""
+    try:
+        fs = open_filesystem(img, allow_unsupported=args.allow_unsupported)
+    except NoValidSuperblock:
+        _note("NO_VALID_SUPERBLOCK")
+        return None
+    except UnsupportedFormat as exc:
+        _note("gate: REFUSED")
+        for line in exc.verdict.report_lines():
+            _note(line)
+        return None
+    for line in fs.verdict.report_lines():
+        _note(line)
+    for problem in fs.chunk_map.problems:
+        _note(f"chunk map: {problem}")
+    return fs
+
+
 def cmd_walk(args: argparse.Namespace) -> int:
     def emit(record: dict) -> None:
         print(json.dumps(record, separators=(",", ":")))
 
-    def note(line: str) -> None:
-        print(line, file=sys.stderr)
-
+    note = _note
     with open_image(args.image) as img:
-        try:
-            fs = open_filesystem(img, allow_unsupported=args.allow_unsupported)
-        except NoValidSuperblock:
-            note("NO_VALID_SUPERBLOCK")
+        fs = _open_checked(img, args)
+        if fs is None:
             return EXIT_REFUSED
-        except UnsupportedFormat as exc:
-            note("gate: REFUSED")
-            for line in exc.verdict.report_lines():
-                note(line)
-            return EXIT_REFUSED
-        for line in fs.verdict.report_lines():
-            note(line)
-        for problem in fs.chunk_map.problems:
-            note(f"chunk map: {problem}")
         try:
             start, root = _start(fs, args)
         except RootNotFound as exc:
@@ -294,6 +306,45 @@ def cmd_walk(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cat(args: argparse.Namespace) -> int:
+    """File bytes to stdout, only when the whole file reads; JSON records and a summary to stderr.
+
+    Nothing is written anywhere else. Schema: README.md, "`btrfska cat` output".
+    """
+
+    def emit(record: dict) -> None:
+        _note(json.dumps(record, separators=(",", ":")))
+
+    with open_image(args.image) as img:
+        fs = _open_checked(img, args)
+        if fs is None:
+            return EXIT_REFUSED
+        try:
+            start, root = _start(fs, args)
+        except RootNotFound as exc:
+            _note(f"btrfska: error: {exc}")
+            return EXIT_ERROR
+        no_holes = bool(fs.fields["incompat_flags"] & ondisk.INCOMPAT["NO_HOLES"])
+        result = read_file(fs.reader, start, args.inode, no_holes=no_holes)
+        common = {"root": root, "inode": args.inode, "unsupported_format": fs.unsupported_format}
+        for extent in result.extents:
+            emit({"record": "extent", **common, **asdict(extent)})
+        summary = result.record()
+        emit(
+            {"record": "file", **common}
+            | {key: summary[key] for key in ("size", "complete", "extents", "errors", "problems")}
+        )
+        if not result.complete:
+            _note(f"btrfska cat: error: {'; '.join(result.failures)}")
+            return EXIT_ERROR
+        out = sys.stdout.buffer
+        for chunk in result.chunks():
+            out.write(chunk)
+        out.flush()
+    _note(f"btrfska cat: inode {args.inode}, {result.size} bytes, {len(result.extents)} extents")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="btrfska",
@@ -344,6 +395,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue past unsupported or unknown incompat features (records are flagged)",
     )
     walk_cmd.set_defaults(func=cmd_walk)
+
+    cat_cmd = sub.add_parser(
+        "cat",
+        help="write one file's bytes from the current state or a backup root to stdout",
+        description=(
+            "Read an inode of an fs tree through the chunk map and write its bytes to stdout, "
+            "only if every extent reads. One JSON record per extent and one for the file go to "
+            "stderr, then a summary."
+        ),
+    )
+    cat_cmd.add_argument("image", help="path to a raw Btrfs image")
+    cat_cmd.add_argument(
+        "--root",
+        default="current",
+        type=_root_spec,
+        help="current (default), backup:GEN or bytenr:N (the fs tree block itself)",
+    )
+    cat_cmd.add_argument(
+        "--tree", type=_tree_spec, help="fs (default) or a subvolume or snapshot id"
+    )
+    cat_cmd.add_argument("--inode", type=int, required=True, help="inode number in that tree")
+    cat_cmd.add_argument(
+        "--allow-unsupported",
+        action="store_true",
+        help="continue past unsupported or unknown incompat features (records are flagged)",
+    )
+    cat_cmd.set_defaults(func=cmd_cat)
     return parser
 
 

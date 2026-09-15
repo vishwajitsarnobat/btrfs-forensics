@@ -27,6 +27,7 @@ cannot use (RAID10 stripes not a non-zero multiple of sub_stripes, RAID5/6 witho
 """
 
 import bisect
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
 from btrfska.substrate import ondisk
@@ -311,6 +312,21 @@ class ChunkMap:
         raise UnmappedAddress(
             f"logical {logical} is not in any chunk of the {self.source} chunk map"
         )
+
+    def pieces(self, logical: int, length: int) -> Iterator[tuple[int, int]]:
+        """[logical, logical + length) as (logical, length) pieces that `copies` accepts: split at
+        chunk ends and, in striped profiles, at 64 KiB stripe boundaries. A lazy generator, so a
+        caller can stop at the first bad piece without building the rest (a hostile striped length
+        would be one piece per 64 KiB). Raises UnmappedAddress, when iteration reaches it, for a
+        part outside the valid chunks."""
+        end = logical + length
+        while logical < end:
+            chunk = self.chunk_for(logical)
+            step = min(end, chunk.end) - logical
+            if chunk.type & _STRIPED:
+                step = min(step, STRIPE_LEN - (logical - chunk.logical) % STRIPE_LEN)
+            yield logical, step
+            logical += step
 
     def copies(self, logical: int, length: int) -> tuple[PhysicalCopy, ...]:
         """Every physical copy of [logical, logical + length), in mirror order."""

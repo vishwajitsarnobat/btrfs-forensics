@@ -1,5 +1,6 @@
 """Chunk maps: sys_chunk_array, chunk items and logical-to-physical stripe math."""
 
+import itertools
 import json
 import random
 import struct
@@ -76,6 +77,54 @@ def test_raid0():
     assert physical(mapping(striped("RAID0", 3)), LOGICAL + OFFSET) == [
         (1, 3, 30 * GIB + STRIPE_LEN + 100)
     ]
+
+
+@pytest.mark.parametrize(
+    ("profile", "n", "sub"), [("RAID0", 3, 1), ("RAID10", 4, 2), ("RAID5", 3, 1), ("RAID6", 4, 1)]
+)
+def test_pieces_split_striped_ranges_at_64k_stripe_boundaries(profile, n, sub):
+    chunk_map = mapping(striped(profile, n, sub))
+    start = LOGICAL + STRIPE_LEN - 100
+    pieces = tuple(chunk_map.pieces(start, 100 + 2 * STRIPE_LEN + 5))
+    assert pieces == (
+        (start, 100),
+        (LOGICAL + STRIPE_LEN, STRIPE_LEN),
+        (LOGICAL + 2 * STRIPE_LEN, STRIPE_LEN),
+        (LOGICAL + 3 * STRIPE_LEN, 5),
+    )
+    for logical, length in pieces:
+        assert chunk_map.copies(logical, length)
+    with pytest.raises(MappingError, match="stripe boundary"):
+        chunk_map.copies(start, 101)
+
+
+@pytest.mark.parametrize(("profile", "n"), [("SINGLE", 1), ("DUP", 2), ("RAID1", 2)])
+def test_pieces_keep_unstriped_ranges_whole(profile, n):
+    chunk_map = mapping(striped(profile, n, devids=[1, 1] if profile == "DUP" else None))
+    assert tuple(chunk_map.pieces(LOGICAL + 10, 3 * STRIPE_LEN)) == (
+        (LOGICAL + 10, 3 * STRIPE_LEN),
+    )
+
+
+def test_pieces_are_produced_lazily():
+    """A 2^47-byte striped range would be 2^31 pieces; the first few come without building them."""
+    chunk_map = mapping(replace(striped("RAID0", 2), length=1 << 48))
+    assert list(itertools.islice(chunk_map.pieces(LOGICAL, 1 << 47), 3)) == [
+        (LOGICAL, STRIPE_LEN), (LOGICAL + STRIPE_LEN, STRIPE_LEN),
+        (LOGICAL + 2 * STRIPE_LEN, STRIPE_LEN),
+    ]  # fmt: skip
+
+
+def test_pieces_split_at_chunk_ends_and_refuse_unmapped_ranges():
+    first = striped("SINGLE", 1)
+    second = replace(first, logical=first.end, stripes=(Stripe(1, 20 * GIB, DEV_UUID),))
+    chunk_map = mapping(first, second)
+    assert tuple(chunk_map.pieces(first.end - 4096, 8192)) == (
+        (first.end - 4096, 4096), (first.end, 4096),
+    )  # fmt: skip
+    with pytest.raises(UnmappedAddress):
+        tuple(chunk_map.pieces(second.end - 4096, 8192))
+    assert tuple(chunk_map.pieces(LOGICAL, 0)) == ()
 
 
 def test_raid10():
