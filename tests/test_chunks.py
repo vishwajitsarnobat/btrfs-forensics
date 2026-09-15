@@ -78,6 +78,41 @@ def test_raid0():
     ]
 
 
+@pytest.mark.parametrize(
+    ("profile", "n", "sub"), [("RAID0", 3, 1), ("RAID10", 4, 2), ("RAID5", 3, 1), ("RAID6", 4, 1)]
+)
+def test_pieces_split_striped_ranges_at_64k_stripe_boundaries(profile, n, sub):
+    chunk_map = mapping(striped(profile, n, sub))
+    start = LOGICAL + STRIPE_LEN - 100
+    pieces = chunk_map.pieces(start, 100 + 2 * STRIPE_LEN + 5)
+    assert pieces == (
+        (start, 100),
+        (LOGICAL + STRIPE_LEN, STRIPE_LEN),
+        (LOGICAL + 2 * STRIPE_LEN, STRIPE_LEN),
+        (LOGICAL + 3 * STRIPE_LEN, 5),
+    )
+    for logical, length in pieces:
+        assert chunk_map.copies(logical, length)
+    with pytest.raises(MappingError, match="stripe boundary"):
+        chunk_map.copies(start, 101)
+
+
+@pytest.mark.parametrize(("profile", "n"), [("SINGLE", 1), ("DUP", 2), ("RAID1", 2)])
+def test_pieces_keep_unstriped_ranges_whole(profile, n):
+    chunk_map = mapping(striped(profile, n, devids=[1, 1] if profile == "DUP" else None))
+    assert chunk_map.pieces(LOGICAL + 10, 3 * STRIPE_LEN) == ((LOGICAL + 10, 3 * STRIPE_LEN),)
+
+
+def test_pieces_split_at_chunk_ends_and_refuse_unmapped_ranges():
+    first = striped("SINGLE", 1)
+    second = replace(first, logical=first.end, stripes=(Stripe(1, 20 * GIB, DEV_UUID),))
+    chunk_map = mapping(first, second)
+    assert chunk_map.pieces(first.end - 4096, 8192) == ((first.end - 4096, 4096), (first.end, 4096))
+    with pytest.raises(UnmappedAddress):
+        chunk_map.pieces(second.end - 4096, 8192)
+    assert chunk_map.pieces(LOGICAL, 0) == ()
+
+
 def test_raid10():
     # factor 4 // 2 = 2; stripe_index = (5 % 2) * 2 = 2, stripe_nr = 5 // 2 = 2; mirrors 2 and 3
     assert physical(mapping(striped("RAID10", 4, sub=2)), LOGICAL + OFFSET) == [
