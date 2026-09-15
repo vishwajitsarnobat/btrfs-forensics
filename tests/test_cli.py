@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from btrfska import __version__
-from btrfska.cli import _node_record, main
+from btrfska.cli import _node_record, _rediscovery_line, main
+from btrfska.scan.roots import KnownRoot, Rediscovery
 from btrfska.substrate import ondisk
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
@@ -669,9 +670,10 @@ def test_roots_summarises_the_sandbox(sandbox_img, capsys):
     captured = capsys.readouterr()
     lines = captured.out.splitlines()
     assert lines[0].startswith("btrfska roots: targeted, 85 candidates, ")
-    assert "rediscovered: 26/26 superblock and backup roots are candidate roots (26 indexed)" in (
-        lines
-    )
+    assert (
+        "rediscovered: 26/26 superblock and backup root slot references are candidate roots "
+        "(26 indexed), naming 18 distinct blocks: 18/18 candidate roots (18 indexed)"
+    ) in lines
     for generation in (11, 12, 13):
         assert any(
             line.startswith(f"state generation {generation} ") and f"[backup:{generation}]" in line
@@ -697,6 +699,27 @@ def test_roots_json_records_follow_the_documented_schema(sandbox_img, capsys):
             assert set(record["chunk_root"]) == ROOTS_CHUNK_ROOT_KEYS
     assert all(r["indexed"] and r["candidate"] for r in records if r["record"] == "rediscovery")
     assert any(line.startswith("rediscovered: 26/26 ") for line in captured.err.splitlines())
+
+
+def test_the_rediscovery_line_counts_slot_references_and_distinct_blocks():
+    """Backup slots name shared blocks; survival is reported per reference and per block."""
+
+    def ref(source, tree, bytenr, generation, indexed):
+        root = KnownRoot(source, tree, 1, bytenr, generation, 0)
+        return Rediscovery(root, indexed=indexed, candidate=indexed)
+
+    rediscovered = [
+        ref("backup:5", "root", 100, 5, False),
+        ref("backup:5", "chunk", 200, 3, False),
+        ref("backup:5", "fs", 300, 2, True),
+        ref("backup:6", "root", 400, 6, True),
+        ref("backup:6", "chunk", 200, 3, False),  # the same lost block as backup:5's chunk root
+        ref("backup:6", "fs", 300, 2, True),  # the same surviving block as backup:5's fs root
+    ]
+    assert _rediscovery_line(rediscovered) == (
+        "rediscovered: 3/6 superblock and backup root slot references are candidate roots "
+        "(3 indexed), naming 4 distinct blocks: 2/4 candidate roots (2 indexed)"
+    )
 
 
 def test_roots_without_a_valid_superblock_is_refused(capsys):
