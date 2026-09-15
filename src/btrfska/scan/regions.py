@@ -17,8 +17,16 @@ address and stripe index) or `unmapped_gap`. Kernel v7.0 references:
   else in the extent tree (block-group.c:1053-1058 btrfs_block_group_root).
 
 A DATA chunk is skipped only when its block-group item agrees (same length, type and profile), so
-one altered or damaged item cannot hide a range from the scan. Rejected chunk items never exclude
-a range. `--full-sweep` scans every range except the reserved area and superblock copies.
+one altered or damaged chunk or block-group item alone cannot hide a range. Rejected chunk items
+never exclude a range. `--full-sweep` scans every range except the reserved area and superblock
+copies.
+
+Limitation of the targeted plan: skipping a DATA chunk also skips whatever metadata residue lies
+in its range. A range that held tree blocks under an earlier chunk (a removed or relocated
+metadata chunk) and was later reallocated to a DATA chunk keeps those blocks until data
+overwrites them, and only `--full-sweep` finds them. The plan therefore never claims that the
+unscanned DATA ranges hold no tree blocks; the scan summary reports how many bytes were skipped
+as DATA.
 """
 
 from dataclasses import dataclass, replace

@@ -536,7 +536,7 @@ def test_readme_documents_every_cat_key():
 SCAN_NODE_KEYS = {
     "record", "unsupported_format", "physical", "bytenr", "bytenr_mapped", "maps_here",
     "generation", "owner", "level", "nritems", "valid", "checks", "problems", "region", "status",
-    "orphan", "outside_map", "legacy_orphan",
+    "orphan", "outside_map", "legacy_orphan", "log_tree",
 }  # fmt: skip
 SCAN_REGION_KEYS = {"kind", "start", "end", "chunk", "stripe"}
 SCAN_VALUES = {"node", "invalid", "live", "backup_reachable", "unreferenced", "unmapped_gap"}
@@ -554,6 +554,7 @@ def test_scan_summarises_the_sandbox(sandbox_img, capsys):
         "skipped: reserved 0-69632",
         "skipped: DATA|single 13631488-22020096",
         "skipped: superblock 67108864-67112960",
+        "skipped as DATA: 8388608 bytes (use --full-sweep to include reallocated ranges)",
         "candidates: 85 (valid 84, invalid 1)",
         "live: 20",
         "orphans: 64 (backup_reachable 34, unreferenced 30)",
@@ -562,6 +563,7 @@ def test_scan_summarises_the_sandbox(sandbox_img, capsys):
         "legacy-compatible orphans (csum ok, generation < 14, nodesize-aligned): 71 "
         "(21 outside current chunk map)",
         "extent tree: 10 tree blocks; reached only by walks: 0; listed only by the extent tree: 0",
+        "log tree: 0 blocks (0 live copies)",
         "region unmapped_gap 69632-13631488: candidates 21, valid 20, live 0, orphans 20",
         "region METADATA|DUP 38797312-67108864 (chunk 30408704 stripe 0): "
         "candidates 30, valid 30, live 9, orphans 21",
@@ -578,6 +580,7 @@ def test_scan_full_sweep_finds_the_same_nodes(sandbox_img, capsys):
         "btrfska scan: full sweep, 8 regions, 268361728 bytes probed at 4096-byte alignment"
     )
     assert "candidates: 85 (valid 84, invalid 1)" in lines
+    assert "skipped as DATA: 0 bytes (full sweep)" in lines
     assert "orphans: 64 (backup_reachable 34, unreferenced 30)" in lines
     assert "region DATA|single 13631488-22020096 (chunk 13631488 stripe 0): candidates 0, " \
         "valid 0, live 0, orphans 0" in lines  # fmt: skip
@@ -603,7 +606,7 @@ def test_scan_json_lines_follow_the_documented_schema(sandbox_img, capsys):
 def test_scan_workers_give_identical_output(sandbox_img, capsys):
     assert main(["scan", str(sandbox_img), "--json"]) == 0
     one = capsys.readouterr()
-    assert main(["scan", str(sandbox_img), "--json", "--workers", "2"]) == 0
+    assert main(["scan", str(sandbox_img), "--json", "--workers", "4"]) == 0
     assert capsys.readouterr() == one
 
 
