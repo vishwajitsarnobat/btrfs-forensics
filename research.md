@@ -1961,11 +1961,84 @@ Observed with the scan kernel, targeted regions and orphan classification
   image above, the tree blocks the current extent tree lists (METADATA_ITEM,
   and EXTENT_ITEM with TREE_BLOCK) equal the logical addresses the current
   walks reach: 10 on sandbox, 11 on the s01 images, 12 on `m1_sha256_bgt`.
-  - Log trees, which the extent tree does not record, are absent on all of
-    them.
+  - It is a content cross-check, not an independent one: the extent tree is
+    reached through the same current root tree as the walks, so a forged or
+    damaged root tree misleads both.
+  - Log trees get no extent-tree reference (extent-tree.c:5392), so their
+    blocks are counted apart (`m2_logtree` below).
   - The cross-check stays in the scan summary. A difference would point to
-    a dropping subvolume, a log tree or damage.
+    a dropping subvolume or damage.
 - **A damaged live block stays visible.** On `m1_badnode_both`, the corrupt
   `sv1` leaf (65159168, both copies) is 2 invalid candidates. The current
   and all four backup walks report it as invalid, and live drops from 22 to
   20.
+- **Log trees (M2a review).** Verified against tag v7.0:
+  - **Owner.** Every log block has header owner `BTRFS_TREE_LOG_OBJECTID`,
+    which is −6 (btrfs_tree.h:92; −7 is `TREE_LOG_FIXUP`). The log root is
+    allocated with it (disk-io.c:861-867, 887), and COW copies take the
+    root id (ctree.c:520, extent-tree.c:5308). The kernel skips the owner
+    check for log trees (tree-checker.c:2270); btrfska checks it exactly.
+  - **Keys.** The log root tree names each subvolume log with a ROOT_ITEM
+    keyed (TREE_LOG, ROOT_ITEM, subvolume id) (disk-io.c:865-867, 942;
+    tree-log.c:7720-7744). The objectid is the log id, not the subvolume id.
+  - **Generation: exactly superblock + 1, not ≤.** Log blocks take the
+    running transaction id (extent-tree.c:5306), which is the last committed
+    generation + 1 (transaction.c:392-393). btrfs_sync_log writes
+    `super_for_commit` (tree-log.c:3577-3579) only under `tree_log_mutex`,
+    which a commit holds from copying its superblock until it is written
+    (transaction.c:2535-2581, tree-log.c:3554-3560). So the superblock on
+    disk is the previous transaction's, and replay reads the log root with
+    transid generation + 1 (disk-io.c:2017-2019). Logs are freed at every
+    commit, so no older log block stays reachable. Subvolume logs are read
+    with their ROOT_ITEM generation (disk-io.c:988, tree-log.c:7744). The
+    tree-checker's `≤ super_gen + 1` (tree-checker.c:1151-1163, 1248-1268)
+    is an upper bound on inode and root item fields, not on log headers.
+  - **log_root_transid.** The superblock field is `__unused_log_root_transid`
+    (btrfs_tree.h:695). v7.0 never writes it (0 on `m2_logtree`), and there
+    is no `log_root_transid` function.
+  - **Corpus image `m2_logtree`.** Scenario `logtree`, mounted with
+    `commit=300`: commit two files, then fsync new files in fs tree 5 and
+    `sv1` and append to one, then sysrq `o`, which powers off with no sync
+    and no unmount. The superblock is generation 8 with log_root 30982144.
+    Three more runs gave the same generation and log_root.
+    - `btrfska scan` classifies the log root tree leaf 30982144 and the
+      `sv1` log leaf 30965760 (8 items) as `live`, `log_tree`, on both DUP
+      stripes: 4 copies, 2 blocks. That equals the blocks `btrfs
+      inspect-internal dump-tree -t 18446744073709551610` names.
+    - Two further generation-9 leaves (30932992 and 30949376, 2 copies
+      each) are the first fsync's log commit, superseded in the same
+      transaction. Nothing reaches them, so they stay `invalid` on their
+      generation check. Forensically they are uncommitted history one log
+      commit old, and M4/M5 can read them.
+    - Totals: 89 candidates, 80 valid, 24 live (4 in the log), 30
+      backup-reachable, 26 unreferenced; extent tree 10 blocks, walks 0 extra.
+      Backup root 5's walks hit reused blocks (owner and parent-generation
+      failures). That is expected: backup roots are not live.
+- **Forensic consideration: metadata residue in reallocated DATA ranges.**
+  The targeted plan skips DATA chunks whose block-group item agrees. When a
+  range held tree blocks under an earlier chunk (a removed or relocated
+  metadata chunk) and a DATA chunk is later allocated over it, those blocks
+  survive until data overwrites them.
+  - A targeted scan misses them. In the M2a review, a valid fs-tree leaf
+    planted 1 MiB into the sandbox DATA chunk was not found targeted and was
+    found `unreferenced` with `--full-sweep`
+    (`tests/test_scan_hostile.py`).
+  - The scan now prints `skipped as DATA: N bytes (use --full-sweep …)` and
+    reports `skipped_data_bytes` (8 388 608 on sandbox, 75 497 472 on
+    `m2_logtree`).
+  - An examiner should run `--full-sweep` whenever the chunk history shows
+    balance or chunk removal. Old-root discovery (M2b) can bound the
+    affected ranges from historical chunk trees.
+- **Limitation: blocks of a foreign filesystem are not candidates.** The
+  prefilter matches only the current fsid or metadata_uuid. It misses tree
+  blocks of a previous filesystem on the same device (a reformat) and blocks
+  written before `btrfstune -m` or `-u` changed the tree fsid. These are
+  high-value evidence of re-formatting or identity changes. An optional
+  foreign-FSID discovery mode feeding the foreign-superblock finding is
+  planned (plan.md M6).
+- **Memory.** On the 39 765-candidate flood from the review (sandbox with
+  fsid-matching garbage in every sector of the trailing gap), a
+  `scan --json` run peaked at 89.3 MB of Python heap with one worker and
+  267.6 MB with four. Streaming classification, running counters and a
+  bounded worker window bring this to 2.3 MB and 16.6 MB (tracemalloc).
+  Memory is now bounded by the reachable trees, not by the candidates.
