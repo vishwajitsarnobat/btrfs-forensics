@@ -2,6 +2,7 @@
 log-tree and raw-tree groups."""
 
 import struct
+import time
 import tracemalloc
 
 import pytest
@@ -11,6 +12,7 @@ from btrfska.scan.kernel_numpy import NodeRecord, iter_candidate_nodes
 from btrfska.scan.regions import Region
 from btrfska.scan.roots import (
     MAX_LISTED,
+    MAX_MISSING,
     MAX_PROBLEMS,
     MAX_STATES,
     ChunkRoot,
@@ -20,6 +22,7 @@ from btrfska.scan.roots import (
     index_records,
     known_roots,
 )
+from btrfska.substrate import node as node_module
 from btrfska.substrate import ondisk
 from btrfska.substrate.chunks import Chunk, ChunkMap, Stripe
 from btrfska.substrate.fs import open_filesystem
@@ -173,15 +176,21 @@ def history():
             yield img, index, discover(img, index, ctx=CTX, chunk_map=IDENTITY, known=KNOWN)
 
 
-def test_candidate_roots_are_the_unreferenced_highest_level_blocks_of_each_generation(history):
+def test_candidate_roots_are_the_blocks_no_parent_of_their_generation_or_newer_points_to(history):
     _, _, found = history
     groups = {(g.owner, g.generation, g.level): g for g in found.groups}
     top = groups[(1, 90, 1)]
     assert (top.top, top.blocks, top.copies, top.candidates, top.listed) == (True, 1, 1, 1, (R90,))
-    below = groups[(1, 90, 0)]  # L90A is referenced by R90; O90 is an unreferenced fragment
-    assert (below.top, below.blocks, below.unreferenced, below.candidates) == (False, 2, 1, 0)
-    # An unchanged older leaf is referenced by a newer parent only: a candidate of its generation.
-    assert groups[(1, 85, 0)].listed == (L90B,)
+    # L90A is referenced by R90. O90 is unreferenced: a candidate below the highest level too.
+    below = groups[(1, 90, 0)]
+    assert (below.top, below.blocks, below.unreferenced, below.candidates, below.listed) == (
+        False, 2, 1, 1, (O90,),
+    )  # fmt: skip
+    # An unchanged older leaf that a newer parent still points to is part of that newer tree.
+    older = groups[(1, 85, 0)]
+    assert (older.unreferenced, older.referenced_by_newer, older.candidates, older.listed) == (
+        1, 1, 0, (),
+    )  # fmt: skip
     assert groups[(5, 88, 0)].unreferenced == 0 and groups[(5, 88, 1)].listed == (F,)
     assert groups[(2, 95, 0)].listed == (F2,)
     assert (7, 85, 0) not in groups  # the damaged block is not indexed
@@ -206,7 +215,7 @@ def test_a_root_tree_state_lists_its_trees_and_how_complete_it_is(history):
     assert (s90.root_tree_blocks, s90.root_tree_missing) == (3, 0)
     assert (s90.found, s90.referenced) == (6, 11)
     assert s90.missing == {"reused": 2, "corrupt": 1, "zeroed": 1, "unmapped": 1}
-    assert s90.completeness == pytest.approx(6 / 11)
+    assert s90.completeness == pytest.approx(6 / 11) and s90.level_consistent
     assert s90.chunk_root == ChunkRoot(CH60, 60, 0, "backup:90", differs_from_current=True)
     assert (s90.maps_current, s90.maps_historical, s90.maps_neither) == (6, 0, 0)
 
@@ -218,18 +227,20 @@ def test_a_root_tree_state_lists_its_trees_and_how_complete_it_is(history):
 
 def test_states_beyond_the_superblock_roots_infer_their_chunk_root(history):
     _, _, found = history
-    assert [(s.generation, s.known_as) for s in found.states] == [
-        (99, ("current",)), (90, ("backup:90",)), (85, ()), (70, ()),
+    assert [(s.generation, s.bytenr, s.known_as) for s in found.states] == [
+        (99, R99, ("current",)), (90, R90, ("backup:90",)), (90, O90, ()), (70, R70, ()),
     ]  # fmt: skip
-    s85, s70 = found.states[2:]
-    assert (s85.found, s85.referenced) == (1, 5)
+    s90_fragment, s70 = found.states[2:]
+    assert (s90_fragment.found, s90_fragment.referenced) == (2, 2)  # O90 and the extent root E
     assert s70.bytenr == R70 and s70.copies == (R70P,)
     assert (s70.found, s70.referenced, [t.status for t in s70.trees]) == (2, 2, ["found"])
     # The newest chunk-tree root no newer than the state, and it differs from the current one.
     assert s70.chunk_root == ChunkRoot(CH60, 60, 0, "inferred", differs_from_current=True)
     # R70 and E70 claim logical addresses only the generation-60 chunk items map to where they lie.
     assert (s70.maps_current, s70.maps_historical, s70.maps_neither) == (0, 2, 0)
-    assert (s85.maps_current, s85.maps_historical, s85.maps_neither) == (1, 0, 0)
+    assert (s90_fragment.chunk_root.source, s90_fragment.chunk_root.bytenr) == ("inferred", CH60)
+    maps = (s90_fragment.maps_current, s90_fragment.maps_historical, s90_fragment.maps_neither)
+    assert maps == (2, 0, 0)
 
 
 def test_every_superblock_and_backup_root_is_rediscovered(history):
@@ -266,6 +277,71 @@ def test_backup_walks_record_reuse_apart_from_damage(history):
         (10, UNMAPPED, "unmapped"),
         (11, LOGR, "reused"),
     ]
+
+
+def root_items(*entries):
+    """ROOT_ITEMs for make_node: (tree id, bytenr, generation[, level]) each."""
+    return [((tree, ROOT_ITEM, 0), root_item(*rest)) for tree, *rest in entries]
+
+
+def discover_blocks(prefix, blocks, **kwargs):
+    with scratch_dir(prefix) as d:
+        with open_image(write_sparse_image(d / "f.img", 16 * MIB, blocks)) as img:
+            index = index_records(records_of(img), CTX)
+            return discover(img, index, ctx=CTX, chunk_map=IDENTITY, **kwargs)
+
+
+def test_a_planted_higher_level_block_does_not_hide_the_root_tree_leaves_of_its_generation():
+    leaf, extent, planted = a(0), a(1), a(2)
+    blocks = {
+        leaf: make_node(leaf, owner=1, generation=90, items=root_items((2, extent, 90))),
+        extent: make_node(extent, owner=2, generation=90, items=[inode(1)]),
+        # Checksum-valid, owner 1, generation 90, level 7: it points at the real leaf as level 6.
+        planted: make_node(planted, level=7, owner=1, generation=90,
+                           ptrs=[((2, ROOT_ITEM, 0), leaf, 90)]),
+    }  # fmt: skip
+    found = discover_blocks("test_scan_roots_planted_", blocks)
+    assert found.root_tree_candidates == 2
+    states = {s.bytenr: s for s in found.states}
+    real, forged = states[leaf], states[planted]
+    assert (real.found, real.referenced, real.completeness, real.level_consistent) == (
+        2, 2, 1.0, True,
+    )  # fmt: skip
+    assert (forged.found, forged.referenced, forged.missing) == (1, 2, {"mismatch": 1})
+    assert forged.level_consistent is False
+    assert any("level 7" in p and "1 pointer" in p for p in forged.problems)
+    groups = {(g.owner, g.generation, g.level): g for g in found.groups}
+    assert (groups[(1, 90, 0)].top, groups[(1, 90, 0)].candidates) == (False, 1)
+
+
+def test_old_leaves_of_a_multi_leaf_root_tree_that_newer_parents_still_use_are_not_states():
+    # Generation 40 had a root node over two leaves; only its leaf B40 survives. Generation 50
+    # rewrote the other leaf and still points to B40; generation 60 rewrote B40 and kept A50.
+    n50, a50, b40, n60, b60, extent, tree7 = (a(i) for i in range(7))
+    blocks = {
+        n50: make_node(n50, level=1, owner=1, generation=50,
+                       ptrs=[((2, ROOT_ITEM, 0), a50, 50), ((7, ROOT_ITEM, 0), b40, 40)]),
+        a50: make_node(a50, owner=1, generation=50, items=root_items((2, extent, 50))),
+        b40: make_node(b40, owner=1, generation=40, items=root_items((7, tree7, 40))),
+        n60: make_node(n60, level=1, owner=1, generation=60,
+                       ptrs=[((2, ROOT_ITEM, 0), a50, 50), ((7, ROOT_ITEM, 0), b60, 60)]),
+        b60: make_node(b60, owner=1, generation=60, items=root_items((7, tree7, 40))),
+        extent: make_node(extent, owner=2, generation=50, items=[inode(1)]),
+        tree7: make_node(tree7, owner=7, generation=40, items=[inode(1)]),
+    }  # fmt: skip
+    found = discover_blocks("test_scan_roots_multileaf_", blocks)
+    assert found.root_tree_candidates == 2
+    assert [(s.generation, s.bytenr) for s in found.states] == [(60, n60), (50, n50)]
+    assert all((s.found, s.referenced, s.level_consistent) == (5, 5, True) for s in found.states)
+    groups = {(g.owner, g.generation, g.level): g for g in found.groups}
+    b40_group = groups[(1, 40, 0)]
+    assert (b40_group.unreferenced, b40_group.referenced_by_newer, b40_group.candidates) == (
+        1, 1, 0,
+    )  # fmt: skip
+    a50_group = groups[(1, 50, 0)]  # referenced by N50 of its own generation (and by N60)
+    assert (a50_group.unreferenced, a50_group.referenced_by_newer, a50_group.candidates) == (
+        0, 0, 0,
+    )  # fmt: skip
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +443,64 @@ def test_forged_root_trees_with_inconsistent_root_items_and_repeated_pointers_st
     assert any("generation 95 is newer than the root tree state (90)" in p for p in problems)
     assert any("(7 132 0)" in p and "btrfs_root_item" in p for p in problems)
     assert any("already reached" in p for p in problems)
+
+
+def test_shared_subtrees_with_dangling_pointers_cost_one_walk_not_one_per_root(monkeypatch):
+    """The review's forged image, scaled down with its shape kept: owner-1 level-2 roots that all
+    point to the same level-1 nodes, each full of pointers to blocks that are not there. Before
+    subtree memoisation this cost roots x nodes x pointers full reads (317 s and 137 MB of heap at
+    64 x 121 x 121 on a 1.5 MB image)."""
+    roots, shared, dangling = MAX_STATES, 40, 40
+    first_shared, first_dangling = roots, roots + shared
+    node_ptrs = [
+        [
+            ((i * dangling + j, ROOT_ITEM, 0), a(first_dangling + i * dangling + j), 90)
+            for j in range(dangling)
+        ]  # fmt: skip
+        for i in range(shared)
+    ]
+    blocks = {
+        a(first_shared + i): make_node(a(first_shared + i), level=1, owner=1, generation=90,
+                                       ptrs=node_ptrs[i])
+        for i in range(shared)
+    }  # fmt: skip
+    for r in range(roots):
+        ptrs = [((i * dangling, ROOT_ITEM, 0), a(first_shared + i), 90) for i in range(shared)]
+        blocks[a(r)] = make_node(a(r), level=2, owner=1, generation=90, ptrs=ptrs)
+    assert first_dangling + shared * dangling < 15 * MIB // SECTOR  # every pointer is mapped
+    reads = 0
+    real_read_node = node_module.read_node
+
+    def counting_read_node(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return real_read_node(*args, **kwargs)
+
+    monkeypatch.setattr(node_module, "read_node", counting_read_node)
+    with scratch_dir("test_scan_roots_shared_") as d:
+        with open_image(write_sparse_image(d / "shared.img", 16 * MIB, blocks)) as img:
+            index = index_records(records_of(img), CTX)
+            started = time.perf_counter()
+            found = discover(img, index, ctx=CTX, chunk_map=IDENTITY)
+            elapsed = time.perf_counter() - started
+            tracemalloc.start()
+            try:
+                discover(img, index, ctx=CTX, chunk_map=IDENTITY)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+    assert found.root_tree_candidates == roots and len(found.states) == roots
+    # Every state reaches its root and the shared level-1 nodes; 1 600 blocks are referenced but
+    # absent. At most MAX_MISSING of them are read and classified, the rest count as unchecked.
+    total = shared * dangling
+    for state in found.states:
+        assert (state.found, state.referenced) == (1 + shared, 1 + shared + total)
+        assert state.missing == {"zeroed": MAX_MISSING, "unchecked": total - MAX_MISSING}
+        assert (state.root_tree_blocks, state.root_tree_missing) == (1 + shared, total)
+    # Classification is cached across states: the shared blocks are read once per discovery run.
+    assert reads <= 2 * MAX_MISSING, f"{reads} reads"
+    assert elapsed < 5, f"{elapsed:.1f} s"
+    assert peak < 8 << 20, f"peak {peak} bytes"
 
 
 def test_discovery_memory_is_bounded_on_a_flood_of_same_generation_fragments():

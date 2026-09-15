@@ -11,13 +11,18 @@ root-tree block it finds), fed into records instead of stdout:
    is counted as rejected. Owner 12 (RAID stripe tree) and 13 (remap tree) candidates are kept as
    raw, unparsed records.
 2. **Groups and candidate roots.** A distinct block is (bytenr, generation, level, owner); its
-   physical copies are rows. Within one owner and generation, a block is *referenced* when an
-   internal block of the same owner and generation points to it with that generation, one level
-   down. The *candidate roots* of an owner and generation are its unreferenced blocks at the
-   highest level it has; unreferenced blocks below that level are fragments. An older block that
-   only a newer parent still points to is therefore a candidate of its own generation: its old
-   parent is gone.
-3. **Root-tree states.** Every owner-1 candidate is a historical state of the root tree. Its trees
+   physical copies are rows. A block is *referenced* when an indexed internal block one level up,
+   of an owner the kernel's owner check accepts for it and of the block's generation or a newer
+   one, points to it with its bytenr and generation. The *candidate roots* are the blocks nothing
+   references, at any level: a planted higher-level block cannot demote the real roots of its
+   generation to fragments. A block only a newer parent points to (`referenced_by_newer`, such as
+   an unchanged leaf of a multi-leaf tree whose own parent is gone) is part of that newer tree,
+   not a candidate. A forged newer parent can still claim an older block; it is then a candidate
+   itself and its state reaches that block. A candidate whose pointers name an indexed block of
+   the pointer's bytenr and generation only at another level than its own level - 1 has an
+   inconsistent level (`level_consistent`).
+3. **Root-tree states.** Every owner-1 candidate root, a *candidate root-tree block*, is one
+   *state*: a historical root tree as far as that block reaches. Its trees
    are resolved through the index, not through a chunk map: a pointer or ROOT_ITEM (bytenr,
    generation, level) is *found* when a valid scanned block carries exactly that bytenr, generation
    and level, an owner the kernel's owner check accepts (node.owner_ok), and the pointer's first
@@ -41,10 +46,19 @@ root-tree block it finds), fed into records instead of stdout:
 
 Bounds. Memory holds the index columns (about 50 bytes per valid copy), per-node arrays, at most
 MAX_STATES evaluated states with at most MAX_PROBLEMS problems each, MAX_LISTED bytenrs per group,
-MAX_RAW raw records, and the found and missing sets of each tree walked (memoised per tree root).
-Each internal node is read once to find references, and a state walk visits a distinct block at
-most once per tree, so repeated or cyclic pointers cost one problem each, not a re-walk. Levels
-must drop by one per hop, so walks are at most 8 deep.
+MAX_RAW raw records, and caches memoised per subtree, never per tree root:
+- the outcome of each reference (bytenr, generation, level, owner class, first key): found,
+  `changed`, `mismatch` or no indexed block;
+- the pointers of each found internal node, parsed and resolved once (vectorised against the
+  index) into followed children and dangling slots;
+- the (found, missing) counts of each referenced subtree, for the per-tree figures;
+- the class of each missing block, read at most once per reference across all states.
+A state walk visits each of its distinct found blocks once, whatever the number of trees, states or
+parents that share it, and keeps at most MAX_MISSING missing blocks, read and classified. Further
+missing references are counted as `unchecked` without a read (a count of pointers, not
+de-duplicated), so the reads of a run are at most MAX_STATES x MAX_MISSING and a subtree shared by
+many roots costs its distinct blocks, not roots x pointers. Repeated pointers to a block cost one
+problem each. Levels must drop by one per hop, so walks are at most 8 deep.
 """
 
 from array import array
@@ -65,10 +79,10 @@ from btrfska.substrate.node import (
     Key,
     NodeContext,
     NodeReader,
+    is_subvolume_tree,
     node_failure,
     owner_ok,
     parse_items,
-    parse_key_ptrs,
 )
 from btrfska.substrate.roots import root_sets
 
@@ -78,6 +92,10 @@ MAX_STATES = 64
 MAX_LISTED = 16
 MAX_PROBLEMS = 32
 MAX_RAW = 256
+MAX_MISSING = 256  # distinct missing blocks classified per state; the rest count as `unchecked`
+# One btrfs_key_ptr: key (objectid, type, offset), blockptr, generation (ondisk.KEY_PTR).
+_PTR = np.dtype([("objectid", "<u8"), ("type", "u1"), ("offset", "<u8"), ("blockptr", "<u8"),
+                 ("generation", "<u8")])  # fmt: skip
 RAW_OWNERS = {
     ondisk.RAID_STRIPE_TREE_OBJECTID: "raid_stripe_blocks",
     ondisk.REMAP_TREE_OBJECTID: "remap_blocks",
@@ -153,21 +171,33 @@ class BlockIndex:
     def copies(self, index: int) -> tuple[int, ...]:
         return tuple(int(p) for p in self.physical[self.node_start[index] : self.node_end[index]])
 
+    def _rows(self, bytenr: int, generation: int) -> tuple[int, int]:
+        lo = int(np.searchsorted(self.bytenr, np.uint64(bytenr), "left"))
+        hi = int(np.searchsorted(self.bytenr, np.uint64(bytenr), "right"))
+        gens = self.generation[lo:hi]
+        return tuple(lo + int(np.searchsorted(gens, np.uint64(generation), side))
+                     for side in ("left", "right"))  # fmt: skip
+
+    def _nodes(self, lo: int, hi: int) -> list[int]:
+        first = int(np.searchsorted(self.node_start, lo, "right")) - 1
+        last = int(np.searchsorted(self.node_start, hi, "left"))
+        return list(range(first, last)) if lo < hi else []
+
+    def find_generation(self, bytenr: int, generation: int) -> list[int]:
+        """Node indices with this bytenr and generation, at any level, in (level, owner) order."""
+        if not (0 <= bytenr < 1 << 64 and 0 <= generation < 1 << 64):
+            return []
+        return self._nodes(*self._rows(bytenr, generation))
+
     def find(self, bytenr: int, generation: int, level: int) -> list[int]:
         """Node indices with this bytenr, generation and level, in owner order."""
         if not (0 <= bytenr < 1 << 64 and 0 <= generation < 1 << 64 and 0 <= level < 256):
             return []
-        lo = int(np.searchsorted(self.bytenr, np.uint64(bytenr), "left"))
-        hi = int(np.searchsorted(self.bytenr, np.uint64(bytenr), "right"))
-        gens = self.generation[lo:hi]
-        lo, hi = (lo + int(np.searchsorted(gens, np.uint64(generation), side))
-                  for side in ("left", "right"))  # fmt: skip
+        lo, hi = self._rows(bytenr, generation)
         levels = self.level[lo:hi]
         lo, hi = (lo + int(np.searchsorted(levels, np.uint8(level), side))
                   for side in ("left", "right"))  # fmt: skip
-        first = int(np.searchsorted(self.node_start, lo, "right")) - 1
-        last = int(np.searchsorted(self.node_start, hi, "left"))
-        return list(range(first, last)) if lo < hi else []
+        return self._nodes(lo, hi)
 
 
 def index_records(records: Iterable[NodeRecord], ctx: NodeContext) -> BlockIndex:
@@ -208,9 +238,10 @@ class Group:
     level: int
     blocks: int  # distinct blocks
     copies: int
-    unreferenced: int
+    unreferenced: int  # blocks no internal block of the same generation points to
+    referenced_by_newer: int  # of those, blocks an internal block of a newer generation points to
     top: bool  # the highest level of this owner and generation
-    candidates: int  # unreferenced blocks at the top level (0 below it)
+    candidates: int  # unreferenced blocks no newer parent points to, at any level
     listed: tuple[int, ...]  # bytenrs of the first MAX_LISTED candidates
 
 
@@ -257,6 +288,7 @@ class State:
     maps_current: int  # found blocks the current chunk map places where they were scanned
     maps_historical: int | None  # the same under the state's chunk items (None: no other chunks)
     maps_neither: int
+    level_consistent: bool  # no pointer names an indexed (bytenr, generation) at another level
     problems: tuple[str, ...]
 
 
@@ -303,10 +335,34 @@ class Discovery:
 
 @dataclass
 class _Walk:
-    found: dict[tuple[int, int, int], int] = field(default_factory=dict)  # key -> node index
-    missing: dict[tuple[int, int, int], str] = field(default_factory=dict)
-    leaf_items: list = field(default_factory=list)  # (item, leaf bytenr)
+    """One state walk over its root tree and trees: distinct blocks found and missing."""
+
+    found: dict = field(default_factory=dict)  # (bytenr, generation, level) -> node index
+    missing: dict = field(default_factory=dict)  # (bytenr, generation, level) -> class
+    unchecked: int = 0  # missing references beyond MAX_MISSING: not read, not de-duplicated
+    seen: dict = field(default_factory=dict)  # (key, owner class) -> tree ordinal reaching it
+    items: list = field(default_factory=list)  # (item, leaf bytenr) of the wanted item type
     problems: list[str] = field(default_factory=list)
+    classify: bool = True  # False: missing references are only counted (chunk-item walks)
+
+
+@dataclass(frozen=True)
+class _Links:
+    followed: tuple  # (slot, child key, pointer key): pointers naming an indexed block
+    dangling: np.ndarray  # slots of the other pointers, in slot order
+    distinct_dangling: int
+
+
+def _owner_class(owner: int | None) -> int | str | None:
+    """What owner_ok depends on: any owner (None), any subvolume tree, or exactly `owner`."""
+    if owner in (None, 0, ondisk.TREE_RELOC_OBJECTID):
+        return None
+    return "subvolume" if is_subvolume_tree(owner) else owner
+
+
+def _reached(label: str, where: str, key) -> str:
+    return (f"{label}{where} points to {key[0]} (generation {key[1]}, level {key[2]}), "
+            "already reached; not followed")  # fmt: skip
 
 
 class _Discoverer:
@@ -314,14 +370,21 @@ class _Discoverer:
         self.img, self.index, self.ctx, self.chunk_map = img, index, ctx, chunk_map
         self.known, self.log_live = tuple(known), log_live
         self.reader = NodeReader(img, chunk_map, ctx)
-        self.walks: dict = {}
         self.maps: dict = {}
+        # Per-subtree caches: reference outcomes, parsed pointers, subtree counts, missing classes.
+        self.outcomes: dict = {}
+        self.links: dict = {}
+        self.counts: dict = {}
+        self.classes: dict = {}
         n = index.nodes
         starts = index.node_start
         self.n_bytenr, self.n_gen = index.bytenr[starts], index.generation[starts]
         self.n_level, self.n_owner = index.level[starts], index.owner[starts]
         self.n_copies = index.node_end - starts
-        self.referenced = np.zeros(n, bool)
+        self.unique_bytenr = np.unique(self.n_bytenr)
+        self.referenced_same = np.zeros(n, bool)
+        self.referenced_newer = np.zeros(n, bool)
+        self.level_mismatches = np.zeros(n, np.int64)
         self._mark_references()
         self.order = np.lexsort((self.n_bytenr, self.n_level, self.n_gen, self.n_owner))
         self.top = np.zeros(n, bool)
@@ -335,7 +398,7 @@ class _Discoverer:
             highest = np.maximum.reduceat(self.n_level[o], starts_og)
             lengths = np.diff(np.append(starts_og, n))
             self.top[o] = self.n_level[o] == np.repeat(highest, lengths)
-        self.candidate = self.top & ~self.referenced
+        self.candidate = ~(self.referenced_same | self.referenced_newer)
         current = [k for k in self.known if k.source == "current" and k.tree == "chunk"]
         self.current_chunk = (current[0].bytenr, current[0].generation) if current else None
 
@@ -354,18 +417,33 @@ class _Discoverer:
         return fields == self.index.node(node) and header["fsid"] == self.ctx.fsid
 
     def _mark_references(self) -> None:
+        """Each internal block is read once. A pointer (bytenr, generation) of a block of that
+        generation or newer marks the indexed blocks it names one level down with an acceptable
+        owner as referenced by the same or a newer generation. A pointer that names an indexed
+        block of that bytenr and generation only at another level counts as a level mismatch of
+        the pointing block."""
         for node in np.flatnonzero(self.n_level > 0).tolist():
-            block = self._block(node)
-            if not self._header_matches(block, node):
+            if not self._header_matches(self._block(node), node):
                 continue
             _, generation, level, owner = self.index.node(node)
-            ptrs, _ = parse_key_ptrs(block, self.ctx.nodesize)
-            for ptr in ptrs:
-                if ptr.generation != generation:
-                    continue
-                for child in self.index.find(ptr.blockptr, generation, level - 1):
-                    if child != node and int(self.n_owner[child]) == owner:
-                        self.referenced[child] = True
+            ptrs = self._pointers(node)
+            named = self._present(ptrs["blockptr"]) & (ptrs["generation"] <= generation)
+            for slot in np.flatnonzero(named).tolist():
+                ptr_generation = int(ptrs["generation"][slot])
+                matches = [
+                    child
+                    for child in self.index.find_generation(int(ptrs["blockptr"][slot]),
+                                                            ptr_generation)
+                    if owner_ok(owner, int(self.n_owner[child])) is not False
+                ]  # fmt: skip
+                below = [child for child in matches if int(self.n_level[child]) == level - 1]
+                if matches and not below:
+                    self.level_mismatches[node] += 1
+                same = ptr_generation == generation
+                mark = self.referenced_same if same else self.referenced_newer
+                for child in below:
+                    if child != node:
+                        mark[child] = True
 
     def groups(self) -> list[Group]:
         o, result = self.order, []
@@ -381,7 +459,9 @@ class _Discoverer:
         starts = np.flatnonzero(change)
         ends = np.append(starts[1:], n)
         copies = np.add.reduceat(self.n_copies[o], starts)
-        unreferenced = np.add.reduceat((~self.referenced[o]).astype(np.int64), starts)
+        no_parent = ~self.referenced_same[o]
+        unreferenced = np.add.reduceat(no_parent.astype(np.int64), starts)
+        newer = np.add.reduceat((no_parent & self.referenced_newer[o]).astype(np.int64), starts)
         candidates = np.add.reduceat(self.candidate[o].astype(np.int64), starts)
         for i, (start, end) in enumerate(zip(starts.tolist(), ends.tolist(), strict=True)):
             members = o[start:end]
@@ -391,7 +471,8 @@ class _Discoverer:
                 Group(
                     owner=int(self.n_owner[first]), generation=int(self.n_gen[first]),
                     level=int(self.n_level[first]), blocks=end - start, copies=int(copies[i]),
-                    unreferenced=int(unreferenced[i]), top=bool(self.top[first]),
+                    unreferenced=int(unreferenced[i]), referenced_by_newer=int(newer[i]),
+                    top=bool(self.top[first]),
                     candidates=int(candidates[i]), listed=tuple(int(b) for b in listed),
                 )
             )  # fmt: skip
@@ -404,6 +485,99 @@ class _Discoverer:
                 return node
         return None
 
+    def _first_key(self, block: bytes) -> Key | None:
+        if not ondisk.HEADER.unpack_from(block)["nritems"]:
+            return None
+        first = ondisk.ITEM.unpack_from(block, ondisk.HEADER.size)  # keys lead items and pointers
+        return Key(first["key_objectid"], first["key_type"], first["key_offset"])
+
+    def _outcome(self, key, owner: int, first_key: Key | None) -> tuple:
+        """A reference resolved once per subtree: (node index, None) when found, (class, detail)
+        when an indexed block matches but is unusable, (None, None) when none matches."""
+        memo = (key, _owner_class(owner), first_key)
+        result = self.outcomes.get(memo)
+        if result is None:
+            node = self._resolve(*key, owner)
+            result = (None, None)
+            if node is not None:
+                block = self._block(node)
+                have = self._first_key(block) if self._header_matches(block, node) else None
+                if not self._header_matches(block, node):
+                    result = ("changed", f"block {key[0]} no longer matches the scan record")
+                elif first_key is not None and have != first_key:
+                    result = (
+                        "mismatch", f"block {key[0]} first key {have} != pointer key {first_key}"
+                    )  # fmt: skip
+                else:
+                    result = (node, None)
+            self.outcomes[memo] = result
+        return result
+
+    def _pointers(self, node: int) -> np.ndarray:
+        block = self._block(node)
+        limit = (self.ctx.nodesize - ondisk.HEADER.size) // ondisk.KEY_PTR.size
+        count = min(ondisk.HEADER.unpack_from(block)["nritems"], limit)
+        return np.frombuffer(block, _PTR, count, ondisk.HEADER.size)
+
+    def _present(self, bytenrs: np.ndarray) -> np.ndarray:
+        """Whether any indexed block has each bytenr (vectorised)."""
+        known = self.unique_bytenr
+        if not len(known):
+            return np.zeros(len(bytenrs), bool)
+        at = np.minimum(np.searchsorted(known, bytenrs), len(known) - 1)
+        return known[at] == bytenrs
+
+    def _links(self, node: int, owner: int) -> _Links:
+        """The pointers of a found internal node, parsed and resolved once per node and owner
+        class: those naming an indexed block of an acceptable owner, and the dangling rest."""
+        memo = (node, _owner_class(owner))
+        links = self.links.get(memo)
+        if links is None:
+            ptrs = self._pointers(node)
+            level = int(self.n_level[node]) - 1
+            present = self._present(ptrs["blockptr"])
+            followed, unresolved = [], []
+            for slot in np.flatnonzero(present).tolist():
+                ptr = ptrs[slot]
+                child = (int(ptr["blockptr"]), int(ptr["generation"]), level)
+                if self._resolve(*child, owner) is None:
+                    unresolved.append(slot)
+                else:
+                    key = Key(int(ptr["objectid"]), int(ptr["type"]), int(ptr["offset"]))
+                    followed.append((slot, child, key))
+            dangling = np.sort(
+                np.concatenate([np.flatnonzero(~present), np.array(unresolved, np.int64)])
+            )
+            named = np.stack([ptrs["blockptr"][dangling], ptrs["generation"][dangling]], axis=1)
+            distinct = len(np.unique(named, axis=0)) if len(dangling) else 0
+            links = self.links[memo] = _Links(tuple(followed), dangling, distinct)
+        return links
+
+    def _count(self, key, owner: int, first_key: Key | None) -> tuple[int, int]:
+        """(found, missing) blocks of the subtree a reference names, memoised per subtree. A tree
+        is counted as a tree: a block two parents of one tree name counts twice there (forged
+        input only); state totals are de-duplicated by the state walk."""
+        memo = (key, _owner_class(owner), first_key)
+        result = self.counts.get(memo)
+        if result is None:
+            node, _ = self._outcome(key, owner, first_key)
+            if not isinstance(node, int):
+                result = (0, 1)
+            elif key[2] == 0:
+                result = (1, 0)
+            else:
+                links = self._links(node, owner)
+                found, missing = 1, links.distinct_dangling
+                children: dict = {}
+                for _, child, pointer_key in links.followed:  # the first pointer to a block wins
+                    children.setdefault(child, pointer_key)
+                for child, pointer_key in children.items():
+                    below = self._count(child, owner, pointer_key)
+                    found, missing = found + below[0], missing + below[1]
+                result = (found, missing)
+            self.counts[memo] = result
+        return result
+
     def _missing(self, key, owner: int, first_key: Key | None) -> str:
         bytenr, generation, level = key
         expect = Expect(level=level, owner=owner, generation=generation, first_key=first_key)
@@ -415,58 +589,85 @@ class _Discoverer:
             return "not_scanned" if level < ondisk.MAX_LEVEL else "mismatch"
         return failure
 
-    def walk(self, bytenr: int, generation: int, level: int, owner: int, kind: str) -> _Walk:
-        """The blocks of one tree found through the index; memoised per root and kind."""
-        memo = (bytenr, generation, level, owner, kind)
-        if memo in self.walks:
-            return self.walks[memo]
-        result = _Walk()
-        stack = [((bytenr, generation, level), None, "root")]
-        seen = set()
+    def _classify(self, key, owner: int, first_key: Key | None) -> str:
+        """The class of a missing block, read once per reference across all states."""
+        memo = (key, _owner_class(owner), first_key)
+        if memo not in self.classes:
+            self.classes[memo] = self._missing(key, owner, first_key)
+        return self.classes[memo]
+
+    def _note_missing(self, walk: _Walk, key, owner: int, first_key: Key | None, failure=None):
+        if key in walk.found or key in walk.missing:
+            return
+        if not walk.classify or len(walk.missing) >= MAX_MISSING:
+            walk.unchecked += 1
+            return
+        walk.missing[key] = failure or self._classify(key, owner, first_key)
+
+    def _dangling(self, walk: _Walk, node: int, links: _Links, owner: int, tree: int, label: str):
+        slots = links.dangling
+        if not len(slots):
+            return
+        if not walk.classify or len(walk.missing) >= MAX_MISSING:
+            walk.unchecked += len(slots)
+            return
+        ptrs, level = self._pointers(node), int(self.n_level[node]) - 1
+        owner_class = _owner_class(owner)
+        bytenr = int(self.n_bytenr[node])
+        for done, slot in enumerate(slots.tolist()):
+            if len(walk.missing) >= MAX_MISSING:
+                walk.unchecked += len(slots) - done
+                return
+            ptr = ptrs[slot]
+            key = (int(ptr["blockptr"]), int(ptr["generation"]), level)
+            first_key = Key(int(ptr["objectid"]), int(ptr["type"]), int(ptr["offset"]))
+            ref = (key, owner_class)
+            if ref in walk.seen:
+                if walk.seen[ref] == tree:
+                    walk.problems.append(_reached(label, f"node {bytenr} slot {slot}", key))
+                continue
+            walk.seen[ref] = tree
+            self._note_missing(walk, key, owner, first_key)
+
+    def _walk(self, walk: _Walk, key, owner: int, tree: int, wanted=None, label="") -> str:
+        """Walk one tree of a state from `key` into `walk`; returns the status of `key`.
+
+        Each distinct block is visited once per state; outcomes, pointer lists, counts and
+        classes come from the per-subtree caches, so a subtree shared by many states or trees
+        is parsed, resolved and classified once."""
+        owner_class = _owner_class(owner)
+        stack = [(key, None, "root")]
         while stack:
-            key, first_key, where = stack.pop()
-            if key in seen:
-                result.problems.append(
-                    f"{where} points to {key[0]} (generation {key[1]}, level {key[2]}), "
-                    "already reached; not followed"
-                )
+            child, first_key, where = stack.pop()
+            ref = (child, owner_class)
+            if ref in walk.seen:
+                if walk.seen[ref] == tree:
+                    walk.problems.append(_reached(label, where, child))
                 continue
-            seen.add(key)
-            node = self._resolve(*key, owner)
+            walk.seen[ref] = tree
+            node, detail = self._outcome(child, owner, first_key)
             if node is None:
-                result.missing[key] = self._missing(key, owner, first_key)
+                self._note_missing(walk, child, owner, first_key)
                 continue
-            block = self._block(node)
-            if not self._header_matches(block, node):
-                result.missing[key] = "changed"
-                result.problems.append(f"block {key[0]} no longer matches the scan record")
+            if not isinstance(node, int):
+                where_detail = detail if node == "changed" else f"{where}: {detail}"
+                walk.problems.append(label + where_detail)
+                self._note_missing(walk, child, owner, first_key, node)
                 continue
-            count = ondisk.HEADER.unpack_from(block)["nritems"]
-            if first_key is not None:
-                first = ondisk.ITEM.unpack_from(block, ondisk.HEADER.size) if count else None
-                have = (
-                    None
-                    if first is None
-                    else Key(first["key_objectid"], first["key_type"], first["key_offset"])
-                )
-                if have != first_key:
-                    result.missing[key] = "mismatch"
-                    result.problems.append(
-                        f"{where}: block {key[0]} first key {have} != pointer key {first_key}"
-                    )
-                    continue
-            result.found[key] = node
-            if key[2] > 0:
-                ptrs, _ = parse_key_ptrs(block, self.ctx.nodesize)
-                for ptr in reversed(ptrs):
-                    child = (ptr.blockptr, ptr.generation, key[2] - 1)
-                    stack.append((child, ptr.key, f"node {key[0]} slot {ptr.slot}"))
-            elif kind in ("root", "chunk"):
-                wanted = K["ROOT_ITEM"] if kind == "root" else K["CHUNK_ITEM"]
-                leaf_items, _ = parse_items(block, self.ctx.nodesize)
-                result.leaf_items += [(i, key[0]) for i in leaf_items if i.key.type == wanted]
-        self.walks[memo] = result
-        return result
+            if child in walk.found:
+                continue
+            walk.found[child] = node
+            if child[2] > 0:
+                links = self._links(node, owner)
+                self._dangling(walk, node, links, owner, tree, label)
+                for slot, grandchild, pointer_key in reversed(links.followed):
+                    stack.append((grandchild, pointer_key, f"node {child[0]} slot {slot}"))
+            elif wanted is not None:
+                leaf_items, _ = parse_items(self._block(node), self.ctx.nodesize)
+                walk.items += [(i, child[0]) for i in leaf_items if i.key.type == wanted]
+        if key in walk.found:
+            return "found"
+        return walk.missing.get(key, "unchecked")
 
     # -- states ----------------------------------------------------------------------------------
     def _chunk_root(self, known_as: tuple[str, ...], generation: int) -> ChunkRoot | None:
@@ -480,10 +681,12 @@ class _Discoverer:
             if not len(pool):
                 return None
             newest = pool[self.n_gen[pool] == self.n_gen[pool].max()]
-            # Ties: the highest level, then the lowest bytenr.
+            # Ties: level-consistent first, then the highest level, then the lowest bytenr.
             best = max(
-                newest.tolist(), key=lambda j: (int(self.n_level[j]), -int(self.n_bytenr[j]))
-            )
+                newest.tolist(),
+                key=lambda j: (self.level_mismatches[j] == 0, int(self.n_level[j]),
+                               -int(self.n_bytenr[j])),
+            )  # fmt: skip
             bytenr, gen, level, _ = self.index.node(best)
             chunk = (bytenr, gen, level, "inferred")
         differs = self.current_chunk is None or chunk[:2] != self.current_chunk
@@ -492,11 +695,12 @@ class _Discoverer:
     def _historical_map(self, root: ChunkRoot) -> ChunkMap:
         memo = (root.bytenr, root.generation, root.level)
         if memo not in self.maps:
-            walked = self.walk(*memo, ondisk.CHUNK_TREE_OBJECTID, "chunk")
+            walked = _Walk(classify=False)
+            self._walk(walked, memo, ondisk.CHUNK_TREE_OBJECTID, 0, K["CHUNK_ITEM"])
             chunks = [
                 parse_chunk(item.key.offset, item.data, sectorsize=self.ctx.sectorsize,
                             origin=f"historical chunk tree leaf {leaf} slot {item.slot}")
-                for item, leaf in walked.leaf_items
+                for item, leaf in walked.items
             ]  # fmt: skip
             self.maps[memo] = ChunkMap(
                 f"historical:{root.generation}", chunks, self.chunk_map.devices
@@ -513,11 +717,12 @@ class _Discoverer:
 
     def state(self, node: int, known_as: tuple[str, ...]) -> State:
         bytenr, generation, level, _ = self.index.node(node)
-        root_walk = self.walk(bytenr, generation, level, ondisk.ROOT_TREE_OBJECTID, "root")
-        found, missing = dict(root_walk.found), dict(root_walk.missing)
-        item_problems, walk_problems = [], list(root_walk.problems)
-        trees = []
-        for item, leaf in root_walk.leaf_items:
+        root_key = (bytenr, generation, level)
+        walk = _Walk()
+        self._walk(walk, root_key, ondisk.ROOT_TREE_OBJECTID, 0, K["ROOT_ITEM"])
+        root_blocks, root_missing = self._count(root_key, ondisk.ROOT_TREE_OBJECTID, None)
+        item_problems, trees = [], []
+        for ordinal, (item, leaf) in enumerate(list(walk.items), start=1):
             where = f"ROOT_ITEM {item.key} in leaf {leaf} slot {item.slot}"
             try:
                 parsed = items.root_item(item.data)
@@ -536,42 +741,48 @@ class _Discoverer:
                     f"state ({generation})"
                 )
             key = (parsed["bytenr"], parsed["generation"], parsed["level"])
-            walked = self.walk(*key, item.key.objectid, "tree")
-            status = "found" if key in walked.found else walked.missing[key]
-            trees.append(TreeRef(*ref, status, len(walked.found), len(walked.missing)))
-            found.update(walked.found)
-            missing.update(walked.missing)
-            walk_problems += [f"tree {item.key.objectid}: {p}" for p in walked.problems]
-        for key in found:
-            missing.pop(key, None)
+            tree_id = item.key.objectid
+            status = self._walk(walk, key, tree_id, ordinal, label=f"tree {tree_id}: ")
+            trees.append(TreeRef(*ref, status, *self._count(key, tree_id, None)))
+        for key in walk.found:
+            walk.missing.pop(key, None)
         counts: dict[str, int] = {}
-        for failure in missing.values():
+        for failure in walk.missing.values():
             counts[failure] = counts.get(failure, 0) + 1
+        if walk.unchecked:
+            counts["unchecked"] = walk.unchecked
         chunk_root = self._chunk_root(known_as, generation)
         historical = None
         if chunk_root is not None and chunk_root.differs_from_current:
             historical = self._historical_map(chunk_root)
         placed_current = placed_historical = neither = 0
-        for (block_bytenr, _, _), block in found.items():
+        for (block_bytenr, _, _), block in walk.found.items():
             here = self._placed(self.chunk_map, block_bytenr, block)
             there = historical is not None and self._placed(historical, block_bytenr, block)
             placed_current += here
             placed_historical += there
             neither += not (here or there)
-        problems = item_problems + walk_problems
+        mismatches = int(self.level_mismatches[node])
+        if mismatches:
+            item_problems.insert(0, (
+                f"level {level}: {mismatches} pointer(s) name an indexed block of that bytenr and "
+                f"generation at a level other than {level - 1}; the level is inconsistent"
+            ))  # fmt: skip
+        problems = item_problems + walk.problems
         if len(problems) > MAX_PROBLEMS:
             problems = problems[:MAX_PROBLEMS] + [
                 f"and {len(problems) - MAX_PROBLEMS} more problems"
             ]
-        referenced = len(found) + len(missing)
+        found = len(walk.found)
+        referenced = found + len(walk.missing) + walk.unchecked
         return State(
             bytenr=bytenr, generation=generation, level=level, copies=self.index.copies(node),
-            known_as=known_as, trees=tuple(trees), root_tree_blocks=len(root_walk.found),
-            root_tree_missing=len(root_walk.missing), found=len(found), referenced=referenced,
-            missing=counts, completeness=len(found) / referenced if referenced else 0.0,
+            known_as=known_as, trees=tuple(trees), root_tree_blocks=root_blocks,
+            root_tree_missing=root_missing, found=found, referenced=referenced,
+            missing=counts, completeness=found / referenced if referenced else 0.0,
             chunk_root=chunk_root, maps_current=placed_current,
             maps_historical=None if historical is None else placed_historical,
-            maps_neither=neither, problems=tuple(problems),
+            maps_neither=neither, level_consistent=not mismatches, problems=tuple(problems),
         )  # fmt: skip
 
     def states(self, max_states: int) -> tuple[int, list[State]]:

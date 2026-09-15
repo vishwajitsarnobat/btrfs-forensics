@@ -285,11 +285,17 @@ survives. The command opens no file other than the image.
 - A log block (owner −6) whose only failed check is its generation, equal to
   the superblock generation + 1, is indexed too. That covers superseded log
   commits no walk reaches. Other failing log candidates are rejected.
-- Within one owner and generation, a block is referenced when an internal
-  block of the same owner and generation points to it. The **candidate
-  roots** are the unreferenced blocks at the highest level of their owner and
-  generation.
-- Every root-tree (owner 1) candidate is a **state**. Its trees are resolved
+- A block is referenced when an internal block one level up, of an owner the
+  kernel's owner check accepts and of the same or a newer generation, points
+  to it with its bytenr and generation. The **candidate roots** are the blocks
+  nothing references, at any level, so a planted higher-level block cannot
+  hide the real roots of its generation. A block that only a newer parent
+  points to is part of that newer tree, not a candidate.
+- Every owner-1 candidate root, a **candidate root-tree block**, is one
+  **state**: a historical root tree as far as that block reaches. On a
+  multi-leaf root tree whose parent node is gone, a surviving old leaf that
+  no newer parent uses is its own state, covering that leaf's ROOT_ITEMs
+  only. Its trees are resolved
   through the index, never through a chunk map, so a state whose chunks have
   moved still resolves. A pointer or ROOT_ITEM is found when a valid scanned
   block has its bytenr, generation and level, an acceptable owner and the
@@ -343,15 +349,23 @@ applicable. Every record has `record` (its type) and `unsupported_format`
     sys_chunk_array (`null` unless `differs_from_current`). `maps_neither`:
     found blocks neither places. This is a read-only check; historical chunk
     maps come with plan.md M5.
+  - `level_consistent`: `false` when a pointer of this block names an
+    indexed block of the pointer's bytenr and generation only at a level
+    other than the block's level − 1 (for example a planted level-7 block
+    over real leaves). A problem line gives the count.
   - `problems`: at most 32, then a count: malformed or inconsistent
     ROOT_ITEMs (for example one newer than the state), pointers to blocks
     already reached (not followed) and first-key mismatches.
 - `group`: one per (owner, generation, level) of indexed blocks.
   - `owner`, `generation`, `level`.
   - `blocks`: distinct blocks; `copies`: physical copies.
-  - `unreferenced`: blocks no same-owner, same-generation block points to.
+  - `unreferenced`: blocks no internal block of the same generation points
+    to.
+  - `referenced_by_newer`: of those, blocks an internal block of a newer
+    generation points to; they are not candidates.
   - `top`: `true` for the highest level of this owner and generation.
-  - `candidates`: unreferenced blocks when `top`, else 0.
+  - `candidates`: the unreferenced blocks that no newer parent points to, at
+    any level.
   - `listed`: the bytenrs of the first 16 candidates.
 - `log`: one per generation of log-tree blocks (owner −6).
   - `generation`, `blocks`, `copies`, `levels`, `candidates`, `listed`: as
