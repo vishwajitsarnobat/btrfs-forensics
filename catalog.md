@@ -411,7 +411,213 @@ extent tree: 12 tree blocks; reached only by walks: 0; listed only by the extent
   The reserved-range difference (0–68 KiB versus the probe's single skipped
   block at 64 KiB) must be checked on those images.
 - **Log trees.** Decide how a log tree (generation = superblock + 1) is
-  validated before a crashed image enters the corpus.
+  validated before a crashed image enters the corpus. Done in the review
+  fixes below.
+
+### Review fixes
+
+PR #11 was approved with fixes (three medium, three low). Each code fix was
+written test-first and the tests were seen failing. All commits are local on
+`feature/m2a-scan-kernel`, on top of `d4c2c59`, and are not pushed:
+- `03b832c` Validate log-tree blocks in a log context: owner TREE_LOG, generation superblock + 1
+- `f9add08` Add the m2_logtree corpus image: fsynced log trees left by a power-off without commit
+- `3fa93e1` Stream worker scan results in order through a bounded window of 4 MiB pieces
+- `974ee5c` Stream scan classification, classify log-tree copies live and report bytes skipped as DATA
+- `80ac63b` Add the EXP-003 density sweep and per-allocated-byte throughput to the scan benchmark
+- `acf058b` Document log trees, scan limitations, bounded memory and the EXP-003 density sweep
+- this subsection (the commit after `acf058b`)
+
+**Sources.** Kernel tag v7.0 files fetched into
+`images/scratch/m2a-fixes/kernel/`: `disk-io.c`, `tree-log.c`,
+`transaction.c`, `ctree.c`, `extent-tree.c`, `tree-checker.c`,
+`btrfs_tree.h`, `ctree.h`. They are cited by line only, never copied. Raw
+logs are in `images/scratch/m2a-fixes/{logtree,memory,verify}/` and
+`images/scratch/exp/EXP-003/`.
+
+1. **Log-tree blocks could never be classified live (medium).**
+   - **Verified facts.** Two of the review's premises were corrected
+     against the source; the defect itself was real.
+     - **Owner.** `BTRFS_TREE_LOG_OBJECTID` is −6 (btrfs_tree.h:92); −7 is
+       `TREE_LOG_FIXUP`. Every log block carries it as header owner
+       (disk-io.c:861-867, 887; ctree.c:520; extent-tree.c:5308).
+     - **Keys.** The log root tree's ROOT_ITEM keys are (TREE_LOG,
+       ROOT_ITEM, subvolume id) (disk-io.c:865-867, 942;
+       tree-log.c:7720-7744). So the walk already expected owner −6, not the
+       subvolume id. The owner was simply never checked: `_owner_ok`
+       skipped TREE_LOG, as the kernel does (tree-checker.c:2270).
+     - **Generation: exactly superblock + 1.** Log blocks take the running
+       transid (extent-tree.c:5306), which is the committed generation + 1
+       (transaction.c:392-393). btrfs_sync_log writes `super_for_commit`
+       under `tree_log_mutex` after the previous commit's superblock
+       (tree-log.c:3554-3580, transaction.c:2535-2581). Replay reads the log
+       root with transid generation + 1 (disk-io.c:2017-2019), and logs are
+       freed at every commit.
+     - **log_root_transid.** v7.0 has no `log_root_transid` function. The
+       superblock field is `__unused_log_root_transid` (btrfs_tree.h:695)
+       and is 0 on disk.
+   - **Actual defects.**
+     - The node generation check (≤ superblock) failed every log block, so
+       the log walk stopped at its root. The pre-fix scan of `m2_logtree`
+       reported `tree 18446744073709551610 node 30982144 is invalid: …
+       generation 9 > superblock generation 8`
+       (`logtree/scan_before_fix.txt`).
+     - The log root had no expected generation.
+     - Subvolume logs (tree id TREE_LOG) were searched for ROOT_ITEMs as if
+       they were root trees.
+     - Scanned log copies failed the context-free generation check.
+   - **Fix.**
+     - `Expect.log` and `TreeRoot.log`. The walker propagates the log
+       context to children.
+     - In a log context `check_block` requires generation ==
+       superblock + 1, and the owner check is exact for TREE_LOG.
+     - `classify.walk_root_set` anchors the log only at the superblock's
+       `log_root`, with generation + 1. Only ROOT_ITEMs keyed
+       (TREE_LOG, …) in that tree name subvolume logs, and their leaves are
+       not searched. A ROOT_ITEM keyed like a log inside the ordinary root
+       tree gets no log context.
+     - A scanned copy has its generation check redone in the log context
+       only when the log walk reached that exact (logical, physical) copy.
+       Its status is then `live`, with the new record key `log_tree`.
+     - Log blocks are left out of `walk_only`, since they have no
+       extent-tree reference (extent-tree.c:5392). The summary adds
+       `log tree: N blocks (M live copies)`.
+   - **Corpus image `m2_logtree`** (manifest row, SHA-256 `2c8b95df…3b16`).
+     - Scenario `corpus/vm/scenarios/logtree.guest.sh`, mounted with
+       `commit=300`: commit two files, fsync new files in fs tree 5 and
+       `sv1` and append to one, then `echo o > /proc/sysrq-trigger`.
+     - `make_image.sh` gains `DONE_MARKER`, because the guest never reaches
+       its umount.
+     - Result: superblock generation 8, log_root 30982144. Three more
+       generated runs gave the same generation and log_root (the images
+       were deleted).
+     - Oracle: `btrfs inspect-internal dump-tree -t 18446744073709551610`
+       names leaves 30982144 and 30965760, and the scan classifies exactly
+       those 2 blocks, 4 DUP copies, as `live`/`log_tree`.
+     - Two superseded generation-9 log leaves from the first fsync's log
+       commit (30932992 and 30949376, 2 copies each) remain `invalid` on
+       generation: nothing reaches them.
+   - **Tests** (failing first):
+     - `test_node` ×2 and `test_tree` ×1: TypeError, no `log` in `Expect`;
+     - `test_scan_classify`: ImportError on `walk_root_set`, then the
+       synthetic log walk, scanned log copy and streaming tests;
+     - vm `test_m2_logtree_log_blocks_are_live_log_tree_copies`, with the
+       dump-tree oracle;
+     - the manifest SHA-256.
+2. **Memory was O(candidates) (medium).**
+   - **Fix.**
+     - `classify` is a generator, and `Tally` keeps running counters.
+       `ScanResult.classified` is a one-shot stream, and `.summary` needs it
+       exhausted.
+     - `cmd_scan` prints each record while the image is open.
+     - Workers: a pool initializer opens the image once per process, and
+       jobs are 4 MiB pieces. At most `workers` pieces are pending ahead of
+       the one being yielded, so the parent holds at most 4 × 1024 records.
+       Output order is physical.
+     - The classify docstring states the remaining bound: the reachable
+       trees, not the candidates.
+   - **Test** `tests/test_scan_hostile.py` (sandbox marker). A copy of
+     `sandbox.img` has fsid-matching garbage in all 39 680 sectors of the
+     trailing gap, 39 765 candidates in all. `scan --json` runs under
+     tracemalloc with workers 1 and 4; each peak must stay below 16 MiB, and
+     both outputs must be byte-identical (SHA-256 of stdout, equal stderr).
+     It failed first with `--workers 1: peak 78441738 bytes`. The sandbox
+     CLI test now compares `--workers 4` with one process.
+   - **Measured on the review's `flood.img`** (`memory/peak.py`, 5
+     sequential runs each; `/usr/bin/time -v` for RSS):
+
+     | Version | Workers | tracemalloc peak | Wall s median (range) | Max RSS |
+     |---|---|---|---|---|
+     | before (`d4c2c59`) | 1 | 89.3 MB | 1.39 (1.37–1.42) | 384 MB |
+     | before (`d4c2c59`) | 4 | 267.6 MB | 2.93 (2.64–3.24) | 308 MB (parent) |
+     | after | 1 | 2.3 MB | 1.40 (1.37–1.53) | 296 MB |
+     | after | 4 | 16.6 MB | 1.31 (1.24–1.35) | 53 MB (parent) |
+
+     RSS includes the image's file-backed pages (about 250 MB of a mapped
+     256 MB image), so the heap peak is the comparable figure. Four workers
+     are now about as fast as one, not faster, so the default stays 1
+     (README, kernel docstring). The `--workers 1` and `--workers 4` JSON
+     are byte-identical (`cmp`, 39 765 lines).
+3. **Targeted mode misses metadata in reallocated DATA ranges (medium).**
+   - The README has a limitation paragraph, and the `regions.py` docstring
+     is corrected: it no longer implies that a skipped DATA range holds no
+     tree blocks.
+   - New summary line `skipped as DATA: N bytes (use --full-sweep to include
+     reallocated ranges)`, or `(full sweep)` with 0 bytes, and the summary
+     field `skipped_data_bytes`. There is no JSON summary record: `--json`
+     prints the summary lines on stderr, and the field is in
+     `scan_image(...).summary`, the dict M3 stores.
+   - Tests (failing first): a valid fs-tree leaf is planted 1 MiB into the
+     sandbox DATA chunk. Targeted, it is not found and 8 388 608 bytes are
+     reported; with `--full-sweep` it is found `unreferenced` in
+     `DATA|single`. Also the summary field, targeted and full, and the
+     sandbox CLI lines.
+   - research.md §10.10 records it as a forensic consideration.
+4. **Foreign-FSID limitation (low).** Noted in the README limitations and
+   research.md §10.10. plan.md M6 gains an optional foreign-FSID discovery
+   mode that feeds the foreign-superblock finding.
+5. **EXP-003 headline (low).**
+   - **Non-hole throughput.** `bench_scan.py allocated` recomputes the
+     N = 5 runs per allocated byte (5 771 366 400 of 10 GiB):
+
+     | Cell | Image MB/s | Allocated MB/s |
+     |---|---|---|
+     | prefilter cold | 3743.1 | 2011.6 (1884.2–2327.2) |
+     | prefilter warm | 6138.6 | 3299.8 (1947.2–4494.8) |
+     | full cold | 3277.1 | 1761.2 (1734.7–1794.0) |
+     | full warm | 5691.0 | 3058.5 (2380.9–3777.1) |
+
+   - **Density sweep** (`sweep-generate`, `sweep-run --runs 5`; EXP-003
+     §6.1). Dense 1 GiB images: pool tree blocks at density %, random bytes
+     elsewhere. Full validation, one process, sequential; `mincore()`
+     showed 0 % cached cold and 100 % warm. N = 5 median (range), MB/s:
+
+     | Density | Cold | Warm |
+     |---|---|---|
+     | 0 % | 3451.7 (3362.5–3456.7) | 65669.9 (55699.1–68240.6) |
+     | 10 % | 2142.5 (2069.7–2159.2) | 5685.7 (5056.6–6037.6) |
+     | 100 % | 512.2 (501.0–529.7) | 615.9 (576.0–628.2) |
+
+     These replace the review's single runs (100 %: 262 cold and 287 warm;
+     10 %: 803 and 2 384, on sparse images). Validation costs about 27 µs
+     per candidate. Every run's hits and valid counts equal the
+     generator's.
+   - The 3 GiB of sweep images were deleted (`bench_scan.py clean`);
+     `sweep-generate --verify` rebuilds their hashes.
+6. **Wording (low).** The extent-tree check is now called a content
+   cross-check that is not independent of the current root tree, in
+   `classify.py`, the README and research.md §10.10. The only "independent"
+   was in the PR #11 description, which was not edited (no remote
+   changes); replacement text is in
+   `images/scratch/m2a-fixes/pr_body_changes.md`.
+
+**Deviation.** The review asked for owner −7. The kernel's value is −6, and
+btrfska already used −6 (`ondisk.TREE_LOG_OBJECTID = _U64 - 6`).
+
+**Verification** (local, at `acf058b`; logs in
+`images/scratch/m2a-fixes/verify/`):
+
+| Check | Command | Result |
+|---|---|---|
+| Tests (all) | `uv run pytest -q` | `684 passed` (was 673) |
+| vm tests | `uv run pytest -m vm -q` | `53 passed, 631 deselected` |
+| Read-only and import boundary | `uv run pytest -q tests/test_readonly.py tests/test_import_boundary.py` | `53 passed`; grep for `dissect`/`lzallright` imports under `src/`: 0 |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `58 files already formatted` |
+| Lockfile | `uv lock --check` | `Resolved 15 packages` |
+| Scan, sandbox | `uv run btrfska scan sandbox.img` | exit 0; classes unchanged (85/84/1, live 20, orphans 64); `skipped as DATA: 8388608 bytes`; `log tree: 0 blocks` |
+| Scan, flood | `uv run btrfska scan images/scratch/m2a-review/flood.img` | exit 0; `candidates: 39765 (valid 84, invalid 39681)`, same classes as sandbox |
+| Scan, `m2_logtree` | `uv run btrfska scan images/scenarios/m2_logtree.img` | exit 0; 89 candidates (80 valid), live 24, orphans 56 (30/26), `log tree: 2 blocks (4 live copies)`, walks-only 0, `skipped as DATA: 75497472 bytes`; 3 `backup:5` problems (reused blocks under an old backup root) |
+| `sandbox.img` after | `sha256sum sandbox.img; stat -c '%y' sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime 2026-04-26 18:49:36 |
+
+**For M2b.**
+- The superseded log leaves on `m2_logtree` show that a log commit leaves
+  generation sb + 1 residue that no walk reaches. Old-root discovery should
+  group owner −6 blocks by generation, as for owner 1.
+- Run the discard trio with `--full-sweep` as well: reallocated DATA ranges
+  are exactly where balance leaves stale metadata.
+- The oldest backup root on small images names reused blocks (`backup:5`
+  problems on `m2_logtree`). That is expected, but the summary should
+  separate it from damage.
 
 - **Branch:** `feature/m1c-extent-reads` (from `main` at `16e7c77`). This is
   the last of three M1 PRs. It covers plan.md §5 M1 task 8 (extent reads,
