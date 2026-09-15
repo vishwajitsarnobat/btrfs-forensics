@@ -78,7 +78,7 @@ class Chunk:
     stripes: tuple[Stripe, ...]
     sub_stripes: int = 1
     origin: str = ""  # where the item was read, for provenance
-    problems: tuple[str, ...] = ()  # any problem makes the chunk unusable for mapping
+    problems: tuple[str, ...] = ()  # any problem rejects the chunk from a ChunkMap
 
     @property
     def num_stripes(self) -> int:
@@ -252,22 +252,30 @@ def parse_sys_chunk_array(fields: dict) -> tuple[list[Chunk], tuple[str, ...]]:
 
 
 class ChunkMap:
-    """Chunks sorted by logical address, with the problems found while building the map."""
+    """Valid chunks sorted by logical address, the rejected invalid chunks, and the problems found
+    while building the map.
+
+    Only valid chunks take part in lookup and overlap resolution, so a corrupt item (an inflated
+    length, say) cannot shadow later valid chunks. Rejected chunks are kept for reporting.
+    """
 
     def __init__(self, source: str, chunks, devices: dict[int, bytes], problems=()) -> None:
         self.source = source
         self.devices = dict(devices)  # devid -> device uuid of every readable device
-        found, accepted = list(problems), []
+        found, accepted, rejected = list(problems), [], []
         for chunk in sorted(chunks, key=lambda c: c.logical):
             where = f"chunk {chunk.logical}"
             if chunk.problems:
-                found.append(f"{where} ({chunk.origin}) is invalid: {'; '.join(chunk.problems)}")
-            if not chunk.length:
+                found.append(
+                    f"{where} ({chunk.origin}, {type_name(chunk.type)}, length {chunk.length}) "
+                    f"is invalid and rejected: {'; '.join(chunk.problems)}"
+                )
+                rejected.append(chunk)
                 continue
             if accepted and chunk.logical < accepted[-1].end:
                 found.append(f"{where} overlaps chunk {accepted[-1].logical}; ignored")
                 continue
-            if not chunk.stripes and not chunk.problems:
+            if not chunk.stripes:
                 found.append(
                     f"{where} has no stripes (REMAPPED): its addresses resolve through the remap "
                     "tree, which btrfska does not read"
@@ -282,6 +290,7 @@ class ChunkMap:
                     )
             accepted.append(chunk)
         self.chunks = tuple(accepted)
+        self.rejected = tuple(rejected)
         self.problems = tuple(found)
         self._starts = [chunk.logical for chunk in accepted]
 
@@ -289,6 +298,15 @@ class ChunkMap:
         index = bisect.bisect_right(self._starts, logical) - 1
         if index >= 0 and logical < self.chunks[index].end:
             return self.chunks[index]
+        covering = [c for c in self.rejected if c.logical <= logical < c.end]
+        if covering:
+            names = "; ".join(
+                f"rejected chunk {c.logical} is invalid: {', '.join(c.problems)}" for c in covering
+            )
+            raise UnmappedAddress(
+                f"logical {logical} is not in any valid chunk of the {self.source} chunk map "
+                f"({names})"
+            )
         raise UnmappedAddress(
             f"logical {logical} is not in any chunk of the {self.source} chunk map"
         )
@@ -301,8 +319,6 @@ class ChunkMap:
                 f"logical range {logical}+{length} crosses the end of chunk {chunk.logical} "
                 f"of the {self.source} chunk map"
             )
-        if chunk.problems:
-            raise MappingError(f"chunk {chunk.logical} is invalid: {'; '.join(chunk.problems)}")
         if not chunk.stripes:
             raise UnmappedAddress(
                 f"chunk {chunk.logical} has no stripes (REMAPPED): logical {logical} is mapped "
