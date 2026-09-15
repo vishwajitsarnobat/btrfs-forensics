@@ -1632,3 +1632,84 @@ Kernel references are to tag v7.0.
   before, with that fsid and at least that generation. The foreign copy's
   own backup roots and sys_chunk_array may point at metadata that still
   survives. Synthetic case: `m1_foreign_mirror` (corpus/manifest.tsv).
+
+### 10.8 Tree-walking notes from M1b (2026-09-15)
+
+Observed while building the validated node reader, chunk maps and anchored
+walker (catalog.md, M1b entry). Kernel references are to tag v7.0;
+btrfs-progs is the host's v6.6.3.
+
+- **Every backup root is fully walkable on the current corpus.** A root set
+  here means the superblock's or a backup slot's trees plus every ROOT_ITEM in
+  that set's root tree. On `sandbox.img` (backup gens 11–14) and the five s01
+  images (gens 35–38), every tree of every root set walks with every node
+  valid on both DUP copies:
+  - `sandbox.img`: 27 distinct tree blocks, 10 per root set;
+  - s01 images: 23–25 distinct tree blocks, 11–12 per root set.
+
+  No block of any backup-root tree had been reused. Threat to validity: these
+  images are small, quiescent after their last commit and use no discard. No
+  survival rate generalises from them; M7 must measure how fast churn
+  overwrites the four backup states.
+- **DUP copies were bit-identical.** All 144 distinct tree blocks across the
+  six images have two copies, and no pair differs. A valid but divergent pair
+  is therefore unusual; btrfska reports it (`mirror 2 is valid but differs
+  from mirror 1`).
+- **What the kernel and btrfs-progs do not surface.**
+  - The kernel reads DUP mirror 1 and tries mirror 2 only when mirror 1 fails
+    (`map_blocks_dup`, volumes.c:6751-6765). A damaged or altered mirror 2 is
+    never read unless mirror 1 fails (scrub would still find it).
+  - With crc32c, bytes 4–31 of the 32-byte csum field lie outside the
+    checksum, so two copies can differ there and both validate (synthetic
+    test `test_valid_copies_differing_outside_the_checksum_are_reported`).
+  - Both are candidate hiding places for the M6 detector. This is a
+    hypothesis, not yet measured.
+  - btrfs-progs `dump-tree` reports a bad copy only as `checksum verify failed
+    on L wanted <stored> found <computed>`, without mirror or physical
+    address. On `m1_badnode` it then silently prints the other copy. btrfska
+    records mirror, devid, physical offset and every check per copy.
+- **`sv1` history per generation** (the open point of §10.7). In all four
+  `m1_xxhash` backup root sets, and in the current one, the ROOT_ITEMs are
+  identical:
+  - subvolume 5: gen 19, leaf 64208896;
+  - 256 `sv1`: gen 34, leaf 65159168;
+  - 257 `snap_before_delete`: read-only, gen 34, leaf 65126400.
+
+  `sv1` holds `keep.txt` (108 894 B) and `churn_1..6` (5 B each). Only the
+  snapshot still names `deleted_big.txt` (288 894 B, three extents) and
+  `deleted_inline.txt` (13 B, inline). The `sv1` leaf's generation (34) is newer
+  than every inode transid in it (≤ 15), consistent with the full balance
+  rewriting the leaf. So per-subvolume backup walking cannot reach the
+  pre-deletion `sv1` leaf either. It can survive only as an unreferenced
+  block (M2 scan), and the deleted names only through the snapshot.
+- **Backup roots preserve a pre-balance chunk map.**
+  - Backup gens 35–37 name chunk root 131104768 (gen 30, 5 items) and dev root
+    64847872 (gen 30). Gen 38 and the superblock name chunk root 131121152
+    (gen 38, 4 items).
+  - The extra gen-30 items are the mkfs `DATA|single` chunk at logical
+    13631488 (8 MiB, devid 1, physical 13631488) and its DEV_EXTENT. The
+    balance moved its data into the chunk at 164626432 and dropped it.
+  - Older metadata that points into 13631488..22020096 is unmapped under the
+    current map. Historical chunk maps (M5, C6) can be built from backup chunk
+    roots while those survive.
+  - btrfska M1b walks every root set through the current map, which is
+    correct for these images: every tree block lives in chunks that the gen-30
+    and gen-38 maps share.
+- **Backup roots taken mid-balance record the relocation.**
+  - Root trees of gens 35–37 also hold the balance status item (`BALANCE
+    TEMPORARY_ITEM 0`).
+  - They also hold a DATA_RELOC tree (gen 32) whose inode 259 is an orphan
+    with extents at file offsets 0, 28 672, 61 440 and 73 728. Those extents
+    sit at disk bytes 164626432 (28 672 B), 164655104 (32 768 B), 164687872
+    (12 288 B) and 164700160 (4 096 B): the relocated `keep.txt` extent and
+    the three `deleted_big.txt` extents named by the snapshot.
+  - Gen 38 (balance finished) has neither.
+  - Hypothesis for M5, to check against `fs/btrfs/relocation.c`: a reloc
+    inode's file offset is the original address minus the source block-group
+    start. The old addresses would then be 13631488 + offset, so a mid-balance
+    backup root links old and new data locations.
+- **Parent-pointer generation is an equality.** The kernel rejects a child
+  whose generation differs from its parent pointer's in either direction
+  ("parent transid verify failed", disk-io.c:410-417). In a historical walk,
+  a child newer than its pointer is exactly the signature of an overwritten
+  backup-root block, so btrfska reports which direction it failed.

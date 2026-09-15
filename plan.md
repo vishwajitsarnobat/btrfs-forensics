@@ -312,6 +312,10 @@ Why our own decoder:
 - node header validation (bytenr, fsid, chunk-tree uuid, generation ≤ SB
   generation, owner, level) and a node reader returning a `ValidatedNode`
   with a validation record;
+- mirror policy (decided in M1b, 2026-09-15): every physical copy of a tree
+  block (all DUP/RAID1 stripes) is read and validated on its own; the first
+  valid copy in mirror order is used, and every copy's checks stay in the
+  record, so a corrupt or divergent copy is always reported;
 - the incompat/compat_ro gate;
 - sys_chunk_array + chunk-tree map, keyed so historical maps can coexist
   (M5);
@@ -687,7 +691,9 @@ and proven against ground truth.
    chunk-tree uuid, generation ≤ SB gen, level ≤ 7, nritems bound, and
    owner. Each check is recorded individually — a failed node is returned
    *flagged*, never silently parsed. Plus the property test: random bytes
-   and mutated valid nodes never crash.
+   and mutated valid nodes never crash. Every mirror copy is read and
+   validated; the first valid one is used and all copies are reported
+   (§3.5 mirror policy).
 6. **Chunk maps** `substrate/chunks.py`: sys_chunk_array + chunk tree →
    `ChunkMap(source="current")`; healthy RAID stripe math; zero-stripe chunk
    items tolerated and flagged (remap-tree images).
