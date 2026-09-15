@@ -840,7 +840,9 @@ EXP-003; M2b delivered old-root discovery, EXP-000 and EXP-002. Every DoD bullet
 - sandbox parity: 71 legacy-compatible orphans, 21 outside the map, identical offsets
   (`test_sandbox_legacy_compatible_orphans_are_the_legacy_offsets`, M2a);
 - discard trio: `btrfska scan --full-sweep`, counted under the probe's rules, equals
-  `probe_stale_metadata.py` on 48 of 48 images (EXP-002). Cross-run numbers are medians and
+  `probe_stale_metadata.py` on 48 of 48 images (EXP-002). This is coverage agreement: the count
+  reuses btrfska's scan plan and prefilter, so it verifies the offsets read, the fsid match and
+  the generation field, not an independent re-implementation. Cross-run numbers are medians and
   ranges over N = 15 regenerations next to EXP-000's;
 - ≥ 200 MB/s single-core on a synthetic 10 GiB image: 3 227.5 MB/s slowest run, 512 MB/s on a
   100 % metadata image (EXP-003, M2a);
@@ -849,8 +851,9 @@ EXP-003; M2b delivered old-root discovery, EXP-000 and EXP-002. Every DoD bullet
 Old-root discovery (`scan/roots.py`, `btrfska roots`) groups the valid blocks of every owner by
 (owner, generation, level), not only root-tree blocks. It records owner-12 and owner-13 blocks
 unparsed and groups log-tree blocks by generation. It rediscovers every superblock and backup root
-on `sandbox.img` and the M1 images, and finds 31 root-tree states beyond the 4 backups on every
-s01 image without trims (EXP-002).
+on `sandbox.img` and the M1 images, and finds 31 candidate root-tree blocks (states) beyond the 4
+backups on every s01 image without trims (EXP-002). That survival is partly an artefact of the
+scenario's final balance and short life (EXP-002 §6.5).
 
 **M2a** (catalog.md M2a entry).
 - **Delivered:**

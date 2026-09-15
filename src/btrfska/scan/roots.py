@@ -1,5 +1,5 @@
 """Old-root discovery: historical tree roots among the scanned tree blocks, and how complete each
-historical root-tree state still is.
+candidate root-tree block (state) still is.
 
 The idea is btrfs-progs `btrfs-find-root`'s (it prints, per generation, the highest-level
 root-tree block it finds), fed into records instead of stdout:
