@@ -49,10 +49,14 @@ Derived images and the manifest (one level up, in `corpus/`):
   name and skip when absent.
 - `corpus/mutate.py SRC DST OP` writes a damaged copy of a generated image
   (`set-incompat-bit BIT`, `zero-primary-sb`, `transplant-sb DONOR MIRROR
-  GENERATION`). It only reads `SRC` (and `DONOR`) and refuses an existing
-  `DST`, a `DST` outside `images/`, or any file named `sandbox.img`. All
-  patches are computed and validated before `DST` is created, so a refused
-  run leaves no file.
+  GENERATION`, `flip-byte OFFSET...`). It only reads `SRC` (and `DONOR`) and
+  refuses an existing `DST`, a `DST` outside `images/`, or any file named
+  `sandbox.img`. All patches are computed and validated before `DST` is
+  created, so a refused run leaves no file.
+- `flip-byte` takes physical offsets. `m1_badnode` inverts the last byte of
+  mirror 1 of `m1_xxhash`'s `sv1` leaf (logical 65159168, copies at physical
+  107102208 and 174211072, from `btrfska walk images/scenarios/m1_xxhash.img
+  --tree 256`); `m1_badnode_both` inverts it in both copies.
 
 Notes:
 - `DISCARD=1` alone makes the async row: kernels ≥ 6.2 enable
