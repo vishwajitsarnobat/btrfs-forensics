@@ -335,7 +335,12 @@ def _remapped_raid10_image(directory) -> str:
     covering the chunk root: the review's ZeroDivisionError case."""
     chunk_type = BG["SYSTEM"] | BG["RAID10"] | BG["REMAPPED"]
     raw = entry(1 << 30, raw_chunk(type_=chunk_type, stripes=((1, 0), (1, 1 << 20)), sub_stripes=0))
-    block = make_block(sys_chunk_array=raw, sys_chunk_array_size=len(raw), chunk_root=1 << 30)
+    block = make_block(
+        sys_chunk_array=raw,
+        sys_chunk_array_size=len(raw),
+        chunk_root=1 << 30,
+        root=(1 << 30) + 16384,
+    )
     return _image_with(directory, "remapped_raid10.img", {ondisk.sb_offset(0): block})
 
 
@@ -351,7 +356,13 @@ def test_remapped_raid10_without_sub_stripes_opens_and_walks_without_a_traceback
         captured = capsys.readouterr()
         (record,) = _records(captured.out)
         assert record["record"] == "invalid_node"
-        assert "sub_stripes 0 invalid for RAID10" in captured.err
+        assert "rejected chunk 1073741824" in record["node"]["problems"][0]
+        assert any(
+            line.startswith("chunk map: chunk 1073741824 (sys_chunk_array, SYSTEM|REMAPPED|RAID10")
+            and "is invalid and rejected: " in line
+            and "sub_stripes 0 invalid for RAID10" in line
+            for line in captured.err.splitlines()
+        )
 
 
 def test_walk_without_a_valid_superblock_is_refused(capsys):

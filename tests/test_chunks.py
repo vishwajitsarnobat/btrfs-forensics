@@ -3,6 +3,7 @@
 import json
 import random
 import struct
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -234,9 +235,33 @@ def test_invalid_chunk_items_are_flagged_and_refuse_to_map(logical, data, proble
     chunk = parse_chunk(logical, data, sectorsize=4096)
     assert any(problem in p for p in chunk.problems), chunk.problems
     chunk_map = ChunkMap("test", [chunk], {1: DEV_UUID})
+    assert chunk_map.chunks == () and chunk_map.rejected == (chunk,)
     if chunk.length:
         with pytest.raises(MappingError, match="invalid"):
             chunk_map.copies(chunk.logical, 1)
+
+
+def test_an_invalid_chunk_does_not_claim_address_space():
+    # A corrupt item whose length is inflated to 64 GiB would otherwise shadow every later chunk.
+    corrupt = parse_chunk(
+        LOGICAL,
+        raw_chunk(length=64 * GIB, stripe_len=4096),
+        sectorsize=4096,
+        origin="chunk tree leaf 1 slot 0",
+    )
+    assert corrupt.problems
+    valid = replace(striped("SINGLE", 1), logical=LOGICAL + 2 * GIB)
+    chunk_map = ChunkMap("test", [corrupt, valid], {1: DEV_UUID})
+
+    assert chunk_map.chunks == (valid,) and chunk_map.rejected == (corrupt,)
+    assert physical(chunk_map, valid.logical + OFFSET) == [(1, 1, 10 * GIB + OFFSET)]
+    assert (
+        f"chunk {LOGICAL} (chunk tree leaf 1 slot 0, METADATA|DUP, length {64 * GIB}) is invalid "
+        f"and rejected: {'; '.join(corrupt.problems)}"
+    ) in chunk_map.problems
+    assert not any("overlaps" in p for p in chunk_map.problems)
+    with pytest.raises(UnmappedAddress, match=f"rejected chunk {LOGICAL} .*invalid"):
+        chunk_map.copies(LOGICAL + OFFSET, 4096)
 
 
 def test_mixed_groups_allow_data_and_metadata():
