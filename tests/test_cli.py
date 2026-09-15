@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 
@@ -183,3 +184,148 @@ def test_info_without_any_valid_superblock_fails(capsys):
         out = capsys.readouterr().out.splitlines()
         assert "selected: none" in out
         assert "NO_VALID_SUPERBLOCK" in out
+
+
+# ---------------------------------------------------------------------------
+# btrfska walk
+# ---------------------------------------------------------------------------
+def _records(out: str) -> list[dict]:
+    return [json.loads(line) for line in out.splitlines()]
+
+
+def _physical(logical: int, stripe: int) -> int:
+    """sandbox.img METADATA|DUP chunk 30408704: stripes at 38797312 and 72351744."""
+    return (38797312, 72351744)[stripe] + logical - 30408704
+
+
+@pytest.mark.sandbox
+def test_walk_backup_fs_tree_emits_items_with_provenance(sandbox_img, capsys):
+    assert main(["walk", str(sandbox_img), "--root", "backup:11", "--tree", "fs"]) == 0
+    captured = capsys.readouterr()
+    records = _records(captured.out)
+    assert [r["record"] for r in records] == ["item"] * 8
+    first = records[0]
+    assert first["key"] == {"objectid": 256, "type": 1, "type_name": "INODE_ITEM", "offset": 0}
+    assert first["root"] == {
+        "source": "backup:11",
+        "tree": "fs",
+        "tree_id": 5,
+        "bytenr": 30785536,
+        "level": 0,
+        "generation": 11,
+        "via": "backup slot 2",
+    }
+    node = first["node"]
+    assert (node["bytenr"], node["level"], node["generation"], node["owner"]) == (
+        30785536,
+        0,
+        11,
+        5,
+    )
+    assert node["valid"] is True and node["problems"] == []
+    assert [
+        (c["mirror"], c["devid"], c["physical"], c["used"], c["valid"]) for c in node["copies"]
+    ] == [
+        (1, 1, _physical(30785536, 0), True, True),
+        (2, 1, _physical(30785536, 1), False, True),
+    ]
+    checks = node["copies"][0]["checks"]
+    assert checks["csum"] is True and checks["parent_generation"] is True
+    assert checks["first_key"] is None  # a root has no parent key
+    assert first["slot"] == 0 and first["chunk_map"] == "current"
+    assert first["unsupported_format"] is False
+    assert first["summary"]["size"] == 30 and first["summary"]["mode"] == "40755"
+    extent = next(r for r in records if r["key"]["type_name"] == "EXTENT_DATA")
+    assert extent["summary"]["type"] == "inline" and extent["summary"]["ram_bytes"] == 31
+    assert "btrfska walk: 1 nodes (0 invalid), 8 items, 0 walk problems" in captured.err
+
+
+@pytest.mark.sandbox
+def test_walk_current_chunk_tree_by_default_root(sandbox_img, capsys):
+    assert main(["walk", str(sandbox_img), "--tree", "chunk"]) == 0
+    records = _records(capsys.readouterr().out)
+    assert [r["key"]["type_name"] for r in records] == ["DEV_ITEM"] + ["CHUNK_ITEM"] * 3
+    assert records[0]["root"]["via"] == "superblock" and records[0]["root"]["source"] == "current"
+    assert [r["summary"]["type"] for r in records[1:]] == [
+        "DATA|single",
+        "SYSTEM|DUP",
+        "METADATA|DUP",
+    ]
+
+
+@pytest.mark.sandbox
+def test_walk_subvolume_id_resolves_through_the_root_tree(sandbox_img, capsys):
+    assert main(["walk", str(sandbox_img), "--root", "backup:13", "--tree", "5"]) == 0
+    records = _records(capsys.readouterr().out)
+    assert len(records) == 8
+    assert records[0]["root"]["via"].startswith("ROOT_ITEM (5 132 0) in root tree 30572544 leaf ")
+
+
+@pytest.mark.sandbox
+def test_walk_from_a_bytenr(sandbox_img, capsys):
+    assert main(["walk", str(sandbox_img), "--root", "bytenr:30720000"]) == 0
+    records = _records(capsys.readouterr().out)
+    assert len(records) == 12
+    assert records[0]["root"] == {
+        "source": "bytenr:30720000",
+        "tree": None,
+        "tree_id": None,
+        "bytenr": 30720000,
+        "level": None,
+        "generation": None,
+        "via": "bytenr",
+    }
+    assert main(["walk", str(sandbox_img), "--root", "bytenr:30720000", "--tree", "fs"]) == 0
+    (first, *_) = _records(capsys.readouterr().out)
+    assert first["node"]["copies"][0]["checks"]["owner"] is False  # a root-tree block, not fs
+
+
+@pytest.mark.sandbox
+def test_walk_reports_invalid_nodes_instead_of_items(sandbox_img, capsys):
+    assert main(["walk", str(sandbox_img), "--root", "bytenr:4096"]) == 0
+    captured = capsys.readouterr()
+    (record,) = _records(captured.out)
+    assert record["record"] == "invalid_node"
+    assert record["node"]["valid"] is False and record["node"]["copies"] == []
+    assert "not in any chunk" in record["node"]["problems"][0]
+    assert "1 nodes (1 invalid), 0 items" in captured.err
+
+    assert main(["walk", str(sandbox_img), "--root", "bytenr:30412800"]) == 0
+    (record,) = _records(capsys.readouterr().out)
+    assert record["record"] == "invalid_node"
+    assert [c["valid"] for c in record["node"]["copies"]] == [False, False]
+    assert all(c["used"] is False for c in record["node"]["copies"])
+
+
+@pytest.mark.sandbox
+def test_walk_rejects_unknown_roots_and_trees(sandbox_img, capsys):
+    assert main(["walk", str(sandbox_img), "--root", "backup:99"]) == 1
+    assert "no backup root with generation 99 (have 11, 12, 13, 14)" in capsys.readouterr().err
+    assert main(["walk", str(sandbox_img), "--tree", "256"]) == 1
+    assert "no ROOT_ITEM for tree 256" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(["walk", str(sandbox_img), "--root", "slot:1"])
+    assert "expected current, backup:GEN or bytenr:N" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(["walk", str(sandbox_img), "--tree", "bogus"])
+
+
+def test_walk_applies_the_incompat_gate(capsys):
+    with scratch_dir("test_cli_") as d:
+        block = make_block(incompat=SANDBOX_INCOMPAT | 1 << 40)
+        image = _image_with(d, "unknown.img", {ondisk.sb_offset(0): block})
+        assert main(["walk", image]) == 2
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "UNSUPPORTED_INCOMPAT UNKNOWN_BIT_40" in captured.err.splitlines()
+
+        # Overridden: the synthetic image has no chunk tree, so the root is an invalid node.
+        assert main(["walk", "--allow-unsupported", image, "--tree", "root"]) == 0
+        (record,) = _records(capsys.readouterr().out)
+        assert record["record"] == "invalid_node" and record["unsupported_format"] is True
+
+
+def test_walk_without_a_valid_superblock_is_refused(capsys):
+    with scratch_dir("test_cli_") as d:
+        assert main(["walk", _image_with(d, "zero.img", {})]) == 2
+        assert "NO_VALID_SUPERBLOCK" in capsys.readouterr().err
