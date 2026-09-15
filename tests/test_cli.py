@@ -1,17 +1,20 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from btrfska import __version__
-from btrfska.cli import main
+from btrfska.cli import _node_record, main
 from btrfska.substrate import ondisk
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
+from btrfska.substrate.node import CHECK_NAMES
 from conftest import SANDBOX_SHA256
 from tests.helpers import SANDBOX_INCOMPAT, make_block, scratch_dir, write_sparse_image
 from tests.test_chunks import entry, raw_chunk
+from tests.test_node import IMAGE_SIZE, PHYSICAL, dup_map, good, read_copies
 
 BG = ondisk.BLOCK_GROUP_FLAGS
 
@@ -363,6 +366,61 @@ def test_remapped_raid10_without_sub_stripes_opens_and_walks_without_a_traceback
             and "sub_stripes 0 invalid for RAID10" in line
             for line in captured.err.splitlines()
         )
+
+
+# The `walk` JSON-lines schema, as documented in README.md ("`btrfska walk` output").
+COMMON_KEYS = {"record", "root", "chunk_map", "unsupported_format", "node"}
+RECORD_KEYS = {
+    "item": COMMON_KEYS | {"slot", "key", "size", "summary"},
+    "invalid_node": COMMON_KEYS | {"parent", "parent_slot"},
+    "walk_problem": COMMON_KEYS | {"parent", "parent_slot", "problems"},
+}
+ROOT_KEYS = {"source", "tree", "tree_id", "bytenr", "level", "generation", "via"}
+NODE_KEYS = {"bytenr", "level", "generation", "owner", "valid", "copies", "problems"}
+COPY_KEYS = {"mirror", "devid", "physical", "readable", "used", "valid", "checks", "problems"}
+KEY_KEYS = {"objectid", "type", "type_name", "offset"}
+
+
+def _assert_record_schema(record: dict) -> None:
+    assert set(record) == RECORD_KEYS[record["record"]]
+    assert set(record["root"]) == ROOT_KEYS
+    assert set(record["node"]) == NODE_KEYS
+    for copy in record["node"]["copies"]:
+        assert set(copy) == COPY_KEYS
+        assert tuple(copy["checks"]) == CHECK_NAMES
+    if record["record"] == "item":
+        assert set(record["key"]) == KEY_KEYS
+
+
+def test_unreadable_copies_carry_every_check_as_null():
+    chunk_map = dup_map(stripes=(PHYSICAL[0], IMAGE_SIZE - 100))  # mirror 2 beyond the image end
+    node = read_copies({PHYSICAL[0]: good()}, chunk_map=chunk_map)
+    readable, unreadable = _node_record(node)["copies"]
+    for copy in (readable, unreadable):
+        assert set(copy) == COPY_KEYS and tuple(copy["checks"]) == CHECK_NAMES
+    assert readable["readable"] is True and readable["checks"]["csum"] is True
+    assert unreadable["readable"] is False
+    assert unreadable["checks"] == dict.fromkeys(CHECK_NAMES)
+    assert (unreadable["valid"], unreadable["used"]) == (False, False)
+    assert "beyond the image end" in unreadable["problems"][0]
+
+
+@pytest.mark.sandbox
+def test_walk_records_follow_the_documented_schema(sandbox_img, capsys):
+    for args in (["--root", "backup:13"], ["--root", "bytenr:30412800"], ["--root", "bytenr:4096"]):
+        assert main(["walk", str(sandbox_img), *args]) == 0
+        records = _records(capsys.readouterr().out)
+        assert records
+        for record in records:
+            _assert_record_schema(record)
+
+
+def test_readme_documents_every_walk_key():
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    section = readme.split("### `btrfska walk` output", 1)[1].split("\n## ", 1)[0]
+    keys = set().union(*RECORD_KEYS.values(), ROOT_KEYS, NODE_KEYS, COPY_KEYS, KEY_KEYS)
+    keys |= set(RECORD_KEYS) | set(CHECK_NAMES)
+    assert {key for key in keys if f"`{key}`" not in section} == set()
 
 
 def test_walk_without_a_valid_superblock_is_refused(capsys):
