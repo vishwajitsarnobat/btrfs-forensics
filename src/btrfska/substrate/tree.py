@@ -2,8 +2,8 @@
 
 `walk(reader, bytenr, expect)` reads the block at `bytenr` and descends depth-first in key order.
 Each child is read with the expectations its parent pointer implies: level one lower, the tree's
-owner, the pointer's generation and key. Those checks are therefore recorded on the child's
-copies (see node.py). The walker adds its own hop findings to each `Visit`:
+owner, the pointer's generation and key, and the start's log context. Those checks are therefore
+recorded on the child's copies (see node.py). The walker adds its own hop findings to each `Visit`:
 - a pointer to a block already reached in this walk (a cycle or a shared block) is not followed;
 - a child whose last key is not below the parent's next key.
 An invalid node is yielded but not descended, because its pointers cannot be trusted. Depth is
@@ -61,6 +61,7 @@ def walk(reader: NodeReader, bytenr: int, expect: Expect = NO_EXPECTATIONS) -> I
                     owner=expected.owner,
                     generation=ptr.generation,
                     first_key=ptr.key,
+                    log=expected.log,
                 )
                 child_upper = ptrs[index + 1].key if index + 1 < len(ptrs) else upper
                 children.append(

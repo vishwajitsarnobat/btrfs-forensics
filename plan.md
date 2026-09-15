@@ -834,6 +834,25 @@ M1c; the evidence per bullet is in the catalog.md M1c entry.
     `images/`;
   - benchmark script committed.
 
+**Status 2026-09-15: M2a done** (catalog.md M2a entry).
+- **Delivered:**
+  - `scan/regions.py` with the MIXED_GROUPS fix, tree-11 block-group input
+    and `--full-sweep`;
+  - `scan/kernel_numpy.py`;
+  - `scan/classify.py`, which holds the live set that §4.1 names
+    `scan/live_set.py`;
+  - `btrfska scan`;
+  - EXP-003.
+- **Sandbox parity** holds on the prototype's orphan definition (71 offsets,
+  21 outside the map, identical). The reachability classes reconcile those
+  71 as 8 live, 34 backup-reachable, 28 unreferenced and 1 invalid.
+- **M2b** covers the rest: old-root discovery, the discard trio (EXP-002)
+  and the EXP-000 backfill.
+- **Review fixes** (catalog.md, M2a): log trees are walked and classified
+  live (`m2_logtree`), the scan streams in bounded memory, skipped DATA bytes
+  are reported, EXP-003 gained a density sweep. The foreign-FSID limitation
+  is planned under M6.
+
 ### M3 — Evidence catalog (~1 week)
 - SQLite schema (versioned, documented in-repo):
   - `nodes(bytenr, phys, dev, gen, owner, level, nritems, csum_type,
@@ -931,6 +950,14 @@ M1c; the evidence per bullet is in the catalog.md M1c entry.
   into a feature), plus backup-root divergence (cite SecurityRonin). Target
   list per Toolan & Humphries FSI:DI 58:302198. Validate against images
   generated with **fishy**'s btrfs module.
+- Foreign-FSID discovery (optional scan mode, from the M2a review). The M2
+  prefilter matches only the current fsid or metadata_uuid, so tree blocks of
+  a previous filesystem on the device, or written before `btrfstune -m`/`-u`,
+  are never candidates. The mode counts header fsids across the scanned
+  regions, validates blocks of every recurring foreign fsid with that fsid's
+  own context, and feeds the result to the foreign-superblock finding (M1's
+  `foreign` superblock copies), so a reformat or an fsid change is reported
+  with its surviving metadata.
 - **DoD:**
   - every artifact in the report has tier + provenance;
   - the detector finds ≥ the fishy-plantable techniques on generated images;

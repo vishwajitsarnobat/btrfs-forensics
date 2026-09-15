@@ -528,3 +528,103 @@ def test_readme_documents_every_cat_key():
     section = readme.split("### `btrfska cat` output", 1)[1].split("\n## ", 1)[0]
     keys = EXTENT_RECORD_KEYS | FILE_RECORD_KEYS | RANGE_KEYS | DATA_COPY_KEYS
     assert {key for key in keys if f"`{key}`" not in section} == set()
+
+
+# ---------------------------------------------------------------------------
+# btrfska scan
+# ---------------------------------------------------------------------------
+SCAN_NODE_KEYS = {
+    "record", "unsupported_format", "physical", "bytenr", "bytenr_mapped", "maps_here",
+    "generation", "owner", "level", "nritems", "valid", "checks", "problems", "region", "status",
+    "orphan", "outside_map", "legacy_orphan", "log_tree",
+}  # fmt: skip
+SCAN_REGION_KEYS = {"kind", "start", "end", "chunk", "stripe"}
+SCAN_VALUES = {"node", "invalid", "live", "backup_reachable", "unreferenced", "unmapped_gap"}
+
+
+@pytest.mark.sandbox
+def test_scan_summarises_the_sandbox(sandbox_img, capsys):
+    assert main(["scan", str(sandbox_img)]) == 0
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert lines[0] == (
+        "btrfska scan: targeted, 7 regions, 259973120 bytes probed at 4096-byte alignment"
+    )
+    for line in (
+        "skipped: reserved 0-69632",
+        "skipped: DATA|single 13631488-22020096",
+        "skipped: superblock 67108864-67112960",
+        "skipped as DATA: 8388608 bytes (use --full-sweep to include reallocated ranges)",
+        "candidates: 85 (valid 84, invalid 1)",
+        "live: 20",
+        "orphans: 64 (backup_reachable 34, unreferenced 30)",
+        "outside current chunk map: 20 valid nodes (20 orphans)",
+        "header bytenr not mapping to the node's physical offset: 20 valid nodes",
+        "legacy-compatible orphans (csum ok, generation < 14, nodesize-aligned): 71 "
+        "(21 outside current chunk map)",
+        "extent tree: 10 tree blocks; reached only by walks: 0; listed only by the extent tree: 0",
+        "log tree: 0 blocks (0 live copies)",
+        "region unmapped_gap 69632-13631488: candidates 21, valid 20, live 0, orphans 20",
+        "region METADATA|DUP 38797312-67108864 (chunk 30408704 stripe 0): "
+        "candidates 30, valid 30, live 9, orphans 21",
+    ):
+        assert line in lines
+    assert captured.err == ""
+
+
+@pytest.mark.sandbox
+def test_scan_full_sweep_finds_the_same_nodes(sandbox_img, capsys):
+    assert main(["scan", str(sandbox_img), "--full-sweep"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == (
+        "btrfska scan: full sweep, 8 regions, 268361728 bytes probed at 4096-byte alignment"
+    )
+    assert "candidates: 85 (valid 84, invalid 1)" in lines
+    assert "skipped as DATA: 0 bytes (full sweep)" in lines
+    assert "orphans: 64 (backup_reachable 34, unreferenced 30)" in lines
+    assert "region DATA|single 13631488-22020096 (chunk 13631488 stripe 0): candidates 0, " \
+        "valid 0, live 0, orphans 0" in lines  # fmt: skip
+
+
+@pytest.mark.sandbox
+def test_scan_json_lines_follow_the_documented_schema(sandbox_img, capsys):
+    assert main(["scan", str(sandbox_img), "--json"]) == 0
+    captured = capsys.readouterr()
+    records = [json.loads(line) for line in captured.out.splitlines()]
+    assert len(records) == 85
+    for record in records:
+        assert set(record) == SCAN_NODE_KEYS and record["record"] == "node"
+        assert set(record["region"]) == SCAN_REGION_KEYS
+        assert tuple(record["checks"]) == CHECK_NAMES
+    assert [r["physical"] for r in records] == sorted(r["physical"] for r in records)
+    assert sum(r["legacy_orphan"] for r in records) == 71
+    assert sum(r["orphan"] for r in records) == 64
+    assert "candidates: 85 (valid 84, invalid 1)" in captured.err.splitlines()
+
+
+@pytest.mark.sandbox
+def test_scan_workers_give_identical_output(sandbox_img, capsys):
+    assert main(["scan", str(sandbox_img), "--json"]) == 0
+    one = capsys.readouterr()
+    assert main(["scan", str(sandbox_img), "--json", "--workers", "4"]) == 0
+    assert capsys.readouterr() == one
+
+
+@pytest.mark.parametrize("workers", ["0", "5"])
+def test_scan_workers_are_limited_to_four(workers, capsys):
+    with pytest.raises(SystemExit):
+        main(["scan", "sandbox.img", "--workers", workers])
+    assert "--workers" in capsys.readouterr().err
+
+
+def test_scan_without_a_valid_superblock_is_refused(capsys):
+    with scratch_dir("test_cli_") as d:
+        assert main(["scan", _image_with(d, "zero.img", {})]) == 2
+        assert "NO_VALID_SUPERBLOCK" in capsys.readouterr().err
+
+
+def test_readme_documents_every_scan_key():
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    section = readme.split("### `btrfska scan` output", 1)[1].split("\n## ", 1)[0]
+    keys = SCAN_NODE_KEYS | SCAN_REGION_KEYS | SCAN_VALUES | set(CHECK_NAMES)
+    assert {key for key in keys if f"`{key}`" not in section} == set()
