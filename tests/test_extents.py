@@ -211,8 +211,18 @@ def test_extents_are_clipped_to_the_inode_size():
     assert result.complete and content(result) == disk[:5000]
     first, beyond = result.extents
     assert first.length == 5000 and first.sha256 == hashlib.sha256(disk[:5000]).hexdigest()
-    assert any("i_size" in p for p in first.problems)
+    assert first.problems == ()  # a partial last sector is normal: nothing to report
     assert beyond.length == 0 and any("i_size" in p for p in beyond.problems)
+
+
+def test_clipping_past_the_sector_holding_eof_is_reported():
+    disk = random.Random(3).randbytes(3 * SECTOR)
+    item = regular(DATA_LOGICAL, 3 * SECTOR, 0, 3 * SECTOR)
+    with filesystem([(0, item)], size=5000, data={DATA_PHYS: disk}) as reader:
+        result = read(reader)
+    assert content(result) == disk[:5000]
+    (extent,) = result.extents
+    assert extent.problems == ("clipped from 12288 to 5000 bytes by i_size 5000",)
 
 
 def test_overlapping_extents_make_the_read_incomplete():
