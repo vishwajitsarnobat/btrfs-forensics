@@ -8,14 +8,19 @@ goal is to catalog all of it, with provenance and confidence, and answer what
 existed, when, what changed, what can be recovered, and whether anything was
 hidden.
 
-**Status:** M1 done (substrate trust layer). M2a is implemented: the scan
-kernel, targeted regions and orphan classification. Old-root discovery and
-the discard experiment (M2b) come next. The earlier prototype is frozen,
-still runnable, under `legacy/`.
+**Status:** M1 (substrate trust layer) and M2 (scan kernel, orphan
+classification, old-root discovery, discard experiments EXP-000 and EXP-002)
+are done. The evidence catalog (M3) comes next. The earlier prototype is
+frozen, still runnable, under `legacy/`.
 - `btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` finds tree
   blocks of the filesystem anywhere on the image, including chunks that have
   since been removed. It classifies each one as `live`, `backup_reachable`,
   `unreferenced` or `invalid`.
+- `btrfska roots IMAGE [--full-sweep] [--json]` finds historical tree roots
+  among those blocks. It reports every historical root-tree state with the
+  trees it names and how completely they survive, checks that every
+  superblock and backup root is rediscovered, and tells blocks reused by
+  newer trees apart from damaged ones.
 - `btrfska info IMAGE` validates every superblock copy (all four checksum
   types), selects the best one, and reports disagreements and the backup
   roots by generation. It refuses unsupported or unknown incompat features
