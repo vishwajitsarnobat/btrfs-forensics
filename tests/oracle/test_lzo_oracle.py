@@ -53,11 +53,21 @@ def test_bit_flipped_sectors_agree_with_lzallright_and_raise_only_lzo_error():
         assert ours == theirs, flipped.hex()
 
 
+@pytest.mark.parametrize("seed", [11, 12])
+def test_every_hostile_corpus_agrees_with_lzallright(seed):
+    """Truncated, byte-inserted, byte-deleted, bit-flipped and random streams: both decoders fail
+    or both return the same bytes (an lzallright output over 4 KiB counting as a failure)."""
+    result = lzo_hostile.run(seed=seed, vectors=0, mutations=400)
+    assert result["disagreements"] == []
+    assert result["agreement"] == dict.fromkeys(lzo_hostile.CORPORA, 400)
+
+
 def test_harness_runs_and_btrfska_fails_cleanly():
-    result = lzo_hostile.run(seed=1, vectors=50, flips=100)
+    result = lzo_hostile.run(seed=1, vectors=50, mutations=100)
     ours = result["decoders"]["btrfska"]
     assert ours["round_trip_identical"] == 50
     assert ours["crafted"] == ("exception", "LzoError")
     assert ours["truncated"] == ("exception", "LzoError")
-    assert ours["bit_flips"]["non_exception"] == 0
-    assert set(ours["bit_flip_exception_types"]) <= {"LzoError"}
+    for corpus in lzo_hostile.CORPORA:
+        assert ours[corpus]["non_exception"] == ours[corpus]["over_bound"] == 0
+        assert set(ours[f"{corpus}_failure_types"]) <= {"LzoError"}
