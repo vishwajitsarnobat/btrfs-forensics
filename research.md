@@ -1656,14 +1656,46 @@ btrfs-progs is the host's v6.6.3.
   is therefore unusual; btrfska reports it (`mirror 2 is valid but differs
   from mirror 1`).
 - **What the kernel and btrfs-progs do not surface.**
-  - The kernel reads DUP mirror 1 and tries mirror 2 only when mirror 1 fails
-    (`map_blocks_dup`, volumes.c:6751-6765). A damaged or altered mirror 2 is
-    never read unless mirror 1 fails (scrub would still find it).
+  - Which copy the kernel reads depends on the profile (corrected after the
+    M1b review; checked against v7.0 source):
+    - **DUP.** `map_blocks_dup` (volumes.c:6751-6765) sets mirror 1 for
+      every read. `btrfs_read_extent_buffer` (disk-io.c:211-250) moves to
+      mirror 2 only when mirror 1 fails. So the kernel never reads a damaged
+      or altered mirror 2 unless mirror 1 fails; scrub would still find it.
+    - **RAID1, RAID1C3, RAID1C4 and RAID10.** `map_blocks_raid1`
+      (l.6731-6749) and `map_blocks_raid10` (l.6767-6793) pick the stripe
+      with `find_live_mirror` (l.6276-6342). Its read policy
+      (`/sys/fs/btrfs/<FSID>/read_policy`) defaults to `pid`, which sets
+      `preferred_mirror = first + current->pid % num_stripes` (l.6302-6304).
+      Different processes therefore read different copies, and some readers
+      *do* see a divergent second mirror.
+    - The other policies, `round-robin` and `devid`, exist only with
+      `CONFIG_BTRFS_EXPERIMENTAL` (volumes.h:322-332, sysfs.c:1322-1343,
+      volumes.c:1271-1287). Without it the policy is always `pid`. The host's
+      Ubuntu `7.0.0-31-generic` kernel leaves that option unset.
   - With crc32c, bytes 4–31 of the 32-byte csum field lie outside the
     checksum, so two copies can differ there and both validate (synthetic
     test `test_valid_copies_differing_outside_the_checksum_are_reported`).
-  - Both are candidate hiding places for the M6 detector. This is a
-    hypothesis, not yet measured.
+  - Candidate hiding places for the M6 detector (hypothesis, not yet
+    measured):
+    - an altered **DUP** mirror 2. The "never read unless mirror 1 fails"
+      argument holds for DUP only; under the default `pid` policy some
+      RAID1/1C3/1C4/10 readers see an altered copy;
+    - the unchecked crc32c csum bytes, on any profile.
+  - **A read-write mount can destroy this evidence.** Say a tree block's read
+    succeeds only after another mirror failed its checksum or validation.
+    `btrfs_read_extent_buffer` then calls `btrfs_repair_eb_io_failure`
+    (disk-io.c:172-202, called at l.246-247), which rewrites the failed
+    mirror with the good copy. Only a read-only superblock stops it
+    (`sb_rdonly`, l.180; `btrfs_repair_io_failure`, bio.c:952). Data reads
+    repair the same way (bio.c:222).
+    - Consequence: on a rw mount, merely reading a file or listing a
+      directory can overwrite a corrupt or altered copy, and with it the
+      divergence.
+    - An altered copy whose checksum was recomputed is valid, so it is never
+      repaired: it is served to whichever readers pick it.
+    - Forensic soundness therefore requires working on an image, never a rw
+      mount of the evidence. btrfska opens images read-only and never writes.
   - btrfs-progs `dump-tree` reports a bad copy only as `checksum verify failed
     on L wanted <stored> found <computed>`, without mirror or physical
     address. On `m1_badnode` it then silently prints the other copy. btrfska
