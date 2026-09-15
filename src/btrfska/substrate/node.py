@@ -33,6 +33,21 @@ Checks, in `CHECK_NAMES` order (kernel v7.0 references):
   verify failed"). A newer block means the address was rewritten after the parent was written;
 - first_key: the first key equals the parent pointer's key (disk-io.c:418-436).
 A check whose reference is unknown (no parent, no chunk tree uuid yet) is recorded with ok=None.
+
+Why a referenced block cannot be used (`node_failure`, one class per node):
+- `reused`: a copy passes every integrity check (csum, fsid, chunk_tree_uuid, nritems, written,
+  layout, level below 8) but fails a linkage check (bytenr, level, owner, parent_generation,
+  first_key) and is newer than the referrer expects. The address now holds a newer tree's block,
+  committed or not (an uncommitted log or transaction is newer than the superblock). This is the
+  normal fate of an old backup root's blocks, not damage;
+- `mismatch`: integrity holds, linkage fails, and the block is not newer (a forged or inconsistent
+  referrer, or a rolled-back block);
+- `corrupt`: this filesystem's header (fsid) but an integrity check fails;
+- `overwritten`: no tree block of this filesystem there (data, another filesystem);
+- `zeroed`: the copy reads as zeros (trimmed by discard, or never written);
+- `unreadable`: the copy lies beyond the image end or on a missing device;
+- `unmapped`: the chunk map places the address nowhere.
+Across copies the most informative class wins, in that order.
 """
 
 from dataclasses import dataclass, field
@@ -205,7 +220,8 @@ def is_subvolume_tree(objectid: int) -> bool:
     return objectid == ondisk.FS_TREE_OBJECTID or ondisk.FIRST_FREE_OBJECTID <= objectid < 1 << 48
 
 
-def _owner_ok(expected: int | None, owner: int) -> bool | None:
+def owner_ok(expected: int | None, owner: int) -> bool | None:
+    """The owner check: None when the kernel cannot check it either, else whether it holds."""
     skipped = (None, 0, ondisk.TREE_RELOC_OBJECTID)
     if expected in skipped:  # the kernel cannot check these either
         return None
@@ -320,7 +336,7 @@ def check_block(block, ctx: NodeContext, logical: int | None, expect: Expect) ->
     else:
         record("layout", None, "")
 
-    record("owner", _owner_ok(expect.owner, owner), f"owner {owner} != expected {expect.owner}")
+    record("owner", owner_ok(expect.owner, owner), f"owner {owner} != expected {expect.owner}")
     parent_gen = expect.generation
     relation = "newer: rewritten after the parent" if generation > (parent_gen or 0) else "older"
     record(
@@ -350,6 +366,11 @@ class NodeCopy:
     devid: int
     physical: int
     checks: tuple[Check, ...]
+    # Header fields of this copy's bytes (None when unreadable), and whether they are all zero.
+    generation: int | None = None
+    owner: int | None = None
+    level: int | None = None
+    zero: bool = False
 
     @property
     def ok(self) -> bool:
@@ -433,7 +454,16 @@ def read_node(
         else:
             block = bytes(img.mmap[pc.physical : pc.physical + ctx.nodesize])
             checks = check_block(block, ctx, logical, expect)
-        copies.append(NodeCopy(pc.mirror, pc.devid, pc.physical, checks))
+        if block is None:
+            copies.append(NodeCopy(pc.mirror, pc.devid, pc.physical, checks))
+        else:
+            fields = ondisk.HEADER.unpack_from(block)
+            copies.append(
+                NodeCopy(
+                    pc.mirror, pc.devid, pc.physical, checks,
+                    fields["generation"], fields["owner"], fields["level"], not any(block),
+                )
+            )  # fmt: skip
         blocks.append(block)
 
     chosen = next((i for i, copy in enumerate(copies) if copy.ok), None)
@@ -455,6 +485,44 @@ def read_node(
         else:
             ptrs, _ = parse_key_ptrs(block, ctx.nodesize)
     return ValidatedNode(logical, tuple(copies), chosen, header, tuple(problems), items, ptrs)
+
+
+FAILURE_CLASSES = (
+    "reused", "mismatch", "corrupt", "overwritten", "zeroed", "unreadable", "unmapped",
+)  # fmt: skip
+INTEGRITY_CHECKS = frozenset({"csum", "fsid", "chunk_tree_uuid", "nritems", "written", "layout"})
+
+
+def copy_failure(copy: NodeCopy, expect: Expect) -> str | None:
+    """Why this copy cannot serve the referrer (module docstring), or None when it can."""
+    if copy.ok:
+        return None
+    if not copy.readable:
+        return "unreadable"
+    if copy.zero:
+        return "zeroed"
+    failed = {check.name for check in copy.checks if check.ok is False}
+    if "fsid" in failed:
+        return "overwritten"
+    if failed & INTEGRITY_CHECKS or (copy.level is not None and copy.level >= ondisk.MAX_LEVEL):
+        return "corrupt"
+    newer = expect.generation is not None and (copy.generation or 0) > expect.generation
+    # Only a generation beyond the superblock's (a newer, uncommitted block) or linkage failed.
+    return "reused" if newer else "mismatch"
+
+
+def node_failure(node: ValidatedNode, expect: Expect) -> str | None:
+    """The class of a node without a valid copy (module docstring); None for a valid node.
+
+    `expect` is what the node was read with. A copy newer than the superblock fails only the
+    generation check, which is not an integrity check: it can only be a newer, uncommitted block.
+    """
+    if node.valid:
+        return None
+    if not node.copies:
+        return "unmapped"
+    classes = {copy_failure(copy, expect) for copy in node.copies}
+    return next(name for name in FAILURE_CLASSES if name in classes)
 
 
 @dataclass(frozen=True)

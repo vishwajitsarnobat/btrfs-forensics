@@ -11,7 +11,7 @@ from btrfska.cli import _node_record, main
 from btrfska.substrate import ondisk
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
-from btrfska.substrate.node import CHECK_NAMES
+from btrfska.substrate.node import CHECK_NAMES, FAILURE_CLASSES
 from conftest import SANDBOX_SHA256
 from tests.helpers import SANDBOX_INCOMPAT, make_block, scratch_dir, write_sparse_image
 from tests.test_chunks import entry, raw_chunk
@@ -627,4 +627,87 @@ def test_readme_documents_every_scan_key():
     readme = (Path(__file__).parents[1] / "README.md").read_text()
     section = readme.split("### `btrfska scan` output", 1)[1].split("\n## ", 1)[0]
     keys = SCAN_NODE_KEYS | SCAN_REGION_KEYS | SCAN_VALUES | set(CHECK_NAMES)
+    assert {key for key in keys if f"`{key}`" not in section} == set()
+
+
+@pytest.mark.sandbox
+def test_scan_summary_separates_walk_failures(sandbox_img, capsys):
+    assert main(["scan", str(sandbox_img)]) == 0
+    assert "walk failures: current 0; backup roots 0" in capsys.readouterr().out.splitlines()
+
+
+# ---------------------------------------------------------------------------
+# btrfska roots
+# ---------------------------------------------------------------------------
+COMMON = {"record", "unsupported_format"}
+ROOTS_RECORD_KEYS = {
+    "rediscovery": COMMON | {"source", "tree", "tree_id", "bytenr", "generation", "level",
+                             "indexed", "candidate"},
+    "state": COMMON | {"bytenr", "generation", "level", "copies", "known_as", "trees",
+                       "root_tree_blocks", "root_tree_missing", "found", "referenced", "missing",
+                       "completeness", "chunk_root", "maps_current", "maps_historical",
+                       "maps_neither", "problems"},
+    "group": COMMON | {"owner", "generation", "level", "blocks", "copies", "unreferenced", "top",
+                       "candidates", "listed"},
+    "log": COMMON | {"generation", "blocks", "copies", "levels", "candidates", "listed", "live",
+                     "superseded", "committed"},
+    "raw_block": COMMON | {"owner", "physical", "bytenr", "generation", "level", "nritems",
+                           "valid"},
+    "walk_failure": COMMON | {"source", "tree_id", "bytenr", "class"},
+}  # fmt: skip
+ROOTS_TREE_KEYS = {
+    "tree_id", "key_offset", "bytenr", "generation", "level", "leaf", "slot", "status", "blocks",
+    "missing",
+}  # fmt: skip
+ROOTS_CHUNK_ROOT_KEYS = {"bytenr", "generation", "level", "source", "differs_from_current"}
+ROOTS_VALUES = {"found", "skipped", "not_scanned", "changed", "inferred", "current"}
+
+
+@pytest.mark.sandbox
+def test_roots_summarises_the_sandbox(sandbox_img, capsys):
+    assert main(["roots", str(sandbox_img)]) == 0
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert lines[0].startswith("btrfska roots: targeted, 85 candidates, ")
+    assert "rediscovered: 26/26 superblock and backup roots are candidate roots (26 indexed)" in (
+        lines
+    )
+    for generation in (11, 12, 13):
+        assert any(
+            line.startswith(f"state generation {generation} ") and f"[backup:{generation}]" in line
+            for line in lines
+        )
+    assert any(line.startswith("state generation 14 ") and "[backup:14, current]" in line
+               for line in lines)  # fmt: skip
+    assert "walk failures: current 0; backup roots 0" in lines
+    assert captured.err == ""
+
+
+@pytest.mark.sandbox
+def test_roots_json_records_follow_the_documented_schema(sandbox_img, capsys):
+    assert main(["roots", str(sandbox_img), "--json", "--full-sweep"]) == 0
+    captured = capsys.readouterr()
+    records = [json.loads(line) for line in captured.out.splitlines()]
+    kinds = {kind: sum(r["record"] == kind for r in records) for kind in ROOTS_RECORD_KEYS}
+    assert kinds["rediscovery"] == 26 and kinds["state"] >= 4 and kinds["group"] > 0
+    for record in records:
+        assert set(record) == ROOTS_RECORD_KEYS[record["record"]]
+        if record["record"] == "state":
+            assert all(set(tree) == ROOTS_TREE_KEYS for tree in record["trees"])
+            assert set(record["chunk_root"]) == ROOTS_CHUNK_ROOT_KEYS
+    assert all(r["indexed"] and r["candidate"] for r in records if r["record"] == "rediscovery")
+    assert any(line.startswith("rediscovered: 26/26 ") for line in captured.err.splitlines())
+
+
+def test_roots_without_a_valid_superblock_is_refused(capsys):
+    with scratch_dir("test_cli_") as d:
+        assert main(["roots", _image_with(d, "zero.img", {})]) == 2
+        assert "NO_VALID_SUPERBLOCK" in capsys.readouterr().err
+
+
+def test_readme_documents_every_roots_key():
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    section = readme.split("### `btrfska roots` output", 1)[1].split("\n## ", 1)[0]
+    keys = set().union(*ROOTS_RECORD_KEYS.values(), ROOTS_RECORD_KEYS, ROOTS_TREE_KEYS,
+                       ROOTS_CHUNK_ROOT_KEYS, ROOTS_VALUES, FAILURE_CLASSES)  # fmt: skip
     assert {key for key in keys if f"`{key}`" not in section} == set()

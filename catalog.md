@@ -20,6 +20,344 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-15 — M2b: old-root discovery, discard experiments (EXP-000, EXP-002), M2 closeout
+
+- **Branch:** `feature/m2b-old-roots-discard` (from `main` at `35d6916`). This is the second of
+  two M2 PRs. It covers old-root discovery, the EXP-000 backfill (plan.md §7), the discard trio
+  (EXP-002) and the M2 closeout. Not pushed.
+- **Commits:**
+  - `7c25481` Add old-root discovery: candidate roots per owner and generation, root-tree states with completeness, reuse told apart from damage
+  - `cb71422` Add btrfska roots with a documented JSON schema and report walk failures by class in the scan summary
+  - `97ffc1f` Name repeated discard-table runs and add the EXP-000 and EXP-002 scripts
+  - `4f8647d` Add the representative discard-trio images to the manifest, with vm tests for probe agreement and discovery per discard mode
+  - `bb9274a` Record EXP-000 (discard table, N = 15) and EXP-002 (probe agreement on 48 images, surviving history per discard mode)
+  - `5ea4853` Record M2b discovery and discard findings in research notes and close M2 in the plan and README
+  - this catalog entry (the commit after `5ea4853`)
+
+**What was done.**
+- **Tests first.**
+  - `tests/test_scan_roots.py` failed at collection (`ModuleNotFoundError: No module named
+    'btrfska.scan.roots'`, `images/scratch/m2b/verify/roots_tests_before.txt`).
+  - The five new CLI tests failed with `SystemExit: 2` (no `roots` command), IndexError (no README
+    section) and a missing summary line.
+  - The manifest test of the trio failed with `KeyError: 's01_discard_none_r1'`.
+  - One expectation was corrected after the first run (Deviations).
+1. **Failure classes** (`substrate/node.py`). `node_failure(node, expect)` says why a referenced
+   block cannot be used. Per copy, in precedence order:
+   - `reused`: every integrity check passes (csum, fsid, chunk_tree_uuid, nritems, written,
+     layout, level below 8), a linkage check (bytenr, level, owner, parent_generation, first_key)
+     fails, and the copy is newer than the referrer expects;
+   - `mismatch`: the same, but not newer;
+   - `corrupt`: the fsid matches and an integrity check fails;
+   - `overwritten`: no fsid;
+   - `zeroed`: all zero bytes;
+   - `unreadable`, and `unmapped` (no copies).
+
+   `NodeCopy` gains its header generation, owner, level and a zero flag, and `Visit` gains the
+   `Expect` it was read with. `owner_ok` is now public.
+2. **Walk failures** (`scan/classify.py`). `walk_root_set` records (tree id, logical, class) per
+   invalid node, and `Reachability.walk_failures` adds the root set. The scan summary gains
+   `walk failures: current N; backup roots M (class n, …)` and the dict key `walk_failures`. The
+   M2a review asked for exactly this: reuse under old backup roots reported apart from damage.
+3. **Old-root discovery** (`scan/roots.py`).
+   - `index_records` builds a `BlockIndex`: numpy columns (bytenr, generation, level, owner,
+     physical) of every valid candidate, one row per physical copy. Log blocks (owner −6) whose
+     only failed check is a generation of exactly superblock + 1 are indexed; other failing log
+     candidates count as `log_rejected`. Owner-12 and owner-13 candidates are kept raw, unparsed
+     (at most 256).
+   - `discover` produces:
+     - groups per (owner, generation, level);
+     - candidate roots;
+     - root-tree states with their trees, completeness, chunk root and a chunk-item placement
+       check;
+     - rediscovery of every superblock and backup root (`known_roots`);
+     - log generations.
+   - `discover_image` runs the scan plan, the walks and discovery.
+   - 13 tests: the failure classes on synthetic blocks; a synthetic four-state history covering
+     groups, states, completeness, rediscovery, inferred chunk roots and placement under
+     historical chunk items; backup-walk classes; the index log rule and raw owners; the
+     adversarial tests below; sandbox and M1 ground truth; `m2_logtree`.
+4. **`btrfska roots IMAGE [--full-sweep] [--workers N] [--json] [--allow-unsupported]`.**
+   - The text summary goes to stdout, or to stderr with `--json`.
+   - The JSON records are `rediscovery`, `state`, `group`, `log`, `raw_block` and `walk_failure`.
+   - README.md gains "`btrfska roots` output"; `test_readme_documents_every_roots_key` checks
+     every key and value.
+5. **Corpus scripts.** `corpus/vm/discard_table.sh` takes `RUN=<n>` and names images
+   `s01_discard_<row>_r<n>`; the three scenario scripts take `NAME`. The defaults are unchanged.
+6. **EXP-000** (`experiments/exp000.py`, `experiments/EXP-000.md`) and **EXP-002**
+   (`experiments/exp002.py`, `experiments/EXP-002.md`).
+7. **Corpus.** `corpus/manifest.tsv` gains `s01_discard_{none,async,sync}_r1`, and
+   `tests/test_discard_trio.py` (vm, 7 tests) checks agreement, classes and discovery on them.
+8. **Docs.**
+   - research.md §10.4 gains the EXP-000 note, and §10.11 is new;
+   - plan.md M2 is marked done with DoD evidence, and §7 marks the backfill done;
+   - the README status is updated.
+
+**Design decisions.**
+- **Candidate root.**
+  - Within one owner and generation, a block is *referenced* when an internal block of the same
+    owner and generation points to it, with that generation, one level down.
+  - Candidates are the unreferenced blocks at the highest level of that owner and generation.
+    Unreferenced blocks below that level are fragments: counted per group, never states.
+  - An old block pointed to only by a newer parent is a candidate of its own generation, because
+    its own parent is gone. Every candidate is reported, however many there are; nothing is
+    collapsed.
+- **Resolution through the index, not a chunk map.** A pointer or ROOT_ITEM (bytenr, generation,
+  level) is found when a valid scanned block has exactly those values, an owner `owner_ok`
+  accepts and the pointer's first key. Pre-balance states therefore resolve although their chunks
+  are gone. No chunk map is built, and none is used for reading.
+- **Completeness** = found / referenced distinct blocks. Referenced blocks are those named by
+  found blocks: root-tree blocks, every ROOT_ITEM's tree root, child pointers. Nothing is known
+  below a missing block, so this is an upper bound; the README and EXP-002 say so.
+- **Missing blocks** get a failure class from a read through the *current* chunk map. A valid read
+  there is `not_scanned` (a skipped range), and bytes that no longer match the index are `changed`.
+- **Reused against corrupt.** Generation newer than the superblock is not an integrity failure:
+  an intact block from an uncommitted log or transaction at that address is `reused`. Damage is
+  only a failed integrity check with this filesystem's fsid.
+- **Chunk root of a state.** It is the superblock's or backup slot's when they name the state,
+  else `inferred`: the newest chunk-tree candidate root no newer than the state. When it differs
+  from the current one, its CHUNK_ITEMs are read through the index (sys_chunk_array-independent)
+  and only used to check where each found block would be placed. That feeds M5.
+- **Bounds.**
+  - At most 64 states are evaluated, the superblock and backup ones first, then the newest.
+  - At most 32 problems per state (then a count) and 16 listed bytenrs per group.
+  - Subtree walks are memoised per tree root, with a per-walk visited set.
+  - Levels must drop by one per hop.
+- **Probe compatibility count** (EXP-002). It is derived from the scan plan per image, not
+  assumed.
+
+**Discovery per image** (`btrfska roots IMAGE --full-sweep`; outputs in
+`images/scratch/m2b/roots/`):
+
+| Image | Root-tree candidates | Superblock + backup roots rediscovered | States beyond the 4 backups (generations) | … complete | Walk failures |
+|---|---|---|---|---|---|
+| `sandbox.img` | 5 | 26/26 | 1 (3: 7/7 blocks) | 1 | none |
+| `m1_xxhash`, `m1_blake2b`, `m1_lzo`, `m1_zlib`, `m1_badnode`, `m1_mirror_damage`, `m1_foreign_mirror` | 35 | 26/26 | 31 (3, 6, 7 ×2, 8–34) | 30 (gen 3: 5/6) | none |
+| `m1_sha256_bgt` | 35 | 26/26 | 31 (3, 6, 7 ×2, 8–34) | 30 (gen 3: 6/7) | none |
+| `m1_badnode_both` | 35 | 26/26 | 31 | 29 (gen 34: 11/12 `corrupt`; gen 3: 5/6) | 5 `corrupt` (backup states 9/10) |
+| `m2_logtree` | 5 | 24/27 (backup:5 root, extent, dev: `reused`) | 2 (3, 7) | 1 | 3 `reused` |
+| `s01_discard_none_r1`, `s01_discard_async_r1` | 35 | 26/26 | 31 (3, 6, 7 ×2, 8–34) | 30 | none |
+| `s01_discard_sync_r1` | 2 | 14/26 | 1 (3) | 0 | 12 `zeroed` |
+
+- On `m2_logtree`, log generation 9 has 4 blocks (8 copies): 2 live and 2 superseded. The log rule
+  indexes all 8 copies and rejects none.
+- No owner-12 or owner-13 block exists on the corpus.
+- Pre-balance states 3–16 have no block the current chunk map places where it was scanned. Their
+  inferred chunk trees (generations 3, 6, 17, 23, 24, 29 and 30) place every found block
+  (`maps_neither` 0 everywhere).
+
+**EXP-000** (`experiments/EXP-000.md`; N = 15, median (min–max)):
+
+| Row | fsid_blocks | stale_blocks | needle_copies | nonzero_blocks |
+|---|---|---|---|---|
+| none | 367 (365–367) | 355 (353–355) | 18 (18–18) | 832 (828–832) |
+| async | 367 (367–367) | 355 (355–355) | 18 (18–18) | 832 (832–832) |
+| sync | 43 (43–43) | 31 (31–31) | 2 (2–2) | 107 (107–107) |
+
+- The medians equal research.md §10.4 (367/355/18/832, 367/355/18/832, 43/31/2/107), so its
+  numbers did not change; §10.4 now cites these ranges.
+- Only run 6 of the none row differed: 365/353/18/828.
+- The "no discard" caveat is recorded: that guest mounts `discard=async`, and the host drops the
+  TRIMs.
+- Wall time was 4.72–6.03 s per run of three guests.
+- 84 of 90 per-run files were deleted afterwards. Run 1 of each row is kept (all three rows sit on
+  their medians), and `images/scenarios/` is 251 M.
+
+**EXP-002** (`experiments/EXP-002.md`).
+
+*Probe reconciliation.*
+- **Skip ranges.** The probe skips exactly the 4 KiB blocks at 0x10000, 64 MiB and 256 GiB.
+  btrfska's full sweep skips [0, 0x11000) and the superblock copies inside the image. The only
+  difference is blocks 0–15 (bytes 0–0xFFFF), read by the probe only. The kernel never places a
+  tree block there (block-group.c:2277-2330).
+- **Compatibility count.** It takes every full-sweep candidate, invalid ones included, and
+  compares the header generation with the *primary* superblock's generation. The probe's rule is
+  applied to blocks 0–15 and their hits added. The fsid and generation sources are checked equal
+  per image.
+- **Result: 48 of 48 images agree exactly** (45 regenerated, 3 earlier). The boot-area supplement
+  was 0 everywhere.
+- **Block by block.**
+  - The 5 invalid candidates on every image are mkfs generation-1 blocks at 1081344–1146880 with
+    WRITTEN unset; the tree-5 leaf is also empty. The probe counts them; btrfska reports them
+    `invalid`.
+  - Stale is not orphan. On none and async, 355 stale copies are 10 `live` (unchanged since an
+    older generation), 24 `backup_reachable`, 316 `unreferenced` and 5 invalid. The 12
+    generation-38 copies are live.
+
+*Classes per mode (N = 15, full sweep):*
+
+| Mode | Candidates | Valid | Invalid | Live | Backup-reachable | Unreferenced | Valid orphans outside the map |
+|---|---|---|---|---|---|---|---|
+| none | 367 (365–367) | 362 (360–362) | 5 (5–5) | 22 (22–22) | 24 (24–24) | 316 (314–316) | 172 (170–172) |
+| async | 367 (367–367) | 362 (362–362) | 5 (5–5) | 22 (22–22) | 24 (24–24) | 316 (316–316) | 172 (172–172) |
+| sync | 43 (43–43) | 38 (38–38) | 5 (5–5) | 22 (22–22) | 0 (0–0) | 16 (16–16) | 16 (16–16) |
+
+*Discovery per mode (N = 15):*
+
+| Mode | Root-tree candidates | Roots indexed / candidates (of 26) | States beyond the backups | … complete |
+|---|---|---|---|---|
+| none | 35 (35–35) | 26 / 26 | 31 (31–31) | 30 (30–30) |
+| async | 35 (35–35) | 26 / 26 | 31 (31–31) | 30 (30–30) |
+| sync | 2 (2–2) | 14 / 14 | 1 (1–1) | 0 (0–0) |
+
+- Under sync, backups 35–37 lose their root, extent, chunk and dev tree roots, all `zeroed`.
+- The 16 surviving valid orphans are all mkfs residue (generations 2–5). No block the kernel freed
+  survives.
+- This is consistent with `btrfs_finish_extent_commit` under `DISCARD_SYNC`
+  (extent-tree.c:2994-3005, 3058-3063), read from the source, not measured.
+- EXP-002 §6.4–6.5 states what the numbers do and do not show: not file-level recoverability, not
+  SSD FTL behaviour, not async discard with idle time, one small scenario.
+
+**Deviations** (with rationale):
+- **All owners are grouped.** The plan says "group root-tree-owned blocks by (owner, level,
+  generation)". Discovery groups every owner, so chunk-tree candidates can serve as inferred chunk
+  roots and every superblock root can be checked for rediscovery; states are built only for
+  owner 1.
+- **No historical chunk maps, but a placement check.** A historical state's CHUNK_ITEMs build a
+  transient `ChunkMap` object whose only use is to ask where a found block's bytenr would lie. It is
+  never stored or used to read (plan M5 builds maps). The chunk root of a state neither the
+  superblock nor a backup slot names is a labelled inference.
+- **Missing blocks are classified through the current chunk map only.** On every s01 image the
+  generation-3 state's csum root, the invalid mkfs leaf at 1130496, therefore reads as `unmapped`,
+  although an invalid scanned copy exists (research.md §10.11). M3 stores every candidate and can
+  join them.
+- **EXP-000 N = 15, not 5.** The first 5 runs had no spread, so 10 more estimated how often the
+  known jitter occurs (1 in 15). CPU cost was about a minute of sequential guests.
+- **Image names.** Per-run images are `s01_discard_<row>_r<n>`. The earlier
+  `s01_discard_{none,async,sync}.img`, which fed research.md §10.4, were not created here and were
+  left in place and unlisted; EXP-002 measured them for agreement only.
+- **Richer `roots` options.** The task named `btrfska roots IMAGE [--json]`. `--full-sweep`,
+  `--workers` and `--allow-unsupported` were added for parity with `scan`. The default is targeted,
+  as for `scan`; EXP-002 and the tables use `--full-sweep`.
+- **EXP-002 hypothesis split.** The agreement was pre-registered in plan.md. The discovery results
+  were measured without a prior prediction and are labelled observations.
+- **Scan summary change.** `btrfska scan` prints one more line (walk failures); no existing line
+  changed.
+- **Expectation corrected after the first run.** The M1 rediscovery test required every
+  current-state tree to be `found`. On `m1_badnode_both` the damaged `sv1` leaf is correctly
+  `corrupt`, so the test now takes the expected damaged trees per image. No code changed.
+- **Two scans per image in EXP-002** (`scan_image`, then `discover_image`). Adequate at 512 MiB;
+  M3's scan-once catalog removes it.
+
+**Adversarial tests** (`tests/test_scan_roots.py`):
+- **Forged root trees.** One level-2 root-tree block has 100 pointers to one level-1 node, whose 99
+  pointers go to one leaf and whose last pointer goes back to itself one level too low. The leaf's
+  ROOT_ITEMs name the root tree itself (skipped), a tree newer than the state (problem), a leaf as
+  level 1 (`mismatch`) and a malformed 10-byte item (problem). Result: 4 of 6 blocks; problems
+  capped at 32 plus a count; no re-walk of repeated pointers.
+- **Flood.** 50 000 same-generation root-tree fragments: peak Python heap below 16 MiB
+  (tracemalloc); 64 states evaluated; all 50 000 counted as candidates, 16 listed.
+- **Log candidates.** Owner −6 at superblock + 2 is rejected; owner −6 at superblock + 1 with a
+  failed csum is rejected, as is a truncated one; owner 5 at superblock + 1 is not a log. An owner
+  −6 block at superblock + 1 failing only its generation is indexed, live or superseded by the log
+  walk; one at generation 40 counts as a committed log.
+- **Failure classes.** Synthetic `reused` (a newer tree and an uncommitted log block), `mismatch`
+  (wrong level, older than the pointer), `corrupt`, `overwritten`, `zeroed`, `unmapped` and
+  `unreadable`.
+
+**M2 closeout** (plan.md §5 M2 DoD):
+
+| DoD bullet | Status | Evidence |
+|---|---|---|
+| sandbox parity: 71 orphans, 21 outside map, identical offsets | met (M2a) | `test_sandbox_legacy_compatible_orphans_are_the_legacy_offsets`: 71 legacy-compatible orphans with identical offsets and header fields, 21 outside the map; reconciled as 8 live + 34 backup-reachable + 28 unreferenced + 1 invalid (M2a entry) |
+| discard trio: exact per-image agreement with the probe; cross-run numbers as median and range next to EXP-000 | met (M2b) | EXP-002: 48 of 48 images agree on fsid_blocks and stale_blocks under the documented compatibility count; classes and discovery as median (range) over N = 15 next to EXP-000's N = 15 table; `tests/test_discard_trio.py` (vm) |
+| ≥ 200 MB/s single-core on a synthetic 10 GiB image under `images/` | met (M2a) | EXP-003: slowest run 3 227.5 MB/s of image, 1 734.7 MB/s per allocated byte; 512 MB/s on a 100 % metadata 1 GiB image |
+| benchmark script committed | met (M2a) | `experiments/bench_scan.py` |
+| (task) old-root discovery, owner-13 and owner-12 blocks recorded | met (M2b) | `scan/roots.py`, `btrfska roots`; raw owner-12/13 records (none on the corpus: the stock kernel cannot create them) |
+| (task) discard axis first use (EXP-002) | met (M2b) | `experiments/EXP-002.md` |
+
+**Verification** (local, branch `feature/m2b-old-roots-discard` at `5ea4853`; logs in
+`images/scratch/m2b/verify/`):
+
+| Check | Command | Result |
+|---|---|---|
+| `sandbox.img` before | `sha256sum sandbox.img; stat -c '%y' sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime 2026-04-26 18:49:36 |
+| Tests (all) | `uv run pytest -q` | `717 passed in 66.91s` (was 684) |
+| vm tests | `uv run pytest -m vm -q` | `70 passed, 647 deselected` |
+| Tests without vm | `uv run pytest -m "not vm" -q` | `647 passed, 70 deselected` |
+| New and CLI tests | `uv run pytest -q tests/test_scan_roots.py tests/test_discard_trio.py tests/test_cli.py` | `71 passed` |
+| Read-only and import boundary | `uv run pytest -q tests/test_readonly.py tests/test_import_boundary.py` | `53 passed`; `grep` for `dissect`/`lzallright` imports under `src/`: 0 |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `65 files already formatted` |
+| Lockfile | `uv lock --check` | `Resolved 15 packages` |
+| Legacy runner | `uv run python -m unittest discover -s legacy/tests` | `Ran 37 tests`, `OK` |
+| corpus shell syntax | `for f in corpus/vm/*.sh corpus/vm/scenarios/*.sh corpus/vm/init; do sh -n "$f"; done` | exit 0 |
+| Roots, sandbox | `uv run btrfska roots sandbox.img` | exit 0; sample below |
+| Roots, JSON | `uv run btrfska roots sandbox.img --json --full-sweep \| wc -l` | `79` |
+| Scan, `m2_logtree` | `uv run btrfska scan images/scenarios/m2_logtree.img \| grep 'walk failures'` | `walk failures: current 0; backup roots 3 (reused 3)` |
+| Image hashes | `runs.jsonl` (at generation) against `results.jsonl` (at measurement) | 45 of 45 equal; `env_after.txt` re-hashes the 3 kept images |
+| `sandbox.img` after | `sha256sum sandbox.img; stat -c '%y' sandbox.img` | unchanged hash and mtime |
+
+**`btrfska roots` samples** (`images/scratch/m2b/verify/roots_*.txt`; long problem lines cut):
+```
+$ uv run btrfska roots sandbox.img
+btrfska roots: targeted, 85 candidates, 84 valid copies of 52 tree blocks indexed
+skipped as DATA: 8388608 bytes (use --full-sweep to include reallocated ranges)
+log candidates: 0 indexed one generation ahead, 0 rejected
+groups: 48 (owner, generation, level); candidate roots: 52
+root tree candidates: 5 (5 evaluated, 1 beyond the superblock and backup roots)
+rediscovered: 26/26 superblock and backup roots are candidate roots (26 indexed)
+state generation 14 bytenr 30720000 level 0 [backup:14, current]: trees 8/8 found, blocks 9/9 (completeness 1.000); chunk root 22036480 generation 8 (backup:14); blocks placed by the current chunk map 9, by neither 0
+state generation 13 bytenr 30572544 level 0 [backup:13]: trees 8/8 found, blocks 9/9 (completeness 1.000); chunk root 22036480 generation 8 (backup:13); blocks placed by the current chunk map 9, by neither 0
+state generation 12 bytenr 30883840 level 0 [backup:12]: trees 8/8 found, blocks 9/9 (completeness 1.000); chunk root 22036480 generation 8 (backup:12); blocks placed by the current chunk map 9, by neither 0
+state generation 11 bytenr 30801920 level 0 [backup:11]: trees 8/8 found, blocks 9/9 (completeness 1.000); chunk root 22036480 generation 8 (backup:11); blocks placed by the current chunk map 9, by neither 0
+state generation 3 bytenr 5324800 level 0 [not a superblock or backup root]: trees 6/6 found, blocks 7/7 (completeness 1.000); chunk root 1048576 generation 3 (inferred, differs from current); blocks placed by the current chunk map 0, by the state's chunk items 7, by neither 0
+log trees: none
+raid stripe tree blocks: 0; remap tree blocks: 0
+walk failures: current 0; backup roots 0
+
+$ uv run btrfska roots images/scenarios/m2_logtree.img
+btrfska roots: targeted, 89 candidates, 84 valid copies of 49 tree blocks indexed
+log candidates: 8 indexed one generation ahead, 0 rejected
+root tree candidates: 5 (5 evaluated, 2 beyond the superblock and backup roots)
+rediscovered: 24/27 superblock and backup roots are candidate roots (24 indexed)
+not rediscovered: backup:5 root 30441472 generation 5 (not indexed)
+not rediscovered: backup:5 extent 30474240 generation 5 (not indexed)
+not rediscovered: backup:5 dev 30457856 generation 5 (not indexed)
+log generation 9: 4 blocks (8 copies), candidate roots 4, live 2, superseded 2
+walk failures: current 0; backup roots 3 (reused 3)
+problem: backup:5: tree 1 node 30441472 is invalid: mirror 1: owner: owner 10 != expected 1; mirror 1: parent_generation: generation 7 != parent pointer generation 5 (newer: rewritten after the parent); …
+
+$ uv run btrfska roots images/scenarios/s01_discard_sync_r1.img --full-sweep
+btrfska roots: full sweep, 43 candidates, 38 valid copies of 26 tree blocks indexed
+root tree candidates: 2 (2 evaluated, 1 beyond the superblock and backup roots)
+rediscovered: 14/26 superblock and backup roots are candidate roots (14 indexed)
+not rediscovered: backup:35 root 65208320 generation 35 (not indexed)
+…
+state generation 38 bytenr 65437696 level 0 [backup:38, current]: trees 9/9 found, blocks 10/10 (completeness 1.000); chunk root 131121152 generation 38 (backup:38); blocks placed by the current chunk map 10, by neither 0
+state generation 3 bytenr 5308416 level 0 [not a superblock or backup root]: trees 4/5 found, blocks 5/6 (completeness 0.833; missing unmapped 1); chunk root 1048576 generation 3 (inferred, differs from current); blocks placed by the current chunk map 0, by the state's chunk items 5, by neither 0
+walk failures: current 0; backup roots 12 (zeroed 12)
+```
+
+**Research notes.** research.md §10.4 gains the EXP-000 ranges, and §10.11 records:
+- discovery per image;
+- 31 surviving states beyond the backups;
+- pre-balance states resolving through their own chunk items;
+- reuse apart from damage;
+- superseded log commits;
+- sync discard removing all history the kernel freed;
+- the probe reconciliation.
+
+**For M3 (evidence catalog).**
+- **Store every candidate**, invalid ones included, with its checks. Discovery indexes only valid
+  blocks, so a missing block whose address holds an invalid scanned copy is classified through the
+  current map (the generation-3 csum leaf reads as `unmapped`). A `nodes` table joins both.
+- **Rows are ready.**
+  - `BlockIndex` columns match the planned `nodes(bytenr, phys, gen, owner, level, …)`.
+  - `State`, `TreeRef`, `Group`, `LogGeneration`, `Rediscovery` and `walk_failures` are flat,
+    frozen dataclasses (JSON through `asdict`) for `roots` and `provenance` rows.
+  - The failure classes (`node.FAILURE_CLASSES`) are a fixed vocabulary for the "why not
+    reachable" column.
+- **Scan once.** `btrfska scan` and `btrfska roots` each scan and walk again, and EXP-002 does
+  both per image. The catalog should run the scan and the walks once and feed classification and
+  discovery from the stored rows.
+- **M5 inputs already identified.** The historical chunk roots per state (generations 3, 6, 17,
+  23, 24, 29 and 30 on the s01 images) place every found block, and pre-balance states 3–16
+  resolve entirely outside the current map.
+- **Corpus.** The discard trio `s01_discard_{none,async,sync}_r1` is in the manifest. Test
+  tolerances for regenerated trio images come from EXP-000's ranges (none: 2 blocks in columns
+  1–2, 4 in column 4); per-image counts are exact.
+
 ## 2026-09-15 — M2a: scan kernel, targeted regions, orphan classification
 
 - **Branch:** `feature/m2a-scan-kernel` (from `main` at `92ab034`). This is

@@ -8,14 +8,19 @@ goal is to catalog all of it, with provenance and confidence, and answer what
 existed, when, what changed, what can be recovered, and whether anything was
 hidden.
 
-**Status:** M1 done (substrate trust layer). M2a is implemented: the scan
-kernel, targeted regions and orphan classification. Old-root discovery and
-the discard experiment (M2b) come next. The earlier prototype is frozen,
-still runnable, under `legacy/`.
+**Status:** M1 (substrate trust layer) and M2 (scan kernel, orphan
+classification, old-root discovery, discard experiments EXP-000 and EXP-002)
+are done. The evidence catalog (M3) comes next. The earlier prototype is
+frozen, still runnable, under `legacy/`.
 - `btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` finds tree
   blocks of the filesystem anywhere on the image, including chunks that have
   since been removed. It classifies each one as `live`, `backup_reachable`,
   `unreferenced` or `invalid`.
+- `btrfska roots IMAGE [--full-sweep] [--json]` finds historical tree roots
+  among those blocks. It reports every historical root-tree state with the
+  trees it names and how completely they survive, checks that every
+  superblock and backup root is rediscovered, and tells blocks reused by
+  newer trees apart from damaged ones.
 - `btrfska info IMAGE` validates every superblock copy (all four checksum
   types), selects the best one, and reports disagreements and the backup
   roots by generation. It refuses unsupported or unknown incompat features
@@ -261,6 +266,119 @@ Each record has:
 - `log_tree`: `true` when the walk of the superblock's log tree reached this
   copy. Its `generation` check is then the log rule (superblock generation +
   1), and its status is `live`.
+
+The summary line `walk failures: current N; backup roots M (…)` counts the
+invalid nodes the walks met, by the `roots` failure classes below. On an old
+backup root, `reused` is expected and is not damage.
+
+### `btrfska roots` output
+
+`btrfska roots IMAGE [--full-sweep] [--workers N] [--json]` finds historical
+tree roots among the scanned tree blocks, the idea of btrfs-progs
+`btrfs-find-root`, and reports how much of each historical root-tree state
+survives. The command opens no file other than the image.
+
+**Method.**
+- It scans as `scan` does, with the same regions and options. Every valid
+  candidate is indexed by (bytenr, generation, level, owner) with its
+  physical copies.
+- A log block (owner −6) whose only failed check is its generation, equal to
+  the superblock generation + 1, is indexed too. That covers superseded log
+  commits no walk reaches. Other failing log candidates are rejected.
+- Within one owner and generation, a block is referenced when an internal
+  block of the same owner and generation points to it. The **candidate
+  roots** are the unreferenced blocks at the highest level of their owner and
+  generation.
+- Every root-tree (owner 1) candidate is a **state**. Its trees are resolved
+  through the index, never through a chunk map, so a state whose chunks have
+  moved still resolves. A pointer or ROOT_ITEM is found when a valid scanned
+  block has its bytenr, generation and level, an acceptable owner and the
+  pointer's first key.
+- **Completeness** = found / referenced. Referenced blocks are the distinct
+  blocks the found blocks name: root-tree blocks, tree roots and child
+  pointers. Nothing below a missing block is known, so it is an upper bound.
+- Up to 64 states are evaluated: the superblock and backup ones first, then
+  the newest.
+
+With `--json`, stdout carries one JSON object per line and the summary goes
+to stderr. Every key below is always present; `null` means unknown or not
+applicable. Every record has `record` (its type) and `unsupported_format`
+(`true` when `--allow-unsupported` overrode the gate).
+
+- `rediscovery`: one per root the superblock or a backup slot names.
+  - `source`: `current` or `backup:GEN`.
+  - `tree`: `root`, `extent`, `chunk`, `dev`, `fs`, `csum` or `log`.
+  - `tree_id`, `bytenr`, `generation`, `level`: as the superblock records
+    them.
+  - `indexed`: `true` when a valid scanned block matches it.
+  - `candidate`: `true` when that block is a candidate root.
+- `state`: one historical root-tree state.
+  - `bytenr`, `generation`, `level`: the root-tree block; `copies`: the
+    physical offsets where it was scanned.
+  - `known_as`: the `current` and `backup:GEN` sources that name this block;
+    empty for a state beyond the superblock and backup roots.
+  - `trees`: one object per ROOT_ITEM in its leaves, in key order:
+    - `tree_id`, `key_offset`: the ROOT_ITEM key;
+    - `bytenr`, `generation`, `level`: the tree root it names;
+    - `leaf`, `slot`: where the ROOT_ITEM lies;
+    - `status`: `found`, `skipped` (a ROOT_ITEM naming the root tree itself
+      is not followed), `not_scanned` (a read through the current chunk map
+      is valid but the scan plan skipped that range), `changed` (the bytes no
+      longer match the scan record) or a failure class;
+    - `blocks`, `missing`: the tree's distinct blocks found, and referenced
+      but not found.
+  - `root_tree_blocks`, `root_tree_missing`: the same for the root tree.
+  - `found`, `referenced`, `completeness`: the state totals.
+  - `missing`: an object mapping each status of the missing blocks to its
+    count.
+  - `chunk_root`: `null` when unknown, else an object:
+    - `bytenr`, `generation`, `level`;
+    - `source`: `current` or `backup:GEN` when those name the state, else
+      `inferred`: the newest chunk-tree candidate root no newer than the
+      state;
+    - `differs_from_current`: `true` when it is not the current chunk root.
+  - `maps_current`: found blocks the current chunk map places where they were
+    scanned. `maps_historical`: the same under the CHUNK_ITEMs of the state's
+    chunk tree, read through the index and independent of the
+    sys_chunk_array (`null` unless `differs_from_current`). `maps_neither`:
+    found blocks neither places. This is a read-only check; historical chunk
+    maps come with plan.md M5.
+  - `problems`: at most 32, then a count: malformed or inconsistent
+    ROOT_ITEMs (for example one newer than the state), pointers to blocks
+    already reached (not followed) and first-key mismatches.
+- `group`: one per (owner, generation, level) of indexed blocks.
+  - `owner`, `generation`, `level`.
+  - `blocks`: distinct blocks; `copies`: physical copies.
+  - `unreferenced`: blocks no same-owner, same-generation block points to.
+  - `top`: `true` for the highest level of this owner and generation.
+  - `candidates`: unreferenced blocks when `top`, else 0.
+  - `listed`: the bytenrs of the first 16 candidates.
+- `log`: one per generation of log-tree blocks (owner −6).
+  - `generation`, `blocks`, `copies`, `levels`, `candidates`, `listed`: as
+    for groups.
+  - `live`: blocks the walk of the superblock's log tree reached.
+  - `superseded`: blocks of generation superblock + 1 that walk did not
+    reach, such as an earlier log commit of the same transaction.
+  - `committed`: `true` when the generation is not above the superblock's:
+    a log left from a transaction that has since committed.
+- `raw_block`: a RAID stripe tree (owner 12) or remap tree (owner 13)
+  candidate, recorded unparsed (at most 256): `owner`, `physical`, `bytenr`,
+  `generation`, `level`, `nritems`, `valid`.
+- `walk_failure`: an invalid node met by the walk of the current state or a
+  backup root: `source`, `tree_id`, `bytenr` and `class`.
+
+**Failure classes**, for missing blocks and walk failures. For each copy, in
+this order of precedence:
+- `reused`: the copy is an intact tree block of this filesystem but not the
+  one the referrer means, and newer. A newer tree, committed or not, took the
+  address. On old backup roots this is expected, not damage.
+- `mismatch`: intact, but not the block meant, and not newer.
+- `corrupt`: this filesystem's fsid, but an integrity check (`csum`,
+  `chunk_tree_uuid`, `nritems`, `written`, `layout`, level) fails.
+- `overwritten`: no tree block of this filesystem is there.
+- `zeroed`: the copy reads as zeros, for example trimmed by discard.
+- `unreadable`: beyond the image end or on a missing device.
+- `unmapped`: the current chunk map places the address nowhere.
 
 ## Tests and lint
 
