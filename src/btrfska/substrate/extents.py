@@ -15,7 +15,8 @@ btrfs_get_extent):
 - prealloc: num_bytes zeros, the disk bytes are not read;
 - implicit_hole: a range no item covers, zeros. Normal with the NO_HOLES feature; without it the
   gap is reported as a problem.
-Content is clipped to i_size. Data checksums are not verified here (M6).
+Content is clipped to i_size; clipping is reported only when an extent reaches past the sector
+holding the end of the file. Data checksums are not verified here (M6).
 
 Every physical range records all copies (DUP, RAID1*): the first readable copy is used and every
 other readable copy is compared with it, a divergent copy being reported. Failures are records,
@@ -308,6 +309,7 @@ def read_file(reader: NodeReader, root: TreeRoot, inode: int, *, no_holes: bool)
         errors.append(f"inode {inode} is a directory")
 
     extents, data, pos = [], [], 0
+    sectorsize = reader.ctx.sectorsize
 
     def hole(start: int, end: int) -> None:
         extents.append(ExtentRead("implicit_hole", file_offset=start, length=end - start))
@@ -324,8 +326,10 @@ def read_file(reader: NodeReader, root: TreeRoot, inode: int, *, no_holes: bool)
             hole(pos, start if size is None else min(start, size))
         if size is not None and end > size:
             kept = max(0, size - start)
-            clipped = f"clipped from {record.length} to {kept} bytes by i_size {size}"
-            record = replace(record, length=kept, problems=(*record.problems, clipped))
+            found = record.problems
+            if end > -(-size // sectorsize) * sectorsize:  # reaches past the sector holding EOF
+                found = (*found, f"clipped from {record.length} to {kept} bytes by i_size {size}")
+            record = replace(record, length=kept, problems=found)
             content = None if content is None else content[:kept]
         if content is not None:
             record = replace(record, sha256=hashlib.sha256(content).hexdigest())
