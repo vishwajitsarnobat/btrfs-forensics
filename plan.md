@@ -834,7 +834,25 @@ M1c; the evidence per bullet is in the catalog.md M1c entry.
     `images/`;
   - benchmark script committed.
 
-**Status 2026-09-15: M2a done** (catalog.md M2a entry).
+**Status 2026-09-15: done.** M2a delivered the kernel, regions, classification and
+EXP-003; M2b delivered old-root discovery, EXP-000 and EXP-002. Every DoD bullet is met
+(catalog.md M2b entry, "M2 closeout"):
+- sandbox parity: 71 legacy-compatible orphans, 21 outside the map, identical offsets
+  (`test_sandbox_legacy_compatible_orphans_are_the_legacy_offsets`, M2a);
+- discard trio: `btrfska scan --full-sweep`, counted under the probe's rules, equals
+  `probe_stale_metadata.py` on 48 of 48 images (EXP-002). Cross-run numbers are medians and
+  ranges over N = 15 regenerations next to EXP-000's;
+- ≥ 200 MB/s single-core on a synthetic 10 GiB image: 3 227.5 MB/s slowest run, 512 MB/s on a
+  100 % metadata image (EXP-003, M2a);
+- benchmark script committed: `experiments/bench_scan.py` (M2a).
+
+Old-root discovery (`scan/roots.py`, `btrfska roots`) groups the valid blocks of every owner by
+(owner, generation, level), not only root-tree blocks. It records owner-12 and owner-13 blocks
+unparsed and groups log-tree blocks by generation. It rediscovers every superblock and backup root
+on `sandbox.img` and the M1 images, and finds 31 root-tree states beyond the 4 backups on every
+s01 image without trims (EXP-002).
+
+**M2a** (catalog.md M2a entry).
 - **Delivered:**
   - `scan/regions.py` with the MIXED_GROUPS fix, tree-11 block-group input
     and `--full-sweep`;
@@ -1212,7 +1230,9 @@ Pure-parse results on a fixed image (e.g. sandbox 71/21) are deterministic
 and need one run plus the image hash.
 
 **Backfill.** EXP-000 = the research.md §10.4 discard table: re-run
-`corpus/vm/discard_table.sh` ×5 and record it under this template during M2.
+`corpus/vm/discard_table.sh` ×5 and record it under this template during M2. **Done 2026-09-15**
+(`experiments/EXP-000.md`, N = 15): the medians equal the §10.4 table; the "none" row varied in
+one run of 15 (365/353/18/828), the async and sync rows never.
 
 ## 8. Paper Plan
 
