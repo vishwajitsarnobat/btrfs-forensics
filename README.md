@@ -184,13 +184,47 @@ Three kinds of range are skipped:
 With MIXED_GROUPS, DATA chunks are scanned. `--full-sweep` scans DATA chunks
 too. A candidate is an offset whose 16 bytes at header offset 0x20 equal the
 tree fsid (metadata_uuid when it is set). `--workers N` (1 to 4, default 1)
-scans pieces of the regions in worker processes; the output is identical.
+scans 4 MiB pieces of the regions in worker processes; the output is
+byte-identical. On candidate-dense input 4 workers are about as fast as one
+(validation dominates and records are pickled back), so the default stays 1.
 
-**What it prints.** Without `--json`, stdout carries a summary: the plan and
-skipped ranges, candidate counts, the classes below, the legacy-compatible
-orphan count, the extent-tree cross-check, one line per region, and any
-problems. With `--json`, stdout carries one JSON object per candidate in
-physical order, and the summary goes to stderr.
+**Limitations.**
+- **Reallocated DATA ranges.** The targeted plan skips DATA chunks, so it
+  misses tree blocks left in a range that was metadata under an earlier chunk
+  and is now allocated to a DATA chunk. Only `--full-sweep` finds them. The
+  summary line `skipped as DATA: N bytes` says how much was left out.
+- **Foreign filesystems.** The prefilter matches only the current fsid (or
+  metadata_uuid). Tree blocks of a previous filesystem on the same device,
+  and blocks written before the fsid was changed (`btrfstune -m` or `-u`),
+  are not candidates at all.
+
+**Memory.** Candidates are classified and printed one at a time. Memory grows
+with the size of the reachable trees (the walked copies of the current state,
+its log and the backup roots), not with the number of candidates. With
+workers, at most N × 1024 records wait in the parent.
+
+**Log trees.** When the superblock names a log tree (`log_root`, after an
+fsync without a later commit), its blocks are walked as part of the current
+state. Every log block must have owner `TREE_LOG` (−6) and generation equal
+to the superblock generation + 1. Only the log root tree from the superblock
+and the subvolume logs its ROOT_ITEMs name get that rule, and a scanned copy
+is accepted above the superblock generation only when the log walk reached
+that exact copy.
+
+**What it prints.** Without `--json`, stdout carries a summary:
+- the plan and the skipped ranges, and `skipped as DATA: N bytes`;
+- candidate counts and the classes below;
+- the legacy-compatible orphan count;
+- the extent-tree content cross-check. The extent tree is reached through the
+  same current root tree as the walks, so this checks content, not the root.
+  Log blocks are never in the extent tree, so `log tree: N blocks (M live
+  copies)` counts them separately;
+- one line per region, and any problems.
+
+With `--json`, stdout carries one JSON object per candidate in physical order,
+and the summary goes to stderr. The Python API (`scan_image(...).summary`)
+has the same counts, including `skipped_data_bytes`, `log_tree` and
+`log_tree_blocks`.
 
 Every key below is always present; `null` means unknown or not applicable.
 Each record has:
@@ -215,7 +249,7 @@ Each record has:
 - `status`: one of these:
   - `invalid`: some check failed;
   - `live`: this copy is reached from the current state (every subvolume
-    and snapshot included);
+    and snapshot included, and the log tree);
   - `backup_reachable`: reached from a backup root only;
   - `unreferenced`: reached from neither.
 - `orphan`: `true` for `backup_reachable` and `unreferenced` nodes.
@@ -224,6 +258,9 @@ Each record has:
 - `legacy_orphan`: the prototype's orphan definition, kept for parity: the
   csum validates, the generation is below the superblock's, and the offset
   is nodesize-aligned.
+- `log_tree`: `true` when the walk of the superblock's log tree reached this
+  copy. Its `generation` check is then the log rule (superblock generation +
+  1), and its status is `live`.
 
 ## Tests and lint
 
