@@ -5,7 +5,9 @@
 #   -> images/scenarios/NAME.img and images/scenarios/NAME.log
 # Environment: SIZE (default 512M), CSUM (default xxhash), MKFS_ARGS (extra
 # mkfs.btrfs options, e.g. "-O block-group-tree"), plus everything
-# run_scenario.sh reads (SCENARIO, MOUNT_OPTS, DISCARD, TIMEOUT, ...).
+# run_scenario.sh reads (SCENARIO, MOUNT_OPTS, DISCARD, TIMEOUT, ...), and
+# DONE_MARKER (default "=== SCENARIO-DONE"): the serial-log line that proves
+# the scenario finished, for scenarios that power off without unmounting.
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -22,6 +24,6 @@ truncate -s "${SIZE:-512M}" "$OUT/$NAME.img"
 mkfs.btrfs -q -f --csum "${CSUM:-xxhash}" ${MKFS_ARGS:-} "$OUT/$NAME.img"
 
 "$HERE/run_scenario.sh" "$OUT/$NAME.img" > "$OUT/$NAME.log" 2>&1
-grep -q '=== SCENARIO-DONE' "$OUT/$NAME.log" || {
+grep -q -- "${DONE_MARKER:-=== SCENARIO-DONE}" "$OUT/$NAME.log" || {
     echo "$NAME: scenario did not finish, see $OUT/$NAME.log" >&2; exit 1; }
 echo "$OUT/$NAME.img"
