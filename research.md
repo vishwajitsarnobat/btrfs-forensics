@@ -1467,7 +1467,9 @@ block-group tree (objectid 11).
 > our own extent reads anyway; and zlib/zstd are in the Python 3.14 stdlib.
 > The last piece, LZO1X, is decoded by our own bounds-checked decoder:
 > dissect.util's native LZO decoder panicked on corrupt input
-> (`PanicException`, 58/300 bit-flipped streams), and its pure-Python
+> (`PanicException`; 31–46 of 300 bit-flipped streams per seed in the
+> committed harness `tests/oracle/lzo_hostile.py`, seeds 1–5, which
+> supersedes the first scratch run's 58/300), and its pure-Python
 > decoder silently accepted an out-of-range back-reference. All runtime
 > parsing, extent reads and decompression are ours, and the tool is
 > licensed **Apache-2.0** (plan.md §3.3). Item 9's AGPL concern is therefore
@@ -1745,3 +1747,115 @@ btrfs-progs is the host's v6.6.3.
   ("parent transid verify failed", disk-io.c:410-417). In a historical walk,
   a child newer than its pointer is exactly the signature of an overwritten
   backup-root block, so btrfska reports which direction it failed.
+
+### 10.9 Extent-read notes from M1c (2026-09-15)
+
+Observed while building extent reads, decompression, the oracles and EXP-001
+(catalog.md, M1c entry; experiments/EXP-001.md). Kernel references are to tag
+v7.0. Raw probe output: `images/scratch/m1c/probe_extents.txt`.
+
+- **Compressed inline extents hold a whole sector.** On `m1_xxhash` (zstd),
+  `m1_zlib` and `m1_lzo`, every compressed inline extent (seven per image:
+  `churn_1..6`, 5 B, and `deleted_inline.txt`, 13 B) decodes to 4 096 bytes,
+  while `ram_bytes` is 5 or 13. The kernel keeps only min(ram_bytes,
+  sectorsize) of that output (`uncompress_inline`, inode.c:7129-7168). The
+  bytes past `ram_bytes` were zero on all three images.
+  - Hypothesis for M6: bytes past `ram_bytes` inside a compressed inline
+    stream are invisible to any reader that follows the kernel. That makes
+    them a hiding place on a crafted image and possibly a residue source.
+    Whether the write path can ever compress non-zero bytes past EOF is
+    still to be checked in the compression write path (inode.c).
+  - btrfska reports them as `N non-zero bytes past ram_bytes in the decoded
+    sector`.
+- **Compressed extents carry slack.** Regular compressed extents are padded
+  to whole sectors:
+  - the zlib and zstd streams on these images end 462–3 929 bytes before the
+    end of their extent;
+  - every LZO extent's total length is below its sector-aligned size.
+
+  All of this slack was zero. Non-zero slack is also invisible to kernel
+  reads, so it joins §10.8's candidates for the M6 detector; btrfska reports
+  it.
+- **zlib extents are read without their adler32 check.**
+  `zlib_decompress_bio` (zlib.c:373-382) inflates raw deflate after a valid
+  zlib header, so a corrupted adler32 trailer is accepted. btrfska does the
+  same (`test_zlib_adler32_is_not_checked_like_the_kernel`). dissect.btrfs
+  calls `zlib.decompress`, which checks it, so it would refuse bytes the
+  kernel serves (not exercised on the corpus). zlib adds no integrity check
+  to what LZO lacks.
+- **Kernel extent reads stop once the read is filled.** The bio paths stop
+  when `ram_bytes` of output exist and ignore later LZO segments or zstd
+  input. btrfska stops the same way for LZO, but requires the end of a zlib
+  or zstd stream; no extent in the corpus hit that difference.
+- **The LZO worst-case segment is 4 421 bytes for a 4 KiB sector.** That is
+  the v7.0 macro (`include/linux/lzo.h:21`, `x + x/16 + 64 + 3 + 2`). The
+  header comment of `fs/btrfs/lzo.c` and the earlier plan text say 4 419.
+  The kernel's segment-length check uses the macro.
+- **`Documentation/staging/lzo.rst` first-byte erratum.** It says first
+  bytes 18..21 copy "0..3 literals" and 22..255 copy "4..238". The count is
+  byte − 17, so 1..4 and 5..238; lzallright agrees on hand-assembled streams
+  (`tests/test_lzo.py`).
+- **dissect.btrfs reads unmapped addresses as zeros.** Its `ChunkStream`
+  fills any read below its lowest chunk with zero bytes, without an error.
+  - On `m1_xxhash`, logical 13 631 488 reads as 4 096 zero bytes. That is
+    the pre-balance data chunk that the gen-30 backup chunk root still names
+    (§10.8).
+  - btrfska raises `UnmappedAddress` there and records such an extent as
+    `unmapped`.
+  - For a historical extent whose chunk has since moved, this is the
+    difference between a reported error and silently empty evidence.
+  - Other differences from the kernel read path: dissect's LZO loop ignores
+    the total-length header and stops at a zero segment length, and an
+    inline extent ends its extent list.
+  - None of this produced a byte difference in the oracle: all 152 file
+    reads were equal.
+- **Compressed extents in historical generations.** On the s01 images, every
+  backup root set (gens 35–38) and the current state name the same `sv1` and
+  snapshot leaves. The 50 file reads per image are therefore 10 distinct
+  files read five times, all equal to the guest SHA-256s.
+  - Their extents all lie in the post-balance data chunk, which the current
+    map covers.
+  - No root set in this corpus reaches a compressed extent at a pre-balance
+    address; that case needs M5's historical chunk maps.
+  - Threat to validity: this corpus exercises historical *metadata* only,
+    not historical extent addresses.
+- **Corrupt LZO usually decodes.** The committed harness
+  (`tests/oracle/lzo_hostile.py`, seeds 1–5, 300 single-bit flips of a
+  4 KiB sector per seed) found:
+  - 218–231 flips per seed (median 227, about three quarters) decode to
+    wrong bytes within the bound, identically in btrfska, lzallright and
+    dissect.util native;
+  - btrfska raises `LzoError` on the other 68–82 flips (1 flip at most
+    decodes correctly);
+  - lzallright's output bound is only a size hint: 32–41 flips per seed
+    returned more than 4 KiB, where btrfska raises `output_overrun`;
+    otherwise the two agree on 300 of 300 flips;
+  - dissect.util's native decoder raises a non-`Exception` panic on 31–46
+    flips per seed and on the crafted stream;
+  - the corpora added in the M1c review (truncation, one inserted or deleted
+    byte, random byte streams and instruction-level random streams, 300
+    each per seed) agree between btrfska and lzallright on every stream.
+    One inserted byte gives 9–14 wrong decodes and one deleted byte 32–71,
+    in both decoders alike. Before the review fix, btrfska accepted an end
+    marker with a copy length other than 3, which the kernel rejects. Only
+    the instruction-level corpus exposed it (6–11 streams per seed); the
+    byte-level corpora never produced that marker.
+
+  Decode success is therefore never evidence of correct content (plan.md
+  §3.5); data checksums are (M6).
+- **Legacy failure modes (EXP-001).**
+  - On the xxhash64, sha256 and blake2b images, legacy's hardcoded crc32c
+    rejects every fsid-matching block (368, 402 and 368), so it reports no
+    node and no file (defect #1).
+  - On `sandbox.img` its 10 "Move/Rename Artifacts" pair `target_file.txt`
+    and `large_target.txt` on inode 257. That is inode-number reuse, not a
+    rename:
+    - `target_file.txt` (INODE_ITEM generation 10) was deleted in
+      transaction 12;
+    - `large_target.txt` is a new inode 257 created in generation 13.
+
+    The INODE_ITEM `generation` field separates reuse from rename, and M5
+    timelines must use it.
+  - It lists `large_target.txt` four times; three entries are
+    de-duplication markers with no output file (`output_path` "(duplicate)",
+    legacy/utils/btree.py:659-666).
