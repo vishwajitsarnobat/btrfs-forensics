@@ -236,7 +236,7 @@ the map. The legacy "21 outside the map" includes the invalid empty leaf.
 copies, 106 corrupted; SHA-256 `acf9b2ef…`, reproduced by `generate
 --verify`). N = 5 per cell, one process, median (range):
 
-| Mode | Cache | MB/s | Pages cached before the run |
+| Mode | Cache | MB/s (image bytes; sparse image, per-allocated-byte figures in the review fixes below) | Pages cached before the run |
 |---|---|---|---|
 | prefilter | cold | 3743.1 (3505.4–4328.8) | 0 % |
 | prefilter | warm | 6138.6 (3622.4–8364.7) | 82–93 % |
@@ -244,7 +244,8 @@ copies, 106 corrupted; SHA-256 `acf9b2ef…`, reproduced by `generate
 | full validation | warm | 5691.0 (4430.1–7025.2) | 87–93 % |
 
 - **DoD.** The ≥ 200 MB/s target is met: the slowest single run reached
-  3 227.5 MB/s. Every run found exactly 11 151 candidates and 11 045 valid
+  3 227.5 MB/s in image bytes, and a fully metadata-dense 1 GiB image still
+  scans at 512 MB/s cold (density sweep in the review fixes below). Every run found exactly 11 151 candidates and 11 045 valid
   blocks.
 - **Cache state.** Cold means `POSIX_FADV_DONTNEED`, confirmed by
   `mincore()`. Warm runs had partly reclaimed caches; a 99.9 %-cached
