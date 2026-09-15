@@ -850,6 +850,21 @@ and proven against ground truth.
   compare with btrfscue v0.7 unreferenced-subvolume recovery.
 - Historical chunk-map reconstruction from orphaned CHUNK_ITEMs/DEV_EXTENTs
   (unlocks the 21 outside-map orphans → C6).
+- **Integrity vs linkage checks in historical walks** (from the M1b review).
+  - Today a copy that fails a linkage check (`parent_generation`,
+    `first_key`, `owner`, level against the expected level) is invalid, just
+    as a checksum failure is. This matches the kernel (disk-io.c:404-436,
+    tree-checker.c:2247-2297) and is right for M1.
+  - In a historical walk, though, it withholds a checksum-valid, well-formed
+    block that was rewritten after the backup root was written.
+  - Task:
+    - split `node.check_block` into integrity checks (`csum`, `bytenr`,
+      `fsid`, `chunk_tree_uuid`, `layout`, plus `nritems`, `written`, level <
+      8 and generation ≤ superblock) and linkage checks;
+    - expose items from integrity-valid nodes with a `linkage_mismatch` flag
+      that names the failed linkage checks, and lower the confidence of every
+      row derived from them (M6 tiers);
+    - keep the kernel rule for current-state walks.
 - Simple-quota attribution: stale EXTENT_OWNER_REF (172) names the creating
   subvolume of deleted data extents → timeline/confidence evidence.
 - **DoD:**
