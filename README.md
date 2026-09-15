@@ -8,9 +8,14 @@ goal is to catalog all of it, with provenance and confidence, and answer what
 existed, when, what changed, what can be recovered, and whether anything was
 hidden.
 
-**Status:** M1 done (substrate trust layer). Scanning for unreferenced
-metadata (M2) comes next. The earlier prototype is frozen, still runnable,
-under `legacy/`.
+**Status:** M1 done (substrate trust layer). M2a is implemented: the scan
+kernel, targeted regions and orphan classification. Old-root discovery and
+the discard experiment (M2b) come next. The earlier prototype is frozen,
+still runnable, under `legacy/`.
+- `btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` finds tree
+  blocks of the filesystem anywhere on the image, including chunks that have
+  since been removed. It classifies each one as `live`, `backup_reachable`,
+  `unreferenced` or `invalid`.
 - `btrfska info IMAGE` validates every superblock copy (all four checksum
   types), selects the best one, and reports disagreements and the backup
   roots by generation. It refuses unsupported or unknown incompat features
@@ -155,6 +160,107 @@ checksum and data checksums are verified from M6 on.
 `cat` currently holds the whole file in memory before writing it, with a
 peak of about twice the file size (explicit and implicit holes excepted).
 Streaming reads arrive with the recovery engine (plan.md M4).
+
+### `btrfska scan` output
+
+`btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` looks for tree
+blocks of the filesystem anywhere on the image. It validates each one and
+classifies it against anchored walks of the current state and of every
+backup root. The command opens no file other than the image.
+
+**Where it looks.** Every sector-aligned offset is probed in these regions:
+- the stripes of every current chunk except DATA chunks. A region's `kind`
+  is the chunk type, for example `METADATA|DUP`;
+- `unmapped_gap`: ranges that no current chunk covers, where removed or
+  relocated chunks used to be.
+
+Three kinds of range are skipped:
+- the first 68 KiB, as `reserved` (boot area and primary superblock);
+- the other superblock copies, as `superblock`;
+- a DATA chunk, but only when its block-group item agrees with it. The item
+  is read from tree 11 when the block-group tree is enabled, else from the
+  extent tree.
+
+With MIXED_GROUPS, DATA chunks are scanned. `--full-sweep` scans DATA chunks
+too. A candidate is an offset whose 16 bytes at header offset 0x20 equal the
+tree fsid (metadata_uuid when it is set). `--workers N` (1 to 4, default 1)
+scans 4 MiB pieces of the regions in worker processes; the output is
+byte-identical. On candidate-dense input 4 workers are about as fast as one
+(validation dominates and records are pickled back), so the default stays 1.
+
+**Limitations.**
+- **Reallocated DATA ranges.** The targeted plan skips DATA chunks, so it
+  misses tree blocks left in a range that was metadata under an earlier chunk
+  and is now allocated to a DATA chunk. Only `--full-sweep` finds them. The
+  summary line `skipped as DATA: N bytes` says how much was left out.
+- **Foreign filesystems.** The prefilter matches only the current fsid (or
+  metadata_uuid). Tree blocks of a previous filesystem on the same device,
+  and blocks written before the fsid was changed (`btrfstune -m` or `-u`),
+  are not candidates at all.
+
+**Memory.** Candidates are classified and printed one at a time. Memory grows
+with the size of the reachable trees (the walked copies of the current state,
+its log and the backup roots), not with the number of candidates. With
+workers, at most N × 1024 records wait in the parent.
+
+**Log trees.** When the superblock names a log tree (`log_root`, after an
+fsync without a later commit), its blocks are walked as part of the current
+state. Every log block must have owner `TREE_LOG` (−6) and generation equal
+to the superblock generation + 1. Only the log root tree from the superblock
+and the subvolume logs its ROOT_ITEMs name get that rule, and a scanned copy
+is accepted above the superblock generation only when the log walk reached
+that exact copy.
+
+**What it prints.** Without `--json`, stdout carries a summary:
+- the plan and the skipped ranges, and `skipped as DATA: N bytes`;
+- candidate counts and the classes below;
+- the legacy-compatible orphan count;
+- the extent-tree content cross-check. The extent tree is reached through the
+  same current root tree as the walks, so this checks content, not the root.
+  Log blocks are never in the extent tree, so `log tree: N blocks (M live
+  copies)` counts them separately;
+- one line per region, and any problems.
+
+With `--json`, stdout carries one JSON object per candidate in physical order,
+and the summary goes to stderr. The Python API (`scan_image(...).summary`)
+has the same counts, including `skipped_data_bytes`, `log_tree` and
+`log_tree_blocks`.
+
+Every key below is always present; `null` means unknown or not applicable.
+Each record has:
+- `record`: `node`.
+- `unsupported_format`: `true` when `--allow-unsupported` overrode the gate.
+- `physical`: the block's byte offset in the image.
+- `bytenr`, `generation`, `owner`, `level`, `nritems`: header fields (`null`
+  when the image ends inside the header).
+- `bytenr_mapped`: `true` when the current chunk map covers `bytenr`.
+- `maps_here`: `true` when one copy of `bytenr` lies at `physical`. It is
+  `false` for stale blocks in removed chunks and for garbage.
+- `valid`: `true` when every check passed.
+- `checks`: the `walk` checks, in the same order: `csum`, `bytenr`, `fsid`,
+  `chunk_tree_uuid`, `generation`, `level`, `nritems`, `written`, `layout`,
+  `owner`, `parent_generation`, `first_key`. Without a referrer, `bytenr`,
+  `owner`, `parent_generation` and `first_key` are `null`. Every check is
+  `null` for a block cut by the image end.
+- `problems`: `check: detail` for each failed check, or `truncated: …`.
+- `region`: the region whose range holds `physical`. It has `kind`,
+  `start`, `end`, `chunk` (the chunk's logical address, `null` for a gap)
+  and `stripe`.
+- `status`: one of these:
+  - `invalid`: some check failed;
+  - `live`: this copy is reached from the current state (every subvolume
+    and snapshot included, and the log tree);
+  - `backup_reachable`: reached from a backup root only;
+  - `unreferenced`: reached from neither.
+- `orphan`: `true` for `backup_reachable` and `unreferenced` nodes.
+- `outside_map`: `true` when `physical` lies in no stripe of the current
+  chunk map.
+- `legacy_orphan`: the prototype's orphan definition, kept for parity: the
+  csum validates, the generation is below the superblock's, and the offset
+  is nodesize-aligned.
+- `log_tree`: `true` when the walk of the superblock's log tree reached this
+  copy. Its `generation` check is then the log rule (superblock generation +
+  1), and its status is `live`.
 
 ## Tests and lint
 

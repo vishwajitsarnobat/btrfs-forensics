@@ -171,6 +171,34 @@ def test_subvolume_trees_may_share_blocks_owned_by_another_subvolume():
     assert results(leaf(owner=5), Expect(owner=ondisk.TREE_RELOC_OBJECTID))["owner"] is None
 
 
+LOG = ondisk.TREE_LOG_OBJECTID
+
+
+def test_log_tree_blocks_carry_exactly_the_superblock_generation_plus_one():
+    # The log is written in the running transaction, one past the committed superblock
+    # (transaction.c:392-393, extent-tree.c:5306); the kernel reads the log root with
+    # transid generation + 1 (disk-io.c:2017-2019). Only a log context accepts it.
+    log = Expect(owner=LOG, log=True)
+    assert failed(leaf(owner=LOG, generation=101), log) == []
+    assert failed(leaf(owner=LOG, generation=100), log) == ["generation"]
+    assert failed(leaf(owner=LOG, generation=102), log) == ["generation"]
+    assert failed(leaf(owner=LOG, generation=101), Expect(owner=LOG)) == ["generation"]
+    checks = {c.name: c for c in check_block(leaf(owner=LOG), node_ctx(), BYTENR, log)}
+    assert checks["generation"].detail == (
+        "generation 7 != superblock generation + 1 (101), required for a log tree block"
+    )
+
+
+def test_log_tree_blocks_are_owned_by_the_log_tree_objectid():
+    # Every log block is allocated with owner BTRFS_TREE_LOG_OBJECTID (-6: btrfs_tree.h:92;
+    # disk-io.c:861-867, 887; ctree.c:520). The kernel skips the check (tree-checker.c:2270),
+    # btrfska does not.
+    log = Expect(owner=LOG, log=True)
+    assert failed(leaf(owner=LOG, generation=101), log) == []
+    assert failed(leaf(owner=5, generation=101), log) == ["owner"]
+    assert failed(leaf(owner=LOG - 1, generation=101), log) == ["owner"]
+
+
 def test_empty_leaf_of_a_tree_that_may_be_empty_is_valid():
     assert failed(make_node(BYTENR, owner=ondisk.CSUM_TREE_OBJECTID)) == []
 

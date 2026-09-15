@@ -8,6 +8,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
     "crc32c>=2.9",
+    "numpy>=2.3",
     "xxhash>=4.0",
 ]
 

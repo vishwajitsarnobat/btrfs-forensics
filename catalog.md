@@ -20,7 +20,605 @@ Maintenance rules:
 
 # Timeline (newest first)
 
-## 2026-09-15 — M1c: extent reads, decompression, oracle parity, EXP-001
+## 2026-09-15 — M2a: scan kernel, targeted regions, orphan classification
+
+- **Branch:** `feature/m2a-scan-kernel` (from `main` at `92ab034`). This is
+  the first of two M2 PRs. It covers plan.md §5 M2:
+  - the scan kernel;
+  - targeted regions with the MIXED_GROUPS fix, tree-11 input and
+    `--full-sweep`;
+  - orphan classification;
+  - sandbox parity;
+  - the performance DoD (EXP-003).
+
+  Old-root discovery, the discard trio (EXP-002) and the EXP-000 backfill
+  are M2b.
+- **Commits:**
+  - `c12d89f` Plan scan regions from typed chunk stripes and unmapped gaps, skipping DATA only when block groups agree
+  - `efa74f2` Add the numpy scan kernel: strided fsid prefilter, every candidate validated and kept
+  - `9778650` Classify scanned nodes as live, backup-reachable or unreferenced, with sandbox legacy parity
+  - `2e6aeb3` Add btrfska scan with a per-node JSON schema documented in the README
+  - `7571f89` Add the EXP-003 scan benchmark: a deterministic sparse 10 GiB image, cold and warm runs
+  - `3fbf3f3` Record EXP-003: the numpy scan kernel at 3.2-8.4 GB/s on a synthetic 10 GiB image
+  - `db3a56e` Record M2a scan findings in research notes and the M2 status
+  - this catalog entry (the commit after `db3a56e`)
+
+**What was done.**
+- **Tests first.** Every module was written after its tests and seen
+  failing:
+  - `test_scan_regions`, `test_scan_kernel` and `test_scan_classify` failed
+    at collection with ModuleNotFoundError;
+  - the eight `scan` CLI tests failed with `invalid choice: 'scan'` and, for
+    the README sync test, IndexError.
+
+  Three expectations were corrected after the first run (see Deviations).
+- **Legacy reference.** `images/scratch/m2a/legacy_scan.py` ran the
+  prototype's `build_scan_regions` and `sweep_for_orphans`, targeted and
+  full sweep, on `sandbox.img`.
+  - Both modes: 71 orphans at identical offsets, 1 checksum failure, 14
+    current-generation leaves.
+  - Blocks scanned: 15 867 targeted, 16 379 full.
+  - Its regions, counts and the 71 offsets with their header fields are
+    frozen in `tests/ground_truth/sandbox_legacy_scan.json`.
+  - `test_golden_legacy_offsets_match_a_live_legacy_run` re-runs the
+    prototype while `legacy/` exists.
+- **Kernel references.** v7.0 files already in
+  `images/scratch/review-m1b/kernel/`, cited by line in code, none copied:
+  - `block-group.c`: 1053-1058, 2277-2330, 2429;
+  - `volumes.c`: 4023-4030, 7271-7276;
+  - `tree-checker.c`: 2047-2080;
+  - `ctree.c`: 621-625;
+  - `fs.h`: 108.
+
+1. **`scan/regions.py`** (`build_regions`, `plan_scan`, `stripe_extents`,
+   `read_block_groups`) splits the image into scanned `Region`s and skipped
+   ranges that together partition it.
+   - A region is `(start, end, kind, chunk, stripe)`. `kind` is the chunk
+     type as dump-tree prints it (`METADATA|DUP`) or `unmapped_gap`.
+   - A stripe's device length is the chunk length divided by the data
+     stripes, (num_stripes − nparity) / ncopies.
+   - Only stripes on this image's device (devid and device uuid) count;
+     rejected chunk items never exclude a range.
+   - **Skipped ranges:**
+     - `reserved`: 0–68 KiB, the boot area and primary superblock;
+     - `superblock`: the other superblock copies, which the kernel
+       excludes from every block group;
+     - DATA-only chunks, but only when the block-group item agrees on
+       length, type and profile.
+   - **Block-group items** are read from tree 11 when compat_ro
+     BLOCK_GROUP_TREE is set, else from the extent tree.
+   - **MIXED_GROUPS:** DATA chunks are scanned.
+   - **Physically overlapping chunks** are scanned and reported.
+   - **`--full-sweep`** also scans DATA chunks.
+   - 20 tests (2 vm):
+     - the sandbox layout;
+     - partition of the image;
+     - full sweep;
+     - MIXED_GROUPS and DATA|METADATA;
+     - block-group agreement, including a missing item, a wrong type and a
+       wrong length;
+     - device lengths for DUP, RAID1, RAID0, RAID10, RAID5 and RAID6;
+     - stripes on another device;
+     - an overlap;
+     - rejected chunks;
+     - clipping and a 4 KiB image;
+     - legacy parity on the sandbox;
+     - tree-11 and extent-tree input on `m1_sha256_bgt` and `m1_xxhash`
+       (vm).
+2. **`scan/kernel_numpy.py`**: `iter_candidate_nodes(img, regions, ctx,
+   chunk_map, *, workers=1)` → `NodeRecord`, and `iter_prefilter_hits`.
+   - **Prefilter.** The 16 bytes at header +0x20 are compared as two u64s
+     with the tree fsid (`ctx.fsid`, metadata_uuid when set). The compare
+     runs through strided `np.ndarray` views of the read-only map, 65 536
+     offsets per window, at sectorsize alignment.
+   - **Checks.** Every hit gets `check_block(block, ctx, None,
+     NO_EXPECTATIONS)` and the chunk-map lookup of its header bytenr.
+   - **Records.** A `NodeRecord` is flat and frozen, JSON-ready through
+     `asdict`: physical, bytenr, generation, owner, level, nritems, all
+     checks, valid, bytenr_mapped, maps_here, region and problems.
+   - **Truncated blocks.** A block cut by the image end is a record with no
+     checks and `truncated: N of nodesize bytes before the image end`. An
+     fsid cut by the end is not a candidate.
+   - **Region normalisation.** Regions are sorted and clipped, and each
+     offset is probed once, for the first region holding it. A node belongs
+     to the region holding its header, even when it extends past the
+     region's end.
+   - **Workers.** `workers` 2–4 scan 256 MiB pieces in processes that open
+     the image through `open_image`; records come back in order. More than
+     4 is a ValueError, and the default is 1.
+   - **Map lifetime.** numpy views die inside each window's function, so
+     the image can be closed while an iteration is suspended (tested).
+   - 18 tests. Among them the adversarial cases:
+     - overlapping and unsorted regions;
+     - regions beyond the image;
+     - a truncated final block;
+     - a header and an fsid cut by the image end;
+     - a node straddling a region end;
+     - unaligned region starts;
+     - an fsid match followed by random bytes;
+     - a foreign fsid.
+
+     The rest cover workers equal to one process, the worker bound, JSON
+     readiness and mapping here, elsewhere and unmapped.
+3. **`scan/classify.py`**: `reachability`, `classify`, `summarize` and
+   `scan_image`.
+   - **Live set.** The M1b walker walks every tree of a root set: the slot
+     or superblock trees, every ROOT_ITEM of its root tree (all subvolumes
+     and snapshots), and the log tree if the superblock names one.
+   - **Pairs.** A (logical, physical) pair is reached when the walk's copy
+     at that offset passed every check.
+   - **Statuses.** `live` (current state), `backup_reachable` (a backup
+     root only), `unreferenced`, or `invalid`.
+   - **Flags.** `outside_map` (no stripe of the current map) and
+     `legacy_orphan` (csum ok, generation below the superblock's,
+     nodesize-aligned).
+   - **Extent-tree cross-check.** The tree blocks the current extent tree
+     lists are compared with the walked logical addresses.
+   - 14 tests, 5 of them vm: the pure classification, the summary, sandbox
+     parity and reconciliation, targeted equal to full sweep, every live
+     copy found, and the live legacy run.
+4. **`btrfska scan IMAGE [--full-sweep] [--workers N] [--json]
+   [--allow-unsupported]`.**
+   - The gate is shared with `walk`.
+   - The summary goes to stdout, or to stderr with `--json`, which writes
+     one `node` record per candidate in physical order.
+   - README.md gains "`btrfska scan` output";
+     `test_readme_documents_every_scan_key` checks it.
+   - 8 tests. `--workers 2` output is byte-identical to one process.
+5. **Dependency.** `numpy>=2.3` (BSD) is a runtime dependency; the lock
+   resolves numpy 2.5.3.
+6. **EXP-003** (`experiments/bench_scan.py`, `experiments/EXP-003.md`).
+7. **Docs.** research.md §10.10 is new, plan.md M2 has a status line, and
+   the README status is updated.
+
+**Design decisions.**
+- **Orphan definition.** An orphan is a *valid* node whose copy is not
+  reached from the current state.
+  - It is a physical-copy notion: a stale copy claiming a live logical
+    address is still unreferenced.
+  - Invalid candidates are never orphans, but they are always emitted, with
+    every check.
+- **Backup roots are not live.** Backup-reachable nodes are a separate orphan
+  class, because the kernel may reuse their blocks at any time.
+  `orphans = backup_reachable + unreferenced`.
+- **The live set comes from walks, not the extent tree.** Walks validate
+  every hop and give physical copies. The prototype's extent-tree live set
+  (`orphan_scan.py`) is kept only as a cross-check. It agreed exactly on
+  every image here (see below), so it adds no information on this corpus;
+  it stays in the summary to flag a dropping subvolume, a log tree or damage.
+- **Parity is asserted on the legacy definition** through `legacy_orphan`,
+  and the reachability classes are reconciled against it (table below),
+  never fitted to it.
+- **Regions follow the kernel's placement rules** (superblock exclusion,
+  stripe lengths). They trust a DATA exclusion only when two sources agree
+  (chunk item and block-group item).
+- **The frozen interface** is `iter_candidate_nodes(img, regions, ctx,
+  chunk_map)`. `NodeRecord` holds primitives, a `Region` and `Check`s, so M3
+  can store it as a `nodes` row and M8 can swap the kernel.
+
+**Sandbox parity and reconciliation** (`uv run pytest -q
+tests/test_scan_classify.py`, all green).
+- **Legacy-compatible orphans** (csum ok, generation < 14, nodesize-aligned):
+  71, with offsets, bytenr, generation, owner and level identical to the
+  legacy golden file, in the same order.
+- **Outside the current map:** 21 of them, with block starts in
+  0x100000–0x12c000 and 0x500000–0x520000. Each claims bytenr == physical,
+  unmapped.
+- **Targeted equals full sweep:** same records, statuses and flags (85
+  candidates), and 0 orphans outside the targeted regions.
+- **Regions.** After nodesize snapping, btrfska's regions together with the
+  64 MiB superblock hole equal legacy's `[[81920, 13631488], [22020096,
+  268435456]]`.
+
+How the 71 legacy orphans classify under reachability:
+
+| Class | Legacy orphans | Blocks (logical → physical copies) | Why the definitions differ |
+|---|---|---|---|
+| `live` | 8 | chunk root 22036480 (gen 8) → 22036480, 30425088; uuid tree 30457856 (gen 7) → 38846464, 72400896; data reloc tree 30556160 (gen 5) → 38944768, 72499200; dev tree 30588928 (gen 13) → 38977536, 72531968 | Unchanged since an older generation, but named by the current state. Legacy's "generation < superblock generation" counts them as orphans |
+| `backup_reachable` | 34 | 17 blocks × 2 DUP copies: generation 5 (csum 30523392), 9 (dev 30621696), 11 (5 blocks), 12 (4), 13 (6) | Reached only from backup roots 11–14; not live |
+| `unreferenced`, outside map | 20 | 0x100000–0x12c000 and 0x500000–0x520000 except 1114112; generations 1–4 | Removed mkfs chunks; nothing names them |
+| `unreferenced`, in map | 8 | 22020096 (gen 5, chunk) → 22020096, 30408704; 30408704 (gen 13, fs) → 38797312, 72351744; 30425088 (gen 13, fs) → 38813696, 72368128; 30818304 (gen 12, fs) → 39206912, 72761344 | Freed by later transactions |
+| `invalid` | 1 | 1114112: empty generation-1 fs-tree leaf, outside the map | Its csum is good (legacy checks nothing else), but `nritems` fails: tree 5 must never be empty (tree-checker.c:2047-2080) |
+| **Total** | **71** | | |
+
+Not in the legacy 71:
+- the 12 live generation-14 copies;
+- 2 unreferenced generation-14 fs-tree leaf copies (logical 30605312 →
+  38993920, 72548352). Legacy excludes the current generation, but a block
+  WRITTEN in the running transaction is COWed again (ctree.c:621-625).
+
+btrfska's totals on the sandbox: 85 candidates, 84 valid, 1 invalid; 20 live;
+64 orphans (34 backup-reachable, 30 unreferenced); 20 valid orphans outside
+the map. The legacy "21 outside the map" includes the invalid empty leaf.
+
+**EXP-003 summary** (`experiments/EXP-003.md`). Synthetic 10 GiB sparse image
+(seed 3; 6 metadata, 80 data and 74 hole tiles; 11 151 sandbox tree-block
+copies, 106 corrupted; SHA-256 `acf9b2ef…`, reproduced by `generate
+--verify`). N = 5 per cell, one process, median (range):
+
+| Mode | Cache | MB/s (image bytes; sparse image, per-allocated-byte figures in the review fixes below) | Pages cached before the run |
+|---|---|---|---|
+| prefilter | cold | 3743.1 (3505.4–4328.8) | 0 % |
+| prefilter | warm | 6138.6 (3622.4–8364.7) | 82–93 % |
+| full validation | cold | 3277.1 (3227.5–3337.8) | 0 % |
+| full validation | warm | 5691.0 (4430.1–7025.2) | 87–93 % |
+
+- **DoD.** The ≥ 200 MB/s target is met: the slowest single run reached
+  3 227.5 MB/s in image bytes, and a fully metadata-dense 1 GiB image still
+  scans at 512 MB/s cold (density sweep in the review fixes below). Every run found exactly 11 151 candidates and 11 045 valid
+  blocks.
+- **Cache state.** Cold means `POSIX_FADV_DONTNEED`, confirmed by
+  `mincore()`. Warm runs had partly reclaimed caches; a 99.9 %-cached
+  profiled run reached 12 157 MB/s.
+- **Bottleneck.**
+  - Cold: device reads (wall exceeds CPU by 1.1–1.2 s).
+  - Whole run: kernel page-fault and page-cache work (27.5 s system versus
+    5.8 s user CPU).
+  - In the process: per-candidate Python validation, about 61 µs per
+    candidate (0.68 s of 0.95 s). The numpy prefilter takes 0.19 s.
+  - No optimisation was needed. A dense image would be bounded by
+    validation, about 270 MB/s extrapolated and not measured.
+- **No parallel benchmark** was run (`--workers` exists but is off by
+  default).
+
+**Scan results on the corpus** (targeted; research.md §10.10 has the full
+table and analysis):
+
+| Image | Candidates | Valid | Live | Backup-reachable | Unreferenced | Orphans outside map | Legacy-compatible |
+|---|---|---|---|---|---|---|---|
+| `sandbox.img` | 85 | 84 | 20 | 34 | 30 | 20 | 71 |
+| `m1_xxhash` | 367 | 362 | 22 | 24 | 316 | 172 | 355 |
+| `m1_sha256_bgt` | 401 | 395 | 24 | 26 | 345 | 181 | 387 |
+
+**Deviations** (with rationale):
+- **Parity on the legacy definition.** The DoD's "71 orphans, 21 outside
+  map" is the prototype's definition (generation, not reachability). btrfska
+  asserts it through the compatibility flag `legacy_orphan`, with identical
+  offsets. The reachability orphans (64 on sandbox) are reconciled in the
+  table above.
+- **Superblock copies are cut out of regions.** Legacy probed the 64 MiB
+  mirror and counted it as its one checksum failure. The kernel never places
+  a tree block over a superblock copy (block-group.c:2277-2330). The
+  reserved area is 0–68 KiB, where legacy skipped 0–80 KiB (64 KiB +
+  nodesize).
+- **Probing is at 4 KiB,** as plan.md M2 asks. On the sandbox it finds the
+  same 85 candidates as a nodesize probe would.
+- **Block-group input** is used to confirm a DATA exclusion. That is the
+  instruction's "if block-group info is needed": chunk types alone could
+  hide a range behind one altered item.
+- **The live set lives in `scan/classify.py`**, not `scan/live_set.py`
+  (plan.md §4.1 names that file); the plan's status line says so. The
+  extent-tree walk is a cross-check, not the live set.
+- **Expectations corrected after the first run.** None of these changed
+  code:
+  - The sandbox reconciliation had assumed 0 invalid candidates. The
+    diagnosis found the empty generation-1 fs-tree leaf failing `nritems`,
+    so the classes became 28 unreferenced + 1 invalid and 20/20 outside the
+    map.
+  - The first test used an exclusive 0x520000 bound. The catalog's
+    "0x500000–0x520000" names block starts.
+  - The CLI test's guessed METADATA region counts (32/32/10/22) became
+    30/30/9/21. The new numbers were confirmed by counting the `--json`
+    records independently of `summarize`.
+- **Log-tree blocks** carry generation = superblock generation + 1. The
+  scan's generation check (node.py, unchanged) would mark them invalid, and
+  the log walk would not descend. No corpus image has a log tree; this is
+  left for M2b/M3.
+- **Walk cost.** Walks are deduplicated only by root bytenr: snapshots that
+  share subtrees re-walk them. `classify` returns a list, and
+  `build_regions` is O(intervals × stripes). All are adequate for this
+  corpus; M3's catalog is the place to stream and share.
+- **EXP-003 specifics.**
+  - Warm runs were not fully cached (82–93 %); this is reported, not
+    hidden.
+  - The environment record's QEMU and guest lines are irrelevant (no guest
+    runs).
+  - The 10 GiB image was deleted after the runs (`bench_scan.py clean`); it
+    is regenerable and hash-verified.
+
+**Verification** (local, branch `feature/m2a-scan-kernel` at `db3a56e`;
+logs in `images/scratch/m2a/verify/`):
+
+| Check | Command | Result |
+|---|---|---|
+| `sandbox.img` before | `sha256sum sandbox.img; stat -c '%y' sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime 2026-04-26 18:49:36 |
+| Tests (all) | `uv run pytest -q` | `673 passed` (was 613) |
+| vm tests | `uv run pytest -m vm -q` | `51 passed, 622 deselected` |
+| Tests without vm | `uv run pytest -m "not vm" -q` | `622 passed, 51 deselected` |
+| New scan modules | `uv run pytest -q tests/test_scan_regions.py tests/test_scan_kernel.py tests/test_scan_classify.py` | `52 passed` |
+| Read-only scan and import boundary | `uv run pytest -q tests/test_readonly.py tests/test_import_boundary.py` | `53 passed`; no `dissect` or `lzallright` import under `src/` (grep: 0) |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `57 files already formatted` |
+| Lockfile | `uv lock --check` | `Resolved 15 packages` |
+| Legacy runner | `uv run python -m unittest discover -s legacy/tests` | `Ran 37 tests`, `OK` |
+| Scan, sandbox | `uv run btrfska scan sandbox.img` | exit 0; output below |
+| Scan, full sweep | `uv run btrfska scan sandbox.img --full-sweep` | exit 0; `full sweep, 8 regions, 268361728 bytes`; same classes |
+| Scan, JSON | `uv run btrfska scan sandbox.img --json \| wc -l` | `85` |
+| Scan, `m1_xxhash` | `uv run btrfska scan images/scenarios/m1_xxhash.img` | exit 0; output below |
+| Scan, `m1_sha256_bgt` | `uv run btrfska scan images/scenarios/m1_sha256_bgt.img` | exit 0; output below |
+| `sandbox.img` after | `sha256sum sandbox.img; stat -c '%y' sandbox.img` | unchanged hash and mtime |
+
+**`btrfska scan` samples** (`images/scratch/m2a/verify/scan_*.txt`; empty
+region lines omitted from the m1 samples):
+```
+$ uv run btrfska scan sandbox.img
+btrfska scan: targeted, 7 regions, 259973120 bytes probed at 4096-byte alignment
+skipped: reserved 0-69632
+skipped: DATA|single 13631488-22020096
+skipped: superblock 67108864-67112960
+candidates: 85 (valid 84, invalid 1)
+live: 20
+orphans: 64 (backup_reachable 34, unreferenced 30)
+outside current chunk map: 20 valid nodes (20 orphans)
+header bytenr not mapping to the node's physical offset: 20 valid nodes
+legacy-compatible orphans (csum ok, generation < 14, nodesize-aligned): 71 (21 outside current chunk map)
+extent tree: 10 tree blocks; reached only by walks: 0; listed only by the extent tree: 0
+region unmapped_gap 69632-13631488: candidates 21, valid 20, live 0, orphans 20
+region SYSTEM|DUP 22020096-30408704 (chunk 22020096 stripe 0): candidates 2, valid 2, live 1, orphans 1
+region SYSTEM|DUP 30408704-38797312 (chunk 22020096 stripe 1): candidates 2, valid 2, live 1, orphans 1
+region METADATA|DUP 38797312-67108864 (chunk 30408704 stripe 0): candidates 30, valid 30, live 9, orphans 21
+region METADATA|DUP 67112960-72351744 (chunk 30408704 stripe 0): candidates 0, valid 0, live 0, orphans 0
+region METADATA|DUP 72351744-105906176 (chunk 30408704 stripe 1): candidates 30, valid 30, live 9, orphans 21
+region unmapped_gap 105906176-268435456: candidates 0, valid 0, live 0, orphans 0
+
+$ uv run btrfska scan images/scenarios/m1_xxhash.img
+btrfska scan: targeted, 7 regions, 469688320 bytes probed at 4096-byte alignment
+skipped: DATA|single 307232768-374341632
+candidates: 367 (valid 362, invalid 5)
+live: 22
+orphans: 340 (backup_reachable 24, unreferenced 316)
+outside current chunk map: 172 valid nodes (172 orphans)
+legacy-compatible orphans (csum ok, generation < 38, nodesize-aligned): 355 (177 outside current chunk map)
+extent tree: 11 tree blocks; reached only by walks: 0; listed only by the extent tree: 0
+region unmapped_gap 69632-67108864: candidates 102, valid 97, live 0, orphans 97
+region unmapped_gap 67112960-105906176: candidates 75, valid 75, live 0, orphans 75
+region METADATA|DUP 105906176-173015040 (chunk 63963136 stripe 0): candidates 91, valid 91, live 10, orphans 81
+
+$ uv run btrfska scan images/scenarios/m1_sha256_bgt.img
+candidates: 401 (valid 395, invalid 6)
+live: 24
+orphans: 371 (backup_reachable 26, unreferenced 345)
+outside current chunk map: 181 valid nodes (181 orphans)
+legacy-compatible orphans (csum ok, generation < 38, nodesize-aligned): 387 (187 outside current chunk map)
+extent tree: 12 tree blocks; reached only by walks: 0; listed only by the extent tree: 0
+```
+
+**Research notes.** research.md §10.10 records:
+- orphans per image;
+- how few orphans backup roots reach on the s01 images (24–26 of
+  338–371);
+- what the orphans outside the map on generated images are: pre-balance
+  metadata stripes and mkfs residue, with owners and generations;
+- mkfs generation-1 blocks without the WRITTEN flag;
+- current-generation orphans;
+- the extent-tree cross-check agreeing everywhere.
+
+**For M2b.**
+- **Old-root discovery** can group `NodeRecord`s with owner 1 by (level,
+  generation) straight from `scan_image`. Most history lies outside the
+  current map, and none of those headers map: 154 and 162 blocks on the s01
+  images claim pre-balance logical addresses. Reading their pointers needs
+  a historical chunk map, for example from the generation-30 backup chunk
+  root (§10.8).
+- **Discard trio.** `probe_stale_metadata.py` counts every 4 KiB block with
+  the fsid, skipping only the superblock blocks; column 2 applies
+  generation < superblock generation without a checksum. Exact equality
+  therefore needs:
+  - `--full-sweep`, since the probe also reads DATA chunks;
+  - counting *all* candidates, invalid ones included;
+  - the probe's own generation rule, not `legacy_orphan`, which
+    additionally requires csum and nodesize alignment.
+
+  The reserved-range difference (0–68 KiB versus the probe's single skipped
+  block at 64 KiB) must be checked on those images.
+- **Log trees.** Decide how a log tree (generation = superblock + 1) is
+  validated before a crashed image enters the corpus. Done in the review
+  fixes below.
+
+### Review fixes
+
+PR #11 was approved with fixes (three medium, three low). Each code fix was
+written test-first and the tests were seen failing. All commits are local on
+`feature/m2a-scan-kernel`, on top of `d4c2c59`, and are not pushed:
+- `03b832c` Validate log-tree blocks in a log context: owner TREE_LOG, generation superblock + 1
+- `f9add08` Add the m2_logtree corpus image: fsynced log trees left by a power-off without commit
+- `3fa93e1` Stream worker scan results in order through a bounded window of 4 MiB pieces
+- `974ee5c` Stream scan classification, classify log-tree copies live and report bytes skipped as DATA
+- `80ac63b` Add the EXP-003 density sweep and per-allocated-byte throughput to the scan benchmark
+- `acf058b` Document log trees, scan limitations, bounded memory and the EXP-003 density sweep
+- this subsection (the commit after `acf058b`)
+
+**Sources.** Kernel tag v7.0 files fetched into
+`images/scratch/m2a-fixes/kernel/`: `disk-io.c`, `tree-log.c`,
+`transaction.c`, `ctree.c`, `extent-tree.c`, `tree-checker.c`,
+`btrfs_tree.h`, `ctree.h`. They are cited by line only, never copied. Raw
+logs are in `images/scratch/m2a-fixes/{logtree,memory,verify}/` and
+`images/scratch/exp/EXP-003/`.
+
+1. **Log-tree blocks could never be classified live (medium).**
+   - **Verified facts.** Two of the review's premises were corrected
+     against the source; the defect itself was real.
+     - **Owner.** `BTRFS_TREE_LOG_OBJECTID` is −6 (btrfs_tree.h:92); −7 is
+       `TREE_LOG_FIXUP`. Every log block carries it as header owner
+       (disk-io.c:861-867, 887; ctree.c:520; extent-tree.c:5308).
+     - **Keys.** The log root tree's ROOT_ITEM keys are (TREE_LOG,
+       ROOT_ITEM, subvolume id) (disk-io.c:865-867, 942;
+       tree-log.c:7720-7744). So the walk already expected owner −6, not the
+       subvolume id. The owner was simply never checked: `_owner_ok`
+       skipped TREE_LOG, as the kernel does (tree-checker.c:2270).
+     - **Generation: exactly superblock + 1.** Log blocks take the running
+       transid (extent-tree.c:5306), which is the committed generation + 1
+       (transaction.c:392-393). btrfs_sync_log writes `super_for_commit`
+       under `tree_log_mutex` after the previous commit's superblock
+       (tree-log.c:3554-3580, transaction.c:2535-2581). Replay reads the log
+       root with transid generation + 1 (disk-io.c:2017-2019), and logs are
+       freed at every commit.
+     - **log_root_transid.** v7.0 has no `log_root_transid` function. The
+       superblock field is `__unused_log_root_transid` (btrfs_tree.h:695)
+       and is 0 on disk.
+   - **Actual defects.**
+     - The node generation check (≤ superblock) failed every log block, so
+       the log walk stopped at its root. The pre-fix scan of `m2_logtree`
+       reported `tree 18446744073709551610 node 30982144 is invalid: …
+       generation 9 > superblock generation 8`
+       (`logtree/scan_before_fix.txt`).
+     - The log root had no expected generation.
+     - Subvolume logs (tree id TREE_LOG) were searched for ROOT_ITEMs as if
+       they were root trees.
+     - Scanned log copies failed the context-free generation check.
+   - **Fix.**
+     - `Expect.log` and `TreeRoot.log`. The walker propagates the log
+       context to children.
+     - In a log context `check_block` requires generation ==
+       superblock + 1, and the owner check is exact for TREE_LOG.
+     - `classify.walk_root_set` anchors the log only at the superblock's
+       `log_root`, with generation + 1. Only ROOT_ITEMs keyed
+       (TREE_LOG, …) in that tree name subvolume logs, and their leaves are
+       not searched. A ROOT_ITEM keyed like a log inside the ordinary root
+       tree gets no log context.
+     - A scanned copy has its generation check redone in the log context
+       only when the log walk reached that exact (logical, physical) copy.
+       Its status is then `live`, with the new record key `log_tree`.
+     - Log blocks are left out of `walk_only`, since they have no
+       extent-tree reference (extent-tree.c:5392). The summary adds
+       `log tree: N blocks (M live copies)`.
+   - **Corpus image `m2_logtree`** (manifest row, SHA-256 `2c8b95df…3b16`).
+     - Scenario `corpus/vm/scenarios/logtree.guest.sh`, mounted with
+       `commit=300`: commit two files, fsync new files in fs tree 5 and
+       `sv1` and append to one, then `echo o > /proc/sysrq-trigger`.
+     - `make_image.sh` gains `DONE_MARKER`, because the guest never reaches
+       its umount.
+     - Result: superblock generation 8, log_root 30982144. Three more
+       generated runs gave the same generation and log_root (the images
+       were deleted).
+     - Oracle: `btrfs inspect-internal dump-tree -t 18446744073709551610`
+       names leaves 30982144 and 30965760, and the scan classifies exactly
+       those 2 blocks, 4 DUP copies, as `live`/`log_tree`.
+     - Two superseded generation-9 log leaves from the first fsync's log
+       commit (30932992 and 30949376, 2 copies each) remain `invalid` on
+       generation: nothing reaches them.
+   - **Tests** (failing first):
+     - `test_node` ×2 and `test_tree` ×1: TypeError, no `log` in `Expect`;
+     - `test_scan_classify`: ImportError on `walk_root_set`, then the
+       synthetic log walk, scanned log copy and streaming tests;
+     - vm `test_m2_logtree_log_blocks_are_live_log_tree_copies`, with the
+       dump-tree oracle;
+     - the manifest SHA-256.
+2. **Memory was O(candidates) (medium).**
+   - **Fix.**
+     - `classify` is a generator, and `Tally` keeps running counters.
+       `ScanResult.classified` is a one-shot stream, and `.summary` needs it
+       exhausted.
+     - `cmd_scan` prints each record while the image is open.
+     - Workers: a pool initializer opens the image once per process, and
+       jobs are 4 MiB pieces. At most `workers` pieces are pending ahead of
+       the one being yielded, so the parent holds at most 4 × 1024 records.
+       Output order is physical.
+     - The classify docstring states the remaining bound: the reachable
+       trees, not the candidates.
+   - **Test** `tests/test_scan_hostile.py` (sandbox marker). A copy of
+     `sandbox.img` has fsid-matching garbage in all 39 680 sectors of the
+     trailing gap, 39 765 candidates in all. `scan --json` runs under
+     tracemalloc with workers 1 and 4; each peak must stay below 16 MiB, and
+     both outputs must be byte-identical (SHA-256 of stdout, equal stderr).
+     It failed first with `--workers 1: peak 78441738 bytes`. The sandbox
+     CLI test now compares `--workers 4` with one process.
+   - **Measured on the review's `flood.img`** (`memory/peak.py`, 5
+     sequential runs each; `/usr/bin/time -v` for RSS):
+
+     | Version | Workers | tracemalloc peak | Wall s median (range) | Max RSS |
+     |---|---|---|---|---|
+     | before (`d4c2c59`) | 1 | 89.3 MB | 1.39 (1.37–1.42) | 384 MB |
+     | before (`d4c2c59`) | 4 | 267.6 MB | 2.93 (2.64–3.24) | 308 MB (parent) |
+     | after | 1 | 2.3 MB | 1.40 (1.37–1.53) | 296 MB |
+     | after | 4 | 16.6 MB | 1.31 (1.24–1.35) | 53 MB (parent) |
+
+     RSS includes the image's file-backed pages (about 250 MB of a mapped
+     256 MB image), so the heap peak is the comparable figure. Four workers
+     are now about as fast as one, not faster, so the default stays 1
+     (README, kernel docstring). The `--workers 1` and `--workers 4` JSON
+     are byte-identical (`cmp`, 39 765 lines).
+3. **Targeted mode misses metadata in reallocated DATA ranges (medium).**
+   - The README has a limitation paragraph, and the `regions.py` docstring
+     is corrected: it no longer implies that a skipped DATA range holds no
+     tree blocks.
+   - New summary line `skipped as DATA: N bytes (use --full-sweep to include
+     reallocated ranges)`, or `(full sweep)` with 0 bytes, and the summary
+     field `skipped_data_bytes`. There is no JSON summary record: `--json`
+     prints the summary lines on stderr, and the field is in
+     `scan_image(...).summary`, the dict M3 stores.
+   - Tests (failing first): a valid fs-tree leaf is planted 1 MiB into the
+     sandbox DATA chunk. Targeted, it is not found and 8 388 608 bytes are
+     reported; with `--full-sweep` it is found `unreferenced` in
+     `DATA|single`. Also the summary field, targeted and full, and the
+     sandbox CLI lines.
+   - research.md §10.10 records it as a forensic consideration.
+4. **Foreign-FSID limitation (low).** Noted in the README limitations and
+   research.md §10.10. plan.md M6 gains an optional foreign-FSID discovery
+   mode that feeds the foreign-superblock finding.
+5. **EXP-003 headline (low).**
+   - **Non-hole throughput.** `bench_scan.py allocated` recomputes the
+     N = 5 runs per allocated byte (5 771 366 400 of 10 GiB):
+
+     | Cell | Image MB/s | Allocated MB/s |
+     |---|---|---|
+     | prefilter cold | 3743.1 | 2011.6 (1884.2–2327.2) |
+     | prefilter warm | 6138.6 | 3299.8 (1947.2–4494.8) |
+     | full cold | 3277.1 | 1761.2 (1734.7–1794.0) |
+     | full warm | 5691.0 | 3058.5 (2380.9–3777.1) |
+
+   - **Density sweep** (`sweep-generate`, `sweep-run --runs 5`; EXP-003
+     §6.1). Dense 1 GiB images: pool tree blocks at density %, random bytes
+     elsewhere. Full validation, one process, sequential; `mincore()`
+     showed 0 % cached cold and 100 % warm. N = 5 median (range), MB/s:
+
+     | Density | Cold | Warm |
+     |---|---|---|
+     | 0 % | 3451.7 (3362.5–3456.7) | 65669.9 (55699.1–68240.6) |
+     | 10 % | 2142.5 (2069.7–2159.2) | 5685.7 (5056.6–6037.6) |
+     | 100 % | 512.2 (501.0–529.7) | 615.9 (576.0–628.2) |
+
+     These replace the review's single runs (100 %: 262 cold and 287 warm;
+     10 %: 803 and 2 384, on sparse images). Validation costs about 27 µs
+     per candidate. Every run's hits and valid counts equal the
+     generator's.
+   - The 3 GiB of sweep images were deleted (`bench_scan.py clean`);
+     `sweep-generate --verify` rebuilds their hashes.
+6. **Wording (low).** The extent-tree check is now called a content
+   cross-check that is not independent of the current root tree, in
+   `classify.py`, the README and research.md §10.10. The only "independent"
+   was in the PR #11 description, which was not edited (no remote
+   changes); replacement text is in
+   `images/scratch/m2a-fixes/pr_body_changes.md`.
+
+**Deviation.** The review asked for owner −7. The kernel's value is −6, and
+btrfska already used −6 (`ondisk.TREE_LOG_OBJECTID = _U64 - 6`).
+
+**Verification** (local, at `acf058b`; logs in
+`images/scratch/m2a-fixes/verify/`):
+
+| Check | Command | Result |
+|---|---|---|
+| Tests (all) | `uv run pytest -q` | `684 passed` (was 673) |
+| vm tests | `uv run pytest -m vm -q` | `53 passed, 631 deselected` |
+| Read-only and import boundary | `uv run pytest -q tests/test_readonly.py tests/test_import_boundary.py` | `53 passed`; grep for `dissect`/`lzallright` imports under `src/`: 0 |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `58 files already formatted` |
+| Lockfile | `uv lock --check` | `Resolved 15 packages` |
+| Scan, sandbox | `uv run btrfska scan sandbox.img` | exit 0; classes unchanged (85/84/1, live 20, orphans 64); `skipped as DATA: 8388608 bytes`; `log tree: 0 blocks` |
+| Scan, flood | `uv run btrfska scan images/scratch/m2a-review/flood.img` | exit 0; `candidates: 39765 (valid 84, invalid 39681)`, same classes as sandbox |
+| Scan, `m2_logtree` | `uv run btrfska scan images/scenarios/m2_logtree.img` | exit 0; 89 candidates (80 valid), live 24, orphans 56 (30/26), `log tree: 2 blocks (4 live copies)`, walks-only 0, `skipped as DATA: 75497472 bytes`; 3 `backup:5` problems (reused blocks under an old backup root) |
+| `sandbox.img` after | `sha256sum sandbox.img; stat -c '%y' sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime 2026-04-26 18:49:36 |
+
+**For M2b.**
+- The superseded log leaves on `m2_logtree` show that a log commit leaves
+  generation sb + 1 residue that no walk reaches. Old-root discovery should
+  group owner −6 blocks by generation, as for owner 1.
+- Run the discard trio with `--full-sweep` as well: reallocated DATA ranges
+  are exactly where balance leaves stale metadata.
+- The oldest backup root on small images names reused blocks (`backup:5`
+  problems on `m2_logtree`). That is expected, but the summary should
+  separate it from damage.
 
 - **Branch:** `feature/m1c-extent-reads` (from `main` at `16e7c77`). This is
   the last of three M1 PRs. It covers plan.md §5 M1 task 8 (extent reads,
