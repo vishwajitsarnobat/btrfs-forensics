@@ -7,6 +7,8 @@ import uuid
 from dataclasses import asdict
 
 from btrfska import __version__
+from btrfska.scan.classify import Classified, scan_image
+from btrfska.scan.kernel_numpy import MAX_WORKERS
 from btrfska.substrate import csum, ondisk, superblock
 from btrfska.substrate.extents import read_file
 from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat, open_filesystem
@@ -345,6 +347,87 @@ def cmd_cat(args: argparse.Namespace) -> int:
     return 0
 
 
+def _workers(text: str) -> int:
+    value = int(text) if text.isdigit() else 0
+    if not 1 <= value <= MAX_WORKERS:
+        raise argparse.ArgumentTypeError(f"expected 1 to {MAX_WORKERS} processes, not {text!r}")
+    return value
+
+
+def _scan_record(item: Classified, unsupported_format: bool) -> dict:
+    """One scan candidate. Schema: README.md, "`btrfska scan` output"."""
+    record = item.record
+    return {
+        "record": "node",
+        "unsupported_format": unsupported_format,
+        "physical": record.physical,
+        "bytenr": record.bytenr,
+        "bytenr_mapped": record.bytenr_mapped,
+        "maps_here": record.maps_here,
+        "generation": record.generation,
+        "owner": record.owner,
+        "level": record.level,
+        "nritems": record.nritems,
+        "valid": record.valid,
+        "checks": dict.fromkeys(CHECK_NAMES) | {check.name: check.ok for check in record.checks},
+        "problems": [
+            *record.problems,
+            *(f"{check.name}: {check.detail}" for check in record.checks if check.ok is False),
+        ],
+        "region": asdict(record.region),
+        "status": item.status,
+        "orphan": item.orphan,
+        "outside_map": item.outside_map,
+        "legacy_orphan": item.legacy_orphan,
+    }
+
+
+def cmd_scan(args: argparse.Namespace) -> int:
+    """Scan for tree blocks and classify them; the summary goes to stderr with --json."""
+    stream = sys.stderr if args.json else sys.stdout
+    with open_image(args.image) as img:
+        fs = _open_checked(img, args)
+        if fs is None:
+            return EXIT_REFUSED
+        result = scan_image(img, fs, full_sweep=args.full_sweep, workers=args.workers)
+    if args.json:
+        for item in result.classified:
+            record = _scan_record(item, fs.unsupported_format)
+            print(json.dumps(record, separators=(",", ":")))
+
+    plan, s, ctx = result.plan, result.summary, fs.reader.ctx
+    probed = sum(region.end - region.start for region in plan.regions)
+    lines = [
+        f"btrfska scan: {'full sweep' if plan.full_sweep else 'targeted'}, "
+        f"{len(plan.regions)} regions, {probed} bytes probed at {ctx.sectorsize}-byte alignment",
+        *(f"skipped: {r.kind} {r.start}-{r.end}" for r in plan.skipped),
+        f"candidates: {s['candidates']} (valid {s['valid']}, invalid {s['invalid']})",
+        f"live: {s['live']}",
+        f"orphans: {s['orphans']} (backup_reachable {s['backup_reachable']}, "
+        f"unreferenced {s['unreferenced']})",
+        f"outside current chunk map: {s['outside_map']} valid nodes "
+        f"({s['outside_map_orphans']} orphans)",
+        f"header bytenr not mapping to the node's physical offset: {s['bytenr_elsewhere']} "
+        "valid nodes",
+        f"legacy-compatible orphans (csum ok, generation < {ctx.generation}, nodesize-aligned): "
+        f"{s['legacy_orphans']} ({s['legacy_orphans_outside_map']} outside current chunk map)",
+        f"extent tree: {s['extent_tree']} tree blocks; reached only by walks: {s['walk_only']}; "
+        f"listed only by the extent tree: {s['extent_tree_only']}",
+    ]
+    for row in s["regions"]:
+        region = row["region"]
+        origin = "" if region.chunk is None else f" (chunk {region.chunk} stripe {region.stripe})"
+        lines.append(
+            f"region {region.kind} {region.start}-{region.end}{origin}: "
+            f"candidates {row['candidates']}, valid {row['valid']}, live {row['live']}, "
+            f"orphans {row['orphans']}"
+        )
+    lines += [f"problem: {problem}" for problem in (*plan.problems, *result.reach.problems)]
+    for line in lines:
+        print(line, file=stream)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="btrfska",
@@ -422,6 +505,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue past unsupported or unknown incompat features (records are flagged)",
     )
     cat_cmd.set_defaults(func=cmd_cat)
+
+    scan_cmd = sub.add_parser(
+        "scan",
+        help="scan the image for tree blocks and classify them live, backup-reachable or orphaned",
+        description=(
+            "Probe every sector-aligned offset of the typed chunk regions and unmapped gaps for "
+            "tree blocks of this filesystem, validate each candidate and classify it against the "
+            "walks of the current state and the backup roots. A summary goes to stdout, or to "
+            "stderr with --json."
+        ),
+    )
+    scan_cmd.add_argument("image", help="path to a raw Btrfs image")
+    scan_cmd.add_argument(
+        "--full-sweep",
+        action="store_true",
+        help="probe DATA chunks too (everything except the boot area and superblock copies)",
+    )
+    scan_cmd.add_argument(
+        "--workers",
+        type=_workers,
+        default=1,
+        help=f"worker processes, 1 to {MAX_WORKERS} (default 1)",
+    )
+    scan_cmd.add_argument(
+        "--json", action="store_true", help="one JSON line per candidate node on stdout"
+    )
+    scan_cmd.add_argument(
+        "--allow-unsupported",
+        action="store_true",
+        help="continue past unsupported or unknown incompat features (records are flagged)",
+    )
+    scan_cmd.set_defaults(func=cmd_scan)
     return parser
 
 
