@@ -330,13 +330,17 @@ applicable. Every record has `record` (its type) and `unsupported_format`
     - `status`: `found`, `skipped` (a ROOT_ITEM naming the root tree itself
       is not followed), `not_scanned` (a read through the current chunk map
       is valid but the scan plan skipped that range), `changed` (the bytes no
-      longer match the scan record) or a failure class;
+      longer match the scan record), `unchecked` (beyond the state's first
+      256 missing blocks, not read) or a failure class;
     - `blocks`, `missing`: the tree's distinct blocks found, and referenced
       but not found.
   - `root_tree_blocks`, `root_tree_missing`: the same for the root tree.
   - `found`, `referenced`, `completeness`: the state totals.
   - `missing`: an object mapping each status of the missing blocks to its
-    count.
+    count. A state walk reads and classifies at most 256 distinct missing
+    blocks; `unchecked` counts the further missing pointers without reading
+    them. That count is not de-duplicated, so `referenced` is then an upper
+    bound and `completeness` a lower one.
   - `chunk_root`: `null` when unknown, else an object:
     - `bytenr`, `generation`, `level`;
     - `source`: `current` or `backup:GEN` when those name the state, else
@@ -392,7 +396,19 @@ this order of precedence:
 - `overwritten`: no tree block of this filesystem is there.
 - `zeroed`: the copy reads as zeros, for example trimmed by discard.
 - `unreadable`: beyond the image end or on a missing device.
-- `unmapped`: the current chunk map places the address nowhere.
+- `unmapped`: no chunk map places the address. For `roots`, neither the
+  current chunk map nor the state's own chunk items place it, and no invalid
+  scanned copy carries its bytenr and generation.
+
+In `roots`, a missing block is classified from every source that has it, and
+the class earliest in the list above wins:
+- a read through the current chunk map;
+- when the current map does not place the address, a read through the
+  state's own chunk items, so a block of a pre-balance state is read where
+  that state had it;
+- up to 16 invalid scanned copies whose header carries the block's bytenr and
+  generation, checked against what the referrer expects. A present but
+  invalid block is therefore `corrupt` or `mismatch`, not `unmapped`.
 
 ## Tests and lint
 

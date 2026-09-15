@@ -660,7 +660,7 @@ ROOTS_TREE_KEYS = {
     "missing",
 }  # fmt: skip
 ROOTS_CHUNK_ROOT_KEYS = {"bytenr", "generation", "level", "source", "differs_from_current"}
-ROOTS_VALUES = {"found", "skipped", "not_scanned", "changed", "inferred", "current"}
+ROOTS_VALUES = {"found", "skipped", "not_scanned", "changed", "unchecked", "inferred", "current"}
 
 
 @pytest.mark.sandbox
