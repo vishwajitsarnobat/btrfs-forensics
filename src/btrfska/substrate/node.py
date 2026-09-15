@@ -12,7 +12,12 @@ Checks, in `CHECK_NAMES` order (kernel v7.0 references):
   volumes.c:734-740);
 - chunk_tree_uuid: equals the chunk root header's, which the kernel records at mount
   (disk-io.c:3487-3489);
-- generation: not newer than the superblock generation;
+- generation: not newer than the superblock generation. In a log context (`Expect.log`, set only
+  for trees reached from the superblock's log_root) exactly superblock generation + 1: the log is
+  written in the running transaction (transaction.c:392-393, extent-tree.c:5306), whose previous
+  transaction's superblock is on disk before the log's (tree-log.c:3554-3580,
+  transaction.c:2535-2581), and the kernel reads the log root with transid generation + 1
+  (disk-io.c:2017-2019);
 - level: below BTRFS_MAX_LEVEL (disk-io.c:381-386) and equal to the expected level (l.404-409);
 - nritems: leaf items fit in the block; an internal node holds 1..ptrs-per-block
   (tree-checker.c:2199-2205); leaves of trees that are never empty hold items (l.2047-2080);
@@ -21,7 +26,9 @@ Checks, in `CHECK_NAMES` order (kernel v7.0 references):
   item headers (tree-checker.c:2094-2150); node keys ascending, block pointers non-zero and
   sector-aligned (l.2209-2231);
 - owner: btrfs_check_eb_owner (tree-checker.c:2247-2297): exact for non-subvolume trees, any
-  subvolume owner for subvolume trees (shared snapshot blocks);
+  subvolume owner for subvolume trees (shared snapshot blocks). The kernel skips log and reloc
+  trees (l.2270); btrfska checks log trees exactly, since every log block is allocated with owner
+  BTRFS_TREE_LOG_OBJECTID, -6 (btrfs_tree.h:92; disk-io.c:861-867, 887; ctree.c:520);
 - parent_generation: equal to the parent pointer's generation (disk-io.c:410-417, "parent transid
   verify failed"). A newer block means the address was rewritten after the parent was written;
 - first_key: the first key equals the parent pointer's key (disk-io.c:418-436).
@@ -105,6 +112,7 @@ class Expect:
     owner: int | None = None
     generation: int | None = None
     first_key: Key | None = None
+    log: bool = False  # the block belongs to a log tree anchored at the superblock's log_root
 
 
 NO_EXPECTATIONS = Expect()
@@ -198,7 +206,7 @@ def is_subvolume_tree(objectid: int) -> bool:
 
 
 def _owner_ok(expected: int | None, owner: int) -> bool | None:
-    skipped = (None, 0, ondisk.TREE_LOG_OBJECTID, ondisk.TREE_RELOC_OBJECTID)
+    skipped = (None, 0, ondisk.TREE_RELOC_OBJECTID)
     if expected in skipped:  # the kernel cannot check these either
         return None
     if is_subvolume_tree(expected):
@@ -262,11 +270,19 @@ def check_block(block, ctx: NodeContext, logical: int | None, expect: Expect) ->
         f"chunk_tree_uuid {header['chunk_tree_uuid'].hex()} != {ctu and ctu.hex()}",
     )
     generation = header["generation"]
-    record(
-        "generation",
-        generation <= ctx.generation,
-        f"generation {generation} > superblock generation {ctx.generation}",
-    )
+    if expect.log:
+        record(
+            "generation",
+            generation == ctx.generation + 1,
+            f"generation {generation} != superblock generation + 1 ({ctx.generation + 1}), "
+            "required for a log tree block",
+        )
+    else:
+        record(
+            "generation",
+            generation <= ctx.generation,
+            f"generation {generation} > superblock generation {ctx.generation}",
+        )
 
     level = header["level"]
     if level >= ondisk.MAX_LEVEL:

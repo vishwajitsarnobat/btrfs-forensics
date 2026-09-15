@@ -77,6 +77,23 @@ def test_walk_is_depth_first_in_key_order_with_hop_provenance():
     assert checks["level"] is True and checks["owner"] is True
 
 
+def test_the_log_context_reaches_every_child_and_nothing_else_accepts_log_generations():
+    log = ondisk.TREE_LOG_OBJECTID
+    blocks = {
+        ROOT: make_node(
+            ROOT, level=1, generation=101, owner=log,
+            ptrs=[((256, INODE, 0), A, 101), ((300, INODE, 0), B, 101)],
+        ),
+        A: leaf_a(generation=101, owner=log),
+        B: leaf_b(generation=101, owner=log),
+    }  # fmt: skip
+    with tree_reader(blocks) as reader:
+        in_log = list(walk(reader, ROOT, Expect(level=1, owner=log, generation=101, log=True)))
+        outside = list(walk(reader, ROOT, Expect(level=1, owner=log, generation=101)))
+    assert [(v.node.logical, v.node.valid) for v in in_log] == [(ROOT, True), (A, True), (B, True)]
+    assert [(v.node.logical, v.node.valid) for v in outside] == [(ROOT, False)]
+
+
 def test_child_newer_than_its_parent_pointer_is_invalid():
     visits = run({B: leaf_b(generation=10)})
     child = visits[2].node
