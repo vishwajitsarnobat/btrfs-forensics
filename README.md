@@ -8,12 +8,17 @@ goal is to catalog all of it, with provenance and confidence, and answer what
 existed, when, what changed, what can be recovered, and whether anything was
 hidden.
 
-**Status:** M1a (trust foundations). `btrfska info IMAGE` validates every
+**Status:** M1b (validated tree walking). `btrfska info IMAGE` validates every
 superblock copy (all four checksum types), selects the best one, reports
 disagreements, backup roots by generation, and refuses unsupported or unknown
 incompat features (exit 2, `UNSUPPORTED_INCOMPAT <name>`; override with
-`--allow-unsupported`). Tree walking and file recovery come next. The earlier
-prototype is frozen, still runnable, under `legacy/`.
+`--allow-unsupported`). `btrfska walk IMAGE --root {current,backup:GEN,bytenr:N}
+[--tree fs|root|chunk|extent|dev|csum|ID]` walks one tree through the chunk
+map and prints one JSON line per item. Each line carries the root it was
+reached from and the validation record of every physical copy (DUP mirrors
+included); invalid nodes are reported instead of items. File content
+recovery comes next. The earlier prototype is frozen, still runnable, under
+`legacy/`.
 
 **Licence:** Apache-2.0 (see `LICENSE`).
 
