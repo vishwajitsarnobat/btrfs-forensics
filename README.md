@@ -8,17 +8,25 @@ goal is to catalog all of it, with provenance and confidence, and answer what
 existed, when, what changed, what can be recovered, and whether anything was
 hidden.
 
-**Status:** M1b (validated tree walking). `btrfska info IMAGE` validates every
-superblock copy (all four checksum types), selects the best one, reports
-disagreements, backup roots by generation, and refuses unsupported or unknown
-incompat features (exit 2, `UNSUPPORTED_INCOMPAT <name>`; override with
-`--allow-unsupported`). `btrfska walk IMAGE --root {current,backup:GEN,bytenr:N}
-[--tree fs|root|chunk|extent|dev|csum|ID]` walks one tree through the chunk
-map and prints one JSON line per item. Each line carries the root it was
-reached from and the validation record of every physical copy (DUP mirrors
-included); invalid nodes are reported instead of items. File content
-recovery comes next. The earlier prototype is frozen, still runnable, under
-`legacy/`.
+**Status:** M1 done (substrate trust layer). Scanning for unreferenced
+metadata (M2) comes next. The earlier prototype is frozen, still runnable,
+under `legacy/`.
+- `btrfska info IMAGE` validates every superblock copy (all four checksum
+  types), selects the best one, and reports disagreements and the backup
+  roots by generation. It refuses unsupported or unknown incompat features
+  (exit 2, `UNSUPPORTED_INCOMPAT <name>`; override with
+  `--allow-unsupported`).
+- `btrfska walk IMAGE --root {current,backup:GEN,bytenr:N}
+  [--tree fs|root|chunk|extent|dev|csum|ID]` walks one tree through the chunk
+  map and prints one JSON line per item. Each line carries the root it was
+  reached from and the validation record of every physical copy (DUP mirrors
+  included); invalid nodes are reported instead of items.
+- `btrfska cat IMAGE --inode N [--root …] [--tree fs|ID]` reads one file of
+  the current state, a backup root, a subvolume or a snapshot. It handles
+  inline, regular and prealloc extents and holes, and zlib, zstd and LZO
+  compression (LZO through btrfska's own bounds-checked decoder). The bytes
+  go to stdout only when every extent reads, with a provenance record per
+  extent on stderr. Data checksums are not verified yet (M6).
 
 **Licence:** Apache-2.0 (see `LICENSE`).
 
@@ -134,7 +142,8 @@ An `extent` record adds:
   `lzo_framing` or `lzo_<decoder error>`.
 - `problems`: findings that do not change the bytes, such as a divergent
   mirror, non-zero bytes after a compressed stream or past `ram_bytes`, or
-  clipping to the inode size.
+  an extent reaching past the sector that holds the end of the file (it is
+  clipped to the inode size).
 
 The `file` record adds `size` (the inode size, `null` without an
 INODE_ITEM), `complete`, `extents` (the number of extent records), `errors`
