@@ -168,13 +168,23 @@ def residency(img) -> float:
     return float((np.frombuffer(vector, dtype=np.uint8) & 1).mean())
 
 
-def one_run(mode: str, cache: str, ctx) -> dict:
+def read_bytes() -> int:
+    """Bytes this process caused to be fetched from storage (/proc/self/io read_bytes)."""
+    for line in Path("/proc/self/io").read_text().splitlines():
+        if line.startswith("read_bytes:"):
+            return int(line.split()[1])
+    raise OSError("read_bytes missing from /proc/self/io")
+
+
+def one_run(mode: str, cache: str, ctx, path: Path = IMAGE) -> dict:
     region = None
-    with open_image(IMAGE) as img:
+    allocated = path.stat().st_blocks * 512
+    with open_image(path) as img:
         region = Region(0, img.size, "bench")
         if cache == "cold":
             os.posix_fadvise(img.fd, 0, 0, os.POSIX_FADV_DONTNEED)
         resident = residency(img)
+        io_before = read_bytes()
         wall, cpu = time.perf_counter(), time.process_time()
         hits = valid = 0
         if mode == "prefilter":
@@ -185,6 +195,7 @@ def one_run(mode: str, cache: str, ctx) -> dict:
                 hits += 1
                 valid += record.valid
         wall, cpu = time.perf_counter() - wall, time.process_time() - cpu
+        device_read = read_bytes() - io_before
         size = img.size
     return {
         "mode": mode,
@@ -194,6 +205,9 @@ def one_run(mode: str, cache: str, ctx) -> dict:
         "cpu_s": round(cpu, 3),
         "mb_per_s": round(size / 1e6 / wall, 1),
         "mib_per_s": round(size / MIB / wall, 1),
+        # Non-hole bytes per second: holes read as zeros without device I/O.
+        "allocated_mb_per_s": round(allocated / 1e6 / wall, 1),
+        "device_read_mb": round(device_read / 1e6, 1),
         "hits": hits,
         "valid": valid,
     }
@@ -267,11 +281,137 @@ def profile(mode: str) -> str:
     return text
 
 
+def allocated_table() -> str:
+    """The headline cells again as non-hole bytes per second, from results.json and image.json."""
+    result = json.loads((OUT / "results.json").read_text())
+    allocated = result["image"]["allocated_bytes"]
+    lines = [
+        "| Mode | Cache | N | image MB/s median (range) | allocated MB/s median (range) |",
+        "|---|---|---|---|---|",
+    ]
+    for s in result["summary"]:
+        rows = [r for r in result["rows"] if (r["mode"], r["cache"]) == (s["mode"], s["cache"])]
+        alloc = spread([allocated / 1e6 / r["wall_s"] for r in rows])
+        cells = f"{_cell(s['mb_per_s'])} | {_cell(alloc)}"
+        lines.append(f"| {s['mode']} | {s['cache']} | {len(rows)} | {cells} |")
+    return f"allocated bytes: {allocated} of {result['image']['params']['size']}\n" + "\n".join(
+        lines
+    )
+
+
+# ---------------------------------------------------------------------------
+# Density sweep: 1 GiB images at 0 %, 10 % and 100 % tree-block density
+# ---------------------------------------------------------------------------
+SWEEP_SIZE = GIB
+SWEEP_DENSITIES = (0, 10, 100)  # percent of 16 KiB slots holding a tree block
+SWEEP_CORRUPT = 0.01
+
+
+def sweep_image(density: int) -> Path:
+    return OUT / f"sweep_{density}.img"
+
+
+def sweep_generate(verify: bool) -> dict:
+    """Dense (non-sparse) images: each 16 KiB slot holds a pool tree block with probability
+    density %, else random bytes. Seeded per density (1000 + density)."""
+    pool, _ = node_pool()
+    nodesize = len(pool[0])
+    records = {}
+    for density in SWEEP_DENSITIES:
+        rng, digest = random.Random(1000 + density), hashlib.sha256()
+        nodes = corrupt = 0
+        started = time.perf_counter()
+        target = None if verify else open(sweep_image(density), "wb")  # noqa: SIM115
+        try:
+            for _ in range(SWEEP_SIZE // nodesize):
+                if rng.random() * 100 < density:
+                    block = bytearray(pool[rng.randrange(len(pool))])
+                    if rng.random() < SWEEP_CORRUPT:
+                        block[rng.randrange(0x30, nodesize)] ^= 0xFF
+                        corrupt += 1
+                    block, nodes = bytes(block), nodes + 1
+                else:
+                    block = rng.randbytes(nodesize)
+                digest.update(block)
+                if target is not None:
+                    target.write(block)
+        finally:
+            if target is not None:
+                target.close()
+        records[str(density)] = {
+            "density_percent": density,
+            "size": SWEEP_SIZE,
+            "seed": 1000 + density,
+            "corrupt": corrupt,
+            "nodes": nodes,
+            "sha256": digest.hexdigest(),
+            "seconds": round(time.perf_counter() - started, 1),
+        }
+        if not verify:
+            records[str(density)]["allocated_bytes"] = sweep_image(density).stat().st_blocks * 512
+    if not verify:
+        (OUT / "sweep_images.json").write_text(json.dumps(records, indent=1) + "\n")
+    return records
+
+
+def sweep_run(runs: int) -> dict:
+    """N rounds; each round runs cold then warm full validation on 0 %, 10 %, 100 %, in order."""
+    images = json.loads((OUT / "sweep_images.json").read_text())
+    _, ctx = node_pool()
+    rows = []
+    for number in range(1, runs + 1):
+        for density in SWEEP_DENSITIES:
+            expected = images[str(density)]
+            for cache in ("cold", "warm"):
+                row = {"run": number, "density": density,
+                       **one_run("full", cache, ctx, sweep_image(density))}  # fmt: skip
+                if (row["hits"], row["valid"]) != (
+                    expected["nodes"],
+                    expected["nodes"] - expected["corrupt"],
+                ):
+                    raise AssertionError(f"counts differ from the generator: {row}")
+                rows.append(row)
+                print(json.dumps(row), flush=True)
+    summary = []
+    for density in SWEEP_DENSITIES:
+        for cache in ("cold", "warm"):
+            selected = [r for r in rows if (r["density"], r["cache"]) == (density, cache)]
+            keys = ("mb_per_s", "allocated_mb_per_s", "wall_s", "cpu_s", "resident_before",
+                    "device_read_mb")  # fmt: skip
+            summary.append(
+                {"density": density, "cache": cache, "n": len(selected),
+                 **{key: spread([r[key] for r in selected]) for key in keys},
+                 "hits": sorted({r["hits"] for r in selected}),
+                 "valid": sorted({r["valid"] for r in selected})}
+            )  # fmt: skip
+    result = {"images": images, "affinity": sorted(os.sched_getaffinity(0)), "rows": rows,
+              "summary": summary}  # fmt: skip
+    (OUT / "sweep_results.json").write_text(json.dumps(result, indent=1) + "\n")
+    return result
+
+
+def sweep_table(result: dict) -> str:
+    lines = [
+        "| Density | Cache | N | MB/s median (range) | Wall s | CPU s | Pages cached before run "
+        "| Device read MB | Hits | Valid |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for s in result["summary"]:
+        lines.append(
+            f"| {s['density']} % | {s['cache']} | {s['n']} | {_cell(s['mb_per_s'])} "
+            f"| {_cell(s['wall_s'], 2)} | {_cell(s['cpu_s'], 2)} "
+            f"| {_cell(s['resident_before'], 4)} | {_cell(s['device_read_mb'])} "
+            f"| {', '.join(map(str, s['hits']))} | {', '.join(map(str, s['valid']))} |"
+        )
+    return "\n".join(lines)
+
+
 def clean() -> None:
-    if IMAGE.exists():
-        with open_image(IMAGE) as img:
-            os.posix_fadvise(img.fd, 0, 0, os.POSIX_FADV_DONTNEED)
-        IMAGE.unlink()
+    for path in (IMAGE, *(sweep_image(density) for density in SWEEP_DENSITIES)):
+        if path.exists():
+            with open_image(path) as img:
+                os.posix_fadvise(img.fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            path.unlink()
 
 
 def main() -> int:
@@ -290,7 +430,12 @@ def main() -> int:
     bench.add_argument("--cpu", type=int, help="pin this process to one logical CPU")
     prof = sub.add_parser("profile")
     prof.add_argument("--mode", choices=("prefilter", "full"), default="full")
-    sub.add_parser("clean")
+    sub.add_parser("allocated", help="headline cells as non-hole bytes per second")
+    sweep_gen = sub.add_parser("sweep-generate", help="1 GiB images at 0, 10 and 100 %% density")
+    sweep_gen.add_argument("--verify", action="store_true", help="recompute hashes; write nothing")
+    sweep_bench = sub.add_parser("sweep-run", help="cold and warm full scans of the sweep images")
+    sweep_bench.add_argument("--runs", type=int, default=5)
+    sub.add_parser("clean", help="delete the 10 GiB image and the sweep images")
     args = parser.parse_args()
 
     OUT.mkdir(parents=True, exist_ok=True)
@@ -318,6 +463,19 @@ def main() -> int:
         print(table(run(args.runs)))
     elif args.command == "profile":
         print(profile(args.mode))
+    elif args.command == "allocated":
+        print(allocated_table())
+    elif args.command == "sweep-generate":
+        records = sweep_generate(args.verify)
+        print(json.dumps(records, indent=1))
+        if args.verify:
+            stored = json.loads((OUT / "sweep_images.json").read_text())
+            if any(stored[k]["sha256"] != records[k]["sha256"] for k in records):
+                print("verify: MISMATCH with sweep_images.json", file=sys.stderr)
+                return 1
+            print("verify: identical to sweep_images.json")
+    elif args.command == "sweep-run":
+        print(sweep_table(sweep_run(args.runs)))
     else:
         clean()
     return 0
