@@ -58,15 +58,18 @@ DERIVED = [
 ]
 
 
-def test_manifest_lists_every_m1_image():
+M2 = ["m2_logtree"]
+
+
+def test_manifest_lists_every_m1_and_m2_image():
     rows = manifest_rows()
-    for name in [*HEALTHY, *DERIVED]:
+    for name in [*HEALTHY, *DERIVED, *M2]:
         assert name in rows
         assert re.fullmatch(r"[0-9a-f]{64}", rows[name]["sha256"])
         assert rows[name]["command"]
 
 
-@pytest.mark.parametrize("name", [*HEALTHY, *DERIVED])
+@pytest.mark.parametrize("name", [*HEALTHY, *DERIVED, *M2])
 def test_local_image_matches_manifest_sha256(name):
     path = image(name)
     with open_image(path) as img:
