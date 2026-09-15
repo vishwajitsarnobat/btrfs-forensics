@@ -131,6 +131,27 @@ def test_end_marker_alone_is_an_empty_stream():
     assert decompress(b"\x11\x00\x00", 0) == b""
 
 
+@pytest.mark.parametrize(
+    "stream",
+    [
+        "13 41 42 15 00 00",  # 2 literals, then 0001 0 101 at distance 16384: length 7
+        "13 41 42 10 01 00 00",  # the same with a zero-run length: 7 + 1 + 2 = 10
+        "13 41 42 12 00 00",  # length 4
+        "13 41 42 17 00 00",  # length 9, the largest 3-bit length
+    ],
+)
+def test_end_marker_with_a_length_other_than_3_is_an_error(stream):
+    """Distance 16384 ends the stream only as `11 00 00`, copy length 3 (kernel v7.0
+    lib/lzo/lzo1x_decompress_safe.c:208 and :274 return LZO_E_ERROR otherwise; lzokay.cpp:284)."""
+    with pytest.raises(LzoError) as exc:
+        decompress(bytes.fromhex(stream.replace(" ", "")), 4096)
+    assert exc.value.kind == "invalid_end_marker"
+
+
+def test_end_marker_after_literals_is_accepted_with_length_3():
+    assert decompress(bytes.fromhex("134142110000"), 4096) == b"AB"
+
+
 def test_version_byte_streams_are_refused():
     """First byte 17 with at least 5 bytes announces a bitstream version (lzo.rst): LZO-RLE."""
     with pytest.raises(LzoError) as exc:
