@@ -92,6 +92,57 @@ Keys added by each record type:
   - `problems`: for example, a last key not below the parent's next key, or
     a pointer to a block already reached, which is not followed.
 
+### `btrfska cat` output
+
+`btrfska cat IMAGE --inode N [--root current|backup:GEN|bytenr:N] [--tree fs|ID]`
+writes the inode's bytes to stdout, and nothing else. They are written only
+when every extent reads; otherwise stdout stays empty and the exit status is
+1. The command opens no file other than the image. stderr carries one JSON
+object per line: an `extent` record per extent in file order (implicit holes
+included), then one `file` record, then a one-line summary or the error.
+
+Both record types have:
+- `record`: `extent` or `file`.
+- `root`: as in `walk` (`source`, `tree`, `tree_id`, `bytenr`, `level`,
+  `generation`, `via`).
+- `inode`: the inode number read.
+- `unsupported_format`: `true` when `--allow-unsupported` overrode the gate.
+
+An `extent` record adds:
+- `kind`: `inline`, `regular`, `prealloc`, `hole` (an explicit hole:
+  `disk_bytenr` 0), `implicit_hole` (no item covers the range) or `invalid`.
+- `file_offset`, `length`: the file range this extent supplies, clipped to
+  the inode size.
+- `leaf`, `slot`: where the EXTENT_DATA item was read (`null` for implicit
+  holes).
+- `generation`, `ram_bytes`, `disk_bytenr`, `disk_num_bytes`, `offset`,
+  `num_bytes`: the item's fields (`null` when the kind has none).
+- `compression`: `none`, `zlib`, `lzo`, `zstd` or `type N`.
+- `chunk_map`: the source of the chunk map the data was read through.
+- `ranges`: the logical ranges read, split at chunk ends and 64 KiB stripe
+  boundaries. Each has `logical`, `length` and `copies`; each copy has
+  `mirror`, `devid`, `physical`, `readable`, `used` (the copy whose bytes
+  were used, the first readable one) and `matches` (whether it equals the
+  used copy; `null` for the used copy and unreadable copies).
+- `decoded_bytes`: the decompressor's output length. A compressed inline
+  extent decodes a whole sector, more than `ram_bytes`.
+- `sha256`: of the bytes supplied (`null` for zeros and failures).
+- `error_kind`, `error_detail`: why the extent could not be read (`null` and
+  `""` when it was): `unmapped`, `unreadable`, `malformed_item`,
+  `invalid_extent`, `unsupported_encoding`, `unsupported_compression`,
+  `corrupt_stream`, `truncated_stream`, `output_overrun`, `short_output`,
+  `lzo_framing` or `lzo_<decoder error>`.
+- `problems`: findings that do not change the bytes, such as a divergent
+  mirror, non-zero bytes after a compressed stream or past `ram_bytes`, or
+  clipping to the inode size.
+
+The `file` record adds `size` (the inode size, `null` without an
+INODE_ITEM), `complete`, `extents` (the number of extent records), `errors`
+(file-level failures: an unreadable tree, a missing inode, a directory,
+overlapping extents) and `problems` (such as gaps on a filesystem without
+NO_HOLES). Decoding success is not evidence of correct content: LZO has no
+checksum and data checksums are verified from M6 on.
+
 ## Tests and lint
 
 ```sh
