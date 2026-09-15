@@ -379,6 +379,7 @@ def _scan_record(item: Classified, unsupported_format: bool) -> dict:
         "orphan": item.orphan,
         "outside_map": item.outside_map,
         "legacy_orphan": item.legacy_orphan,
+        "log_tree": item.log_tree,
     }
 
 
@@ -390,17 +391,20 @@ def cmd_scan(args: argparse.Namespace) -> int:
         if fs is None:
             return EXIT_REFUSED
         result = scan_image(img, fs, full_sweep=args.full_sweep, workers=args.workers)
-    if args.json:
+        # Streamed: one candidate in memory at a time (classify.py, "Memory").
         for item in result.classified:
-            record = _scan_record(item, fs.unsupported_format)
-            print(json.dumps(record, separators=(",", ":")))
+            if args.json:
+                record = _scan_record(item, fs.unsupported_format)
+                print(json.dumps(record, separators=(",", ":")))
 
     plan, s, ctx = result.plan, result.summary, fs.reader.ctx
     probed = sum(region.end - region.start for region in plan.regions)
+    hint = "full sweep" if plan.full_sweep else "use --full-sweep to include reallocated ranges"
     lines = [
         f"btrfska scan: {'full sweep' if plan.full_sweep else 'targeted'}, "
         f"{len(plan.regions)} regions, {probed} bytes probed at {ctx.sectorsize}-byte alignment",
         *(f"skipped: {r.kind} {r.start}-{r.end}" for r in plan.skipped),
+        f"skipped as DATA: {s['skipped_data_bytes']} bytes ({hint})",
         f"candidates: {s['candidates']} (valid {s['valid']}, invalid {s['invalid']})",
         f"live: {s['live']}",
         f"orphans: {s['orphans']} (backup_reachable {s['backup_reachable']}, "
@@ -413,6 +417,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         f"{s['legacy_orphans']} ({s['legacy_orphans_outside_map']} outside current chunk map)",
         f"extent tree: {s['extent_tree']} tree blocks; reached only by walks: {s['walk_only']}; "
         f"listed only by the extent tree: {s['extent_tree_only']}",
+        f"log tree: {s['log_tree_blocks']} blocks ({s['log_tree']} live copies)",
     ]
     for row in s["regions"]:
         region = row["region"]

@@ -5,18 +5,34 @@ import contextlib
 import io
 import json
 import os
+import re
+import shutil
+import struct
+import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from btrfska.scan.classify import Reachability, classify, scan_image, summarize
+from btrfska.scan.classify import Reachability, classify, scan_image, summarize, walk_root_set
 from btrfska.scan.kernel_numpy import NodeRecord
 from btrfska.scan.regions import Region
+from btrfska.substrate import ondisk
+from btrfska.substrate.chunks import Chunk, ChunkMap, Stripe
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
-from btrfska.substrate.node import CHECK_NAMES, Check
-from tests.helpers import REPO_ROOT, SCENARIOS, node_ctx, scratch_dir
+from btrfska.substrate.node import CHECK_NAMES, Check, NodeReader
+from btrfska.substrate.roots import RootSet, TreeRoot
+from tests.helpers import (
+    DEV_UUID,
+    REPO_ROOT,
+    SCENARIOS,
+    make_node,
+    node_ctx,
+    scratch_dir,
+    write_sparse_image,
+)
 
 LEGACY = json.loads(
     (Path(__file__).parent / "ground_truth" / "sandbox_legacy_scan.json").read_text()
@@ -44,6 +60,105 @@ def record(physical, bytenr=None, generation=10, csum=True, valid=True, region=G
     )
 
 
+LOG = ondisk.TREE_LOG_OBJECTID
+ROOT_ITEM = ondisk.ITEM_KEYS["ROOT_ITEM"]
+INODE = ((256, ondisk.ITEM_KEYS["INODE_ITEM"], 0), bytes(160))
+
+
+def root_item(bytenr, generation, level=0):
+    data = bytearray(ondisk.ROOT_ITEM.size)
+    for name, fmt, value in (
+        ("generation", "<Q", generation),
+        ("generation_v2", "<Q", generation),
+        ("bytenr", "<Q", bytenr),
+        ("level", "<B", level),
+    ):
+        struct.pack_into(fmt, data, ondisk.ROOT_ITEM.offset(name), value)
+    return bytes(data)
+
+
+def test_the_log_tree_is_walked_in_log_context_from_the_superblock_only():
+    mib = 1 << 20
+    root, log_root, sub_log, hostile, fake, not_log = (mib + i * 4096 for i in range(6))
+    blocks = {
+        # A ROOT_ITEM keyed like a log root inside the current root tree: no log context.
+        root: make_node(root, owner=1, generation=100,
+                        items=[((LOG, ROOT_ITEM, 5), root_item(fake, 101))]),
+        fake: make_node(fake, owner=LOG, generation=101, items=[INODE]),
+        # The log root tree: only ROOT_ITEMs keyed (TREE_LOG, ROOT_ITEM, subvol) name subvolume
+        # logs (tree-log.c:7720-7744); a subvolume log's own leaves are not searched for roots.
+        log_root: make_node(log_root, owner=LOG, generation=101, items=[
+            ((5, ROOT_ITEM, 0), root_item(not_log, 101)),
+            ((LOG, ROOT_ITEM, 256), root_item(sub_log, 101)),
+        ]),
+        sub_log: make_node(sub_log, owner=LOG, generation=101,
+                           items=[INODE, ((LOG, ROOT_ITEM, 257), root_item(hostile, 101))]),
+        hostile: make_node(hostile, owner=LOG, generation=101, items=[INODE]),
+        not_log: make_node(not_log, owner=5, generation=101, items=[INODE]),
+    }  # fmt: skip
+    chunk = Chunk(mib, 15 * mib, ondisk.BLOCK_GROUP_FLAGS["METADATA"], (Stripe(1, mib, DEV_UUID),))
+    current = RootSet("current", 100, None, {"root": TreeRoot(1, root, 0, 100, "superblock")})
+    fields = {"log_root": log_root, "log_root_level": 0, "generation": 100}
+    with scratch_dir("test_scan_classify_") as d:
+        with open_image(write_sparse_image(d / "log.img", 16 * mib, blocks)) as img:
+            reader = NodeReader(img, ChunkMap("test", [chunk], {1: DEV_UUID}), node_ctx())
+            walked = walk_root_set(reader, current, fields)
+            without_log = walk_root_set(reader, current)
+    reached = {(root, root), (log_root, log_root), (sub_log, sub_log)}
+    assert walked.pairs == reached
+    assert walked.log_pairs == {(log_root, log_root), (sub_log, sub_log)}
+    assert walked.logicals == {root, fake, log_root, sub_log}
+    assert walked.log_logicals == {log_root, sub_log}
+    assert [p for p in walked.problems if str(fake) in p] == [
+        f"current: tree {LOG} node {fake} is invalid: mirror 1: generation: generation 101 > "
+        "superblock generation 100"
+    ]
+    assert without_log.pairs == {(root, root)} and without_log.log_pairs == set()
+
+
+def gen_failed(physical, generation=15):
+    """A scanned record whose only failed check is generation (header generation > sb)."""
+    detail = f"generation {generation} > superblock generation 14"
+    checks = tuple(
+        Check(name, name != "generation", detail if name == "generation" else "")
+        for name in CHECK_NAMES
+    )
+    return replace(record(physical, generation=generation), checks=checks, valid=False)
+
+
+def test_a_scanned_log_copy_is_live_only_when_the_log_walk_reached_that_copy():
+    pair = (9 << 20, 9 << 20)
+    reach = Reachability(
+        live=frozenset({pair}),
+        backup=frozenset(),
+        live_logical=frozenset({9 << 20}),
+        extent_tree=frozenset(),
+        problems=(),
+        log=frozenset({pair}),
+        log_logical=frozenset({9 << 20}),
+    )
+    records = [gen_failed(9 << 20), gen_failed(10 << 20), gen_failed(11 << 20, generation=16)]
+    result = list(classify(records, reach, MAPPED, CTX))
+    assert [(c.status, c.log_tree, c.record.valid) for c in result] == [
+        ("live", True, True),
+        ("invalid", False, False),
+        ("invalid", False, False),
+    ]
+    assert {c.name: c.ok for c in result[0].record.checks}["generation"] is True
+    summary = summarize(result, [GAP], reach)
+    assert (summary["live"], summary["log_tree"], summary["log_tree_blocks"]) == (1, 1, 1)
+    assert summary["walk_only"] == 0  # log blocks are never in the extent tree
+
+
+def test_classify_streams_records_without_materialising_them():
+    def records():
+        yield record(1 << 20)
+        raise AssertionError("classify read past the record it was asked for")
+
+    stream = classify(records(), Reachability.empty(), MAPPED, CTX)
+    assert next(stream).status == "unreferenced"
+
+
 def test_status_follows_reachability_and_never_counts_backups_as_live():
     reach = Reachability(
         live=frozenset({(9 << 20, 9 << 20)}),
@@ -59,7 +174,7 @@ def test_status_follows_reachability_and_never_counts_backups_as_live():
         record(12 << 20, valid=False, csum=False),
         record(13 << 20, bytenr=9 << 20),  # a stale copy claiming a live address
     ]
-    result = classify(records, reach, MAPPED, CTX)
+    result = list(classify(records, reach, MAPPED, CTX))
     assert [(c.status, c.orphan) for c in result] == [
         ("live", False),
         ("backup_reachable", True),
@@ -77,7 +192,7 @@ def test_outside_map_and_the_legacy_compatible_definition():
         record(10 << 20, csum=False, valid=False),
         record(11 << 20, csum=True, valid=False),  # csum ok, another check failed
     ]
-    result = classify(records, Reachability.empty(), MAPPED, CTX)
+    result = list(classify(records, Reachability.empty(), MAPPED, CTX))
     assert [c.outside_map for c in result] == [True, False, False, False, False]
     assert [c.legacy_orphan for c in result] == [True, False, False, False, True]
 
@@ -109,6 +224,12 @@ def test_summary_counts_per_class_and_region():
     ]
 
 
+def materialised(img, fs, **kw):
+    """A finished scan whose `classified` is a list (the stream is read while the image is open)."""
+    scan = scan_image(img, fs, **kw)
+    return replace(scan, classified=list(scan.classified))
+
+
 @pytest.fixture(scope="module")
 def sandbox_scans():
     path = REPO_ROOT / "sandbox.img"
@@ -117,7 +238,7 @@ def sandbox_scans():
     with open_image(path) as img:
         fs = open_filesystem(img)
         return {
-            mode: scan_image(img, fs, full_sweep=mode == "full") for mode in ("targeted", "full")
+            mode: materialised(img, fs, full_sweep=mode == "full") for mode in ("targeted", "full")
         }
 
 
@@ -178,6 +299,9 @@ def test_sandbox_scan_classes(sandbox_scans):
     assert summary["bytenr_elsewhere"] == 20
     assert (summary["legacy_orphans"], summary["legacy_orphans_outside_map"]) == (71, 21)
     assert (summary["extent_tree_only"], summary["walk_only"]) == (0, 0)
+    assert (summary["log_tree"], summary["log_tree_blocks"]) == (0, 0)
+    assert summary["skipped_data_bytes"] == 8388608
+    assert sandbox_scans["full"].summary["skipped_data_bytes"] == 0
 
 
 @pytest.mark.sandbox
@@ -230,6 +354,55 @@ def test_golden_legacy_offsets_match_a_live_legacy_run(sandbox_img):
 
 
 @pytest.mark.vm
+def test_m2_logtree_log_blocks_are_live_log_tree_copies():
+    path = SCENARIOS / "m2_logtree.img"
+    if not path.exists():
+        pytest.skip("m2_logtree.img absent")
+    with open_image(path) as img:
+        fs = open_filesystem(img)
+        scan = scan_image(img, fs)
+        classified = list(scan.classified)
+    assert (fs.fields["generation"], fs.fields["log_root"]) == (8, 30982144)
+    # btrfs inspect-internal dump-tree -t 18446744073709551610 (btrfs-progs v6.6.3): the log root
+    # tree leaf 30982144 names one subvolume log, leaf 30965760 (sv1, key offset 256); both are
+    # generation 9 = superblock + 1, owner TREE_LOG, one copy per METADATA|DUP stripe.
+    log = sorted(
+        (c.record.bytenr, c.record.generation, c.record.owner, c.status, c.record.valid)
+        for c in classified
+        if c.log_tree
+    )
+    assert log == [(30965760, 9, LOG, "live", True)] * 2 + [(30982144, 9, LOG, "live", True)] * 2
+    log_copies = {(c.record.bytenr, c.record.physical) for c in classified if c.log_tree}
+    assert log_copies == scan.reach.log
+    # The current state and its log walk cleanly; the oldest backup roots name reused blocks.
+    assert [p for p in scan.reach.problems if not p.startswith("backup:")] == []
+    # An earlier log commit of the same transaction (the first fsync) left its log root tree leaf
+    # 30932992 and sv1 log leaf 30949376 (4 items) behind, superseded by the second commit. The
+    # log walk does not reach them, so their generation 9 stays a failed check: invalid.
+    stale = sorted(
+        (c.record.bytenr, c.status, [k.name for k in c.record.checks if k.ok is False])
+        for c in classified
+        if c.record.generation == 9 and not c.log_tree
+    )
+    assert [(b, s, f) for b, s, f in stale] == [(30932992, "invalid", ["generation"])] * 2 + [
+        (30949376, "invalid", ["generation"])
+    ] * 2
+    live = {(c.record.bytenr, c.record.physical) for c in classified if c.status == "live"}
+    assert live == scan.reach.live
+    summary = scan.summary
+    assert (summary["log_tree"], summary["log_tree_blocks"]) == (4, 2)
+    assert (summary["walk_only"], summary["extent_tree_only"]) == (0, 0)
+    if shutil.which("btrfs"):
+        dump = subprocess.run(
+            ["btrfs", "inspect-internal", "dump-tree", "-t", str(LOG), str(path)],
+            capture_output=True, text=True, check=True,
+        ).stdout  # fmt: skip
+        named = {int(n) for n in re.findall(r"^leaf (\d+) items", dump, re.MULTILINE)}
+        named |= {int(n) for n in re.findall(r" bytenr (\d+) byte_limit", dump)}
+        assert named == scan.reach.log_logical
+
+
+@pytest.mark.vm
 @pytest.mark.parametrize("name", ["m1_xxhash", "m1_sha256_bgt", "m1_blake2b", "m1_lzo", "m1_zlib"])
 def test_generated_images_scan_finds_every_live_copy_and_the_full_sweep_agrees(name):
     path = SCENARIOS / f"{name}.img"
@@ -237,8 +410,8 @@ def test_generated_images_scan_finds_every_live_copy_and_the_full_sweep_agrees(n
         pytest.skip(f"{name}.img absent")
     with open_image(path) as img:
         fs = open_filesystem(img)
-        targeted = scan_image(img, fs)
-        full = scan_image(img, fs, full_sweep=True)
+        targeted = materialised(img, fs)
+        full = materialised(img, fs, full_sweep=True)
     live = {(c.record.bytenr, c.record.physical) for c in targeted.classified if c.status == "live"}
     assert live == targeted.reach.live
     assert targeted.reach.problems == ()
