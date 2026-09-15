@@ -36,18 +36,19 @@ re-checked against new prior art in research.md §10.1–§10.2):
 |---|---|---|
 | C1. **Btrfs** orphan-item & slack archaeology as a recovery source (beyond-`nritems` items, node slack, kernel ORPHAN_ITEM 0x30 resurrection) | G1 | Beyond Carving scans whole valid blocks only — deep leaf scanning is *their stated future work*; SecurityRonin only *lists* kernel ORPHAN_ITEMs. Node-slack recovery exists for **ReFS** (`forefst`, Bonnet 2026; Prade et al. 2020) — cited as the CoW analog, not claimed |
 | C2. Free-space-tree forensics: prove blocks were freed; overwrite-risk scoring | G2 | Zero tools, zero papers (re-swept 2026-09-15) |
-| C3. **Full-state, multi-source, per-inode lifecycle timelines**: diffs across backup roots *and* scan-discovered old roots *and* reconstructed orphan fragments → create/modify/rename/move/delete with content deltas | G3 | Beyond Carving diffs objectid *sets* over backup roots; SecurityRonin `recover_deleted()` diffs one backup FS_TREE against the current one. Both are existence-only and backup-root-bounded (≤ 4 generations); "diffing generations" per se is **not** claimed |
+| C3. **Full-state, multi-source, per-inode lifecycle timelines**: diffs across backup roots *and* scan-discovered old roots *and* reconstructed orphan fragments → create/modify/rename/move/delete with content deltas | G3 | Beyond Carving diffs objectid *sets* over the historical root trees it discovers by scanning the chunk-mapped tree regions, so it is **not** bounded by the backup roots (research.md §10.12, corrected 2026-09-15); SecurityRonin `recover_deleted()` is backup-root-bounded (all four backup slots, FS tree 5 only). Both are existence-only; neither "diffing generations" nor discovering roots beyond the backups is claimed per se |
 | C4. **Evidence-rule-derived confidence tiers** (Confirmed/Probable/Unattached) with a per-artifact provenance chain spanning anchored *and* unanchored artifacts, csum-tree-verified content | G4 | SecurityRonin has severity grades (no provenance, no evidence rules); Beyond Carving has an extent-resolvability taxonomy for anchored recoveries only; `forefst` has ReFS recoverability verdicts; X-Ways has a binary flag. None scores unanchored orphan/slack artifacts or records cross-mode provenance |
 | C5. Hiding detection targeting the Toolan & Humphries (FSI:DI 58:302198, 2026) + Schwietert & Hilgert technique lists, evaluated against fishy-generated images | G5 | Papers propose hiding; nobody ships a detector for those techniques. SecurityRonin's `BACKUP-ROOT-DIVERGENCE` and CRC-mismatch findings are a tamper-detection slice → cited |
 | C6. **Btrfs** orphaned/relocated-chunk forensics + historical chunk-map reconstruction; on remap-tree images, the stale remap tree as an explicit relocation log (experimental) | G6 | Our sandbox discovery (21/71 orphans outside chunk map); Beyond Carving future work. F2FS address-table rebuild (Oh & Hwang 2025) is the cited analog |
-| C7. First public btrfs deleted-file benchmark corpus (incl. discard and block-group-tree axes) + systematic tool benchmark | G8 | None exists (no btrfs at digitalcorpora/CFReDS; hide-and-seek dataset still offline) |
+| C7. First public btrfs *image* corpus with per-file ground truth spanning checksum, compression, discard and block-group-tree axes + systematic tool benchmark | G8 | No such image corpus found (no btrfs at digitalcorpora/CFReDS). Prior datasets are cited, not claimed away: Wani & Bhat 2018 (*Data in Brief*; in-article tables, no images) and Schwietert & Hilgert 2025 (hiding corpus with ground truth; repository offline) (research.md §5.1) |
 
 **Not building (exists elsewhere; reuse or benchmark instead):**
 - compression algorithms (stdlib `zlib` and `compression.zstd`; only the
   small LZO1X decoder is ours, §3.5) and a second general-purpose btrfs
   reader (dissect.btrfs serves as a test oracle, not a dependency);
-- old-root salvage (`btrfs restore`/find-root) and backup-root deleted-file
-  diffing (Beyond Carving, `SecurityRonin/btrfs-forensic`);
+- old-root salvage (`btrfs restore`/find-root), deleted-file listing from
+  historical roots found by scanning chunk-mapped tree regions (Beyond
+  Carving) and backup-root deleted-file diffing (`SecurityRonin/btrfs-forensic`);
 - unreferenced-subvolume restore (btrfscue v0.7 `recover`);
 - carving (PhotoRec);
 - chunk repair (chunk-recover, btrfs-rec);
@@ -953,7 +954,8 @@ scenario's final balance and short life (EXP-002 §6.5).
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.
-- FST forensics: parse FREE_SPACE_INFO/EXTENT/BITMAP (0xDD–0xDF); classify
+- FST forensics: parse FREE_SPACE_INFO/EXTENT/BITMAP (item keys 198–200,
+  0xC6–0xC8; kernel v7.0 `include/uapi/linux/btrfs_tree.h:266,272,280`); classify
   every recovered extent as free/allocated-now; overwrite-risk score that
   includes the image's discard mode as observed (§6.2 discard axis).
 - Confidence tiers (Confirmed/Probable/Unattached) computed from explicit,
@@ -1024,10 +1026,24 @@ scenario's final balance and short life (EXP-002 §6.5).
 
   Report recovery rate per band to validate/refute their heuristics on
   kernel 7.0.
-- **Beyond-4-generations test:** delete a file, then force >4 commits so it
-  falls outside the 4 backup roots; confirm anchored methods (Beyond
-  Carving's approach, `btrfs restore`, SecurityRonin `recover_deleted`) miss
-  it while our orphan-node scan recovers it (headline differentiator).
+- **Beyond-4-generations test** (redesigned 2026-09-15; research.md §10.12):
+  delete a file, then force > 4 commits so its last state falls outside the 4
+  backup roots. Variants separate two cases, and every recovered file is
+  labelled by source (backup root, discovered state inside the current map,
+  state outside it, unreferenced node, orphan item):
+  - **(a) reachable by scanning the current chunk map.** No balance or
+    reclaim after the deletion, so the old root-tree block and the trees it
+    names lie in ranges the current chunk map places. A Beyond Carving-style
+    scan (Algorithm 3, reimplemented and labelled as such) and
+    `btrfs-find-root` + `restore` can find it; backup-root-bounded tools
+    (SecurityRonin `recover_deleted`, `btrfs restore` without find-root)
+    should miss it. Expected result for us: parity, not novelty.
+  - **(b) only outside the current chunk map, or only from unreferenced
+    blocks.** A balance or reclaim relocates the chunks after the deletion,
+    or the old root-tree block is overwritten while the leaves naming the
+    file survive unreferenced. Only unmapped-gap (and full-sweep DATA)
+    scanning with historical chunk maps, or orphan-node and orphan-item
+    recovery, reaches it. This is the differentiator.
 - **Baseline harness** (scripted; each tool run read-only on a copy under
   `images/`, pinned version recorded):
   - `btrfs restore` (+find-root) from btrfs-progs ≥ 7.1, built rootless
@@ -1249,8 +1265,11 @@ one run of 15 (365/353/18/828), the async and sync rows never.
     method = layers 1–5 (validation layer included), evaluation = M7 +
     EXP records, related work = research.md §2/§4/§10.1–§10.2.
   - Positioning paragraph, three-way:
-    - Beyond Carving answers *"what was deleted?"* from ≤ 4 backup roots;
-    - SecurityRonin audits a volume and diffs one backup root;
+    - Beyond Carving answers *"what was deleted?"* from historical root trees
+      it finds by scanning the regions the current chunk map places
+      (research.md §10.12);
+    - SecurityRonin audits a volume and diffs the FS tree of each of the four
+      backup slots against the current one;
     - we answer *"what happened, from every surviving source, how
       confidently?"*. Our recovery source set strictly contains both.
   - CoW analogs (ReFS: Prade 2020, Bonnet/`forefst` 2026; F2FS: Oh & Hwang
@@ -1265,12 +1284,38 @@ one run of 15 (365/353/18/828), the async and sync rows never.
 - Re-run the prior-art watch (research.md §9) before M5 starts and before
   submission.
 
+### Paper-readiness experiments (2026-09-15, from the paper-draft review)
+
+- **Near-term, before M3 (not M7): E-findroot.** `btrfs-find-root -a` per
+  generation against `btrfska roots --json --full-sweep` on the existing
+  images (a copy of `sandbox.img`, the `m1_*` images, `m2_logtree`, the three
+  `s01_discard_*_r1`). Split every generation by whether its root-tree block
+  is placed by the current chunk map. It settles whether old-root discovery
+  is new for any generation or only outside the current chunk map. Read
+  find-root's scan range in the btrfs-progs source and register the
+  prediction first (`paper-draft.md` §10).
+- **Minimum experiment set for paper 1** (EXP records, ≥ 5 regenerations
+  where a guest runs; details in `paper-draft.md` §10):
+  - E-rec: file-level recovery per source, on no-balance, aged and ≥ 8 GiB
+    images;
+  - E-beyond4: the redesigned M7 test, cases (a) and (b);
+  - E-baseline: every M7 baseline on the same images, with runtimes and peak
+    memory;
+  - E-discard: discard × operation with `nodiscard`, async-idle and a real SSD
+    with discard passed through;
+  - E-fp: discovery false-positive rate on forged images;
+  - E-raid: RAID1, RAID1C3, RAID10 and RAID5/6 profiles;
+  - E-csum; E-tiers (if C4 is claimed); E-perf; E-robust.
+- **Corpus statement.** Every record and the paper state the corpus size
+  (images per cell and in total, sizes, regenerations) and point to each
+  image's operations log in the manifest.
+
 ## 9. Risks
 
 | Risk | Mitigation |
 |---|---|
 | **Realised:** a Rust forensic library (`SecurityRonin/btrfs-forensic`) ships backup-root deletion diffing and graded findings | Claims C3/C4 re-worded (§1); move M5 early; benchmark it (M7); keep C1/C6 btrfs-specific |
-| Beyond Carving team ships their future work first (code repo created, still empty) | M4/M5 prototyped; watch repo; publish corpus fast (C7 uncontested) |
+| Beyond Carving team ships their future work first (code repo created, still empty) | M4/M5 prototyped; watch repo; publish corpus fast (C7: no comparable image corpus found, research.md §5.1) |
 | Our own parsing, extent-read or LZO/stream code has bugs a mature library would not | Differential tests vs `dump-tree`, dissect.btrfs streams, `lzallright` and guest SHA-256s; property tests on hostile input; csum-type and compression images from M1; §3.5 fallback ladder (lzallright at runtime, then dissect.btrfs at runtime with an AGPL relicence) |
 | dissect.btrfs (test oracle) drifts or is abandoned | Pinned `1.10.*` in the `dev` group; guest SHA-256s and `dump-tree` are independent oracles, so losing it costs one cross-check, not a runtime feature |
 | Decoding "succeeds" on corrupted compressed data (LZO has no integrity check: 218–231 of 300 bit-flipped 4 KiB streams per seed decoded to wrong bytes in btrfska, lzallright and dissect.util native, §3.5) | Decode success never raises confidence; content is Confirmed only by a data-checksum match (M6); decoder errors are recorded, not hidden |

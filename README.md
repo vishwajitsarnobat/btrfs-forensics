@@ -475,4 +475,6 @@ uv run --python 3.14 python -m unittest discover -s legacy/tests -v
   milestones, test policy, experiment protocol).
 - [`research.md`](research.md): verified prior-art and gap analysis.
 - [`catalog.md`](catalog.md): chronological development record.
+- [`paper-draft.md`](paper-draft.md): research paper draft starter at checkpoint M2 (what the
+  evidence supports now, evaluation tables, claim-to-evidence traceability, gaps to submission).
 - [`corpus/vm/README.md`](corpus/vm/README.md): rootless QEMU scenario images.

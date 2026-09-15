@@ -60,7 +60,9 @@
    digitalcorpora.org, not at NIST CFReDS, and the Wani & Bhat "dataset" is
    tables inside the article, not images. Every paper self-builds
    before/after image pairs and reports recovery rate + hash-match rate.
-   Releasing the first public btrfs recovery corpus is itself a publishable
+   Releasing the first public btrfs *image* corpus with per-file ground truth
+   (Wani & Bhat 2018 and Schwietert & Hilgert 2025 published datasets of
+   other kinds, §5.1) is itself a publishable
    contribution.
 
 ---
@@ -335,10 +337,10 @@ position against their own stated future work.
 | Bhat & Wani 2018, *Forensic analysis of B-tree file system (Btrfs)* | Digital Investigation 27:57–70, DOI 10.1016/j.diin.2018.09.001 | Source of the beyond-`nritems` "orphan-items" concept our prototype implements |
 | Wani & Bhat 2018, *Dataset for forensic analysis of B-tree file system* | Data in Brief 18:2013–2018, DOI 10.1016/j.dib.2018.04.100 (OA, PMC5998747) | **Not disk images** — tables/records in-article only (§5.1); 6-step procedure + %-recovered baselines |
 | Wani, Bhat & Dehghantanha 2020, anti-forensic capabilities of Btrfs | Aust. J. Forensic Sciences 52(4):371–386, DOI 10.1080/00450618.2018.1533038 | Slack/defrag/anti-forensics; source of our W1–W5 features |
-| Rodeh, Bacik & Mason 2013 | ACM TOS 9(3), DOI 10.1145/2501620.2501623 | Design/format |
-| Hilgert, Lambertz & Plohmann 2017 (pooled storage in TSK) | Digital Investigation 22:S76–S85 (DFRWS USA 2017, Best Paper; PDF on dfrws.org) | Pooled-storage model |
+| Rodeh, Bacik & Mason 2013 | ACM TOS 9(3), Article 9, DOI 10.1145/2501620.2501623 | Design/format |
+| Hilgert, Lambertz & Plohmann 2017 (pooled storage in TSK) | Digital Investigation 22:S76–S85, DOI 10.1016/j.diin.2017.06.003 (DFRWS USA 2017, Best Paper; PDF on dfrws.org) | Pooled-storage model |
 | Hilgert, Lambertz & Yang 2018 (multi-device Btrfs in TSK) | Digital Investigation 26:S21–S29 (DFRWS USA 2018, Best Paper) | Multi-device/RAID forensics |
-| Toolan, *File System Forensics* (Wiley 2025), ch. 11 Btrfs | DOI 10.1002/9781394289820.ch11 | Textbook treatment; easy citation |
+| Fergus Toolan, *File System Forensics* (Wiley 2025), ch. 11 "The Btrfs File System", pp. 303–352 | DOI 10.1002/9781394289820.ch11 | Textbook treatment; easy citation |
 | Hilgert, *Contemporary File System Forensic Analysis* (PhD dissertation, Univ. Bonn, 2025) | bonndoc handle 20.500.11811/13313 | Evaluates Carrier's model against ZFS/**Btrfs**/MooseFS; consolidates the pooled/stacked-storage line |
 | Hilgert et al. 2024, "Forensic implications of stacked file systems" | FSI:DI (DFRWS EU 2024), S266628172300197X (OA PDF on dfrws.org) | Extends the analysis model to stacked/distributed FS |
 | Juch, *Btrfs filesystem forensics* (Diploma thesis, TU Wien, 2014) | repositum.tuwien.at 20.500.12708/7491 | Earliest btrfs forensics treatment (six artifact types); pre-dates Bhat & Wani |
@@ -359,11 +361,11 @@ literature after 2018 is essentially the Hilgert line plus btrfs papers.
 | Work | Citation | Relevance |
 |---|---|---|
 | **Toolan & Humphries 2026, "Hiding Data in Btrfs File Systems"** | SSRN preprint, DOI 10.2139/ssrn.7138910 | **Six btrfs hiding techniques** with exact offsets (list in §8.3), evaluated on capacity/stability/detection difficulty — the target list for our hiding-detection feature |
-| Göbel, Baier & Türr 2024 | *Advances in Digital Forensics XX* (IFIP WG 11.9), Springer, pp. 225–246, DOI 10.1007/978-3-031-71025-4_12 | ForTrace+fishy generator for anti-forensic traces on NTFS/ext4/**Btrfs**; 3-level validation model; no hosted corpus |
+| Göbel, Baier & Türr 2025 | *Advances in Digital Forensics XX* (IFIP WG 11.9), Springer IFIP AICT, pp. 225–246, DOI 10.1007/978-3-031-71025-4_12 (issued 2025 per Crossref; cited here as 2024 before 2026-09-15) | ForTrace+fishy generator for anti-forensic traces on NTFS/ext4/**Btrfs**; 3-level validation model; no hosted corpus |
 | **Schwietert & Hilgert 2025** (Fraunhofer FKIE) | FSI:DI 54:301984, DOI 10.1016/j.fsidi.2025.301984 (DFRWS APAC 2025; OA PDF on dfrws.org) | Survey of 24 hiding publications + novel methods (snapshot misuse, lower file slack, volume-management slack) + standardized corpus with ground truth. **Corpus repo `fkie-cad/hide-and-seek-dataset` 404s as of 2026-08-17** — contact authors |
 | Göbel & Baier 2018/2019, "fishy — A Framework for Implementing Filesystem-Based Data Hiding Techniques" | ICDF2C 2018, Springer LNICST, DOI 10.1007/978-3-030-05487-8_2; github.com/dasec/fishy | The hiding-technique implementation framework; the 2024 chapter adds its **Btrfs module** — our detector's adversarial test generator |
 | Toolan & Humphries 2025, "Data hiding in symbolic link slack space" | FSI:DI, S2666281725000587 | Cross-FS symlink-slack study; **negative btrfs result** (btrfs never creates symlink slack) — worth citing |
-| Hilgert & Schwietert 2026, "Mind the slack?" | FSI:DI (DFRWS USA 2026), S2666281726000806 | Empirical file-slack relevance across 12 FS implementations incl. CoW |
+| Schwietert & Hilgert 2026, "Mind the slack?" | FSI:DI 57:302123 (DFRWS USA 2026), DOI 10.1016/j.fsidi.2026.302123, S2666281726000806 | Empirical file-slack relevance across 12 FS implementations incl. CoW |
 | Schneider et al. 2022, "Ambiguous file system partitions" | FSI:DI 42 (DFRWS EU 2022) | Guest FS hidden inside btrfs structures |
 | Bhat, Al Zahrani & Wani 2020, "Can computer forensic tools be trusted…" | FSI | 4 commercial tools missed most anti-forensic attacks — motivates structural analysis |
 
@@ -372,8 +374,8 @@ literature after 2018 is essentially the Hilgert line plus btrfs papers.
 | Work | Citation | Role |
 |---|---|---|
 | Kim, Kim, Shin, Jo, Lee & Shon 2021 | Electronics 10(18):2310, DOI 10.3390/electronics10182310 (OA) | **The evaluation template** (§5.2): before/after images, TSK + UFS Explorer + R-Studio baselines, recovery rate + hash-match accuracy |
-| Lee, Jo, Eo & Shon, "ExtSFR" | Multimedia Tools & Appl. 79:16093–16111 (2019), DOI 10.1007/s11042-019-7199-y (paywalled) | DB-backed scalable ext recovery; 1 TB eval; criticized by Kim et al. for no hash verification |
-| ForTrace framework | Göbel et al., FSI:DI 40:301344 (DFRWS EU 2022); github.com/dasec/ForTrace; ForTrace++ fork on GitLab | Synthetic user-trace dataset generation (btrfs arrived only via the 2024 IFIP work) |
+| Lee, Jo, Eo & Shon, "ExtSFR: scalable file recovery framework based on an Ext file system" | Multimedia Tools & Appl. 79(23–24):16093–16111 (2020; online 2019), DOI 10.1007/s11042-019-7199-y (paywalled) | DB-backed scalable ext recovery; 1 TB eval; criticized by Kim et al. for no hash verification |
+| ForTrace framework | Göbel et al., FSI:DI 40:301344 (DFRWS EU 2022); github.com/dasec/ForTrace; ForTrace++ fork on GitLab | Synthetic user-trace dataset generation (btrfs arrived only via the 2025 IFIP chapter by Göbel, Baier & Türr) |
 | Carrier 2005, *File System Forensic Analysis* | book | Layer model (our scan regions = Carrier's layers) |
 | Hargreaves & Patterson 2012 (timelines); Fairbanks 2012 (ext4); Buchholz & Spafford 2004 (metadata roles) | Digital Investigation | Cite for timeline/confidence framing |
 
@@ -553,7 +555,7 @@ content readable due to CoW (in-place wipe tools silently fail on btrfs).
 #### B. Forensic model & CoW-analog forensics (frame the method)
 
 **`rodeh_btrees_shadowing_clones_2008.pdf`** — Ohad Rodeh, "B-trees,
-Shadowing, and Clones", ACM TOS 3(4) Art. 15, 2008 (26 pp). The **theoretical
+Shadowing, and Clones", ACM TOS 3(4) Art. 2, 2008 (27 pp), DOI 10.1145/1326542.1326544. The **theoretical
 foundation** btrfs is built on. Solves combining strict shadowing (CoW) with
 B-trees: remove leaf-chaining + use top-down B+-trees with proactive
 split/merge on descent (bounds relaxed to ≈[b…3b]) so a modification shadows
@@ -570,7 +572,8 @@ when a block becomes overwrite-eligible (our recoverability reasoning).
 
 **`hilgert_dfrws_2017_pooled_storage.pdf`** — Hilgert, Lambertz & Plohmann,
 "Extending The Sleuth Kit … for pooled storage file system forensic
-analysis", Digital Investigation 22:S76–S85 (DFRWS USA 2017, Best Paper).
+analysis", Digital Investigation 22:S76–S85, DOI 10.1016/j.diin.2017.06.003 (DFRWS USA 2017,
+Best Paper).
 *(Note: retrieved artifact is the 31-slide presentation deck; the journal
 article is not free-OA and dfrws.org is Cloudflare-blocked here.)* Inserts a
 **Pool Analysis** step between Volume and File System analysis in Carrier's
@@ -627,7 +630,7 @@ confirm availability or contact authors.)
 
 **`goebel_generating_traces_filesystem_2024.pdf`** ⭐ — Göbel, Baier & Türr,
 "Generating Usable and Assessable Datasets Containing Anti-Forensic Traces at
-the Filesystem Level", IFIP DF XX, Springer 2024 (OA). The **most detailed
+the Filesystem Level", IFIP DF XX, Springer 2025 (OA; issued 2025 per Crossref). The **most detailed
 btrfs hiding recipe + parsing offsets** available: magic `_BHRfS_M` at
 partition `0x10040`; chunk-tree logical addr @ SB `0x58`, bootstrap chunk map
 @ SB `0x32B`; root-tree addr @ SB `0x50`; inode timestamp-nsec fields at inode
@@ -653,7 +656,7 @@ reproduce; use its repo as a hidden-data generator.
 
 **`hilgert_mind_the_slack_2026.pdf`** — Schwietert & Hilgert, "Mind the slack?
 Reassessing the relevance of file slack in modern forensic investigations",
-FSI:DI (DFRWS USA 2026, OA camera-ready; framework at
+FSI:DI 57:302123, DOI 10.1016/j.fsidi.2026.302123 (DFRWS USA 2026, OA camera-ready; framework at
 `anonymous.4open.science/r/mind-the-slack`). Cross-platform slack study over
 12 FS. **Key btrfs findings:** btrfs is the **only Linux FS that preserves
 slack through truncation** (metadata-only truncate leaves the block intact →
@@ -688,7 +691,7 @@ session before finalizing the related-work section:
 | **Toolan & Humphries, "Hiding Data in Btrfs File Systems", SSRN 2026** (DOI 10.2139/ssrn.7138910) | The definitive six-technique btrfs hiding list w/ exact byte counts | SSRN Cloudflare JS challenge; offsets reconstructed from Schwietert & Hilgert 2025 (§4.7 C, §8.3) |
 | **Plum & Dewald, "Forensic APFS File Recovery", ARES 2018** (DOI 10.1145/3230833.3232808) | Closest CoW analog — recovers deleted files from old APFS checkpoint/object-map versions (tool `afro`) | ACM Cloudflare; no author OA copy found |
 | **Kim et al. — verified obtained** (see §4.7 D) | — | (resolved) |
-| **Lee et al., "ExtSFR", MTAP 79 (2019)** (DOI 10.1007/s11042-019-7199-y) | DB-backed scan-once-query-many precedent for our SQLite catalog | Springer paywall; no OA; sci-hub unreachable |
+| **Lee et al., "ExtSFR", MTAP 79 (2020)** (DOI 10.1007/s11042-019-7199-y) | DB-backed scan-once-query-many precedent for our SQLite catalog | Springer paywall; no OA; sci-hub unreachable |
 | **Vaheed Ali et al., IEEE ICPCSN 2025** (DOI 10.1109/ICPCSN65854.2025.11035132) | Companion to MetaRecoverX/DMPedia (XFS+Btrfs recovery) | IEEE paywall; no OA/sci-hub copy |
 | **Hilgert, PhD "Contemporary File System Forensic Analysis", Bonn 2025** (handle 20.500.11811/13313) | Authority on multi-device btrfs pool reconstruction + CoW-tree traversal | Host `bonndoc.ulb.uni-bonn.de` unreachable (TCP timeout); companion works `hilgert_*` already in `docs/` cover much of it |
 
@@ -738,7 +741,7 @@ Cross-referencing §2 (no tool does it) with §4 (no paper covers it):
 | # | Gap | Evidence it's open | Confidence |
 |---|---|---|---|
 | G1 | **Orphan-item / slack metadata archaeology** — items beyond `nritems`, intra-node slack, kernel ORPHAN_ITEM (0x30) resurrection as a recovery source | No surveyed tool parses intra-leaf slack or orphan items; Beyond Carving scans whole valid blocks only (deep leaf scanning is its *future work*); only Bhat & Wani 2018 studied the artifact, without a maintained tool | High |
-| G2 | **Free-space-tree forensics** (space_cache=v2, FREE_SPACE_INFO/EXTENT/BITMAP 0xDD–0xDF) — proving a block was freed, and overwrite-risk scoring | Zero tools, zero papers | High |
+| G2 | **Free-space-tree forensics** (space_cache=v2, FREE_SPACE_INFO/EXTENT/BITMAP, item keys 198–200 = 0xC6–0xC8, kernel v7.0 `btrfs_tree.h:266,272,280`) — proving a block was freed, and overwrite-risk scoring | Zero tools, zero papers | High |
 | G3 | **Generation diffing → per-file timelines** from multiple historical roots (backup roots + discovered old roots) | find-root finds roots, nothing diffs them; Beyond Carving diffs objectid *sets* (existence only), not full state/timeline with move/rename/content deltas | Medium-high (partially claimed by Beyond Carving) |
 | G4 | **Confidence + provenance reporting** (per-artifact evidence chain, Confirmed/Probable/Unattached tiers spanning *anchored and unanchored* artifacts, csum-verified content) | **Partial overlap:** Beyond Carving has an extent-resolvability outcome taxonomy (Complete/Overwritten/Partial/Metadata-only/Failed) for anchored recoveries only; nobody scores confidence for unanchored orphan/slack artifacts or records a cross-mode provenance chain. davispuh block census, btrfs-rec JSON, X-Ways binary flag are the other partial gestures | Medium-high (differentiate from Beyond Carving's taxonomy, don't reinvent it) |
 | G5 | **Hiding/anti-forensics detection** — flag non-zero reserved/slack regions, STRING_ITEM 0xFD, fake generations (target list = Toolan & Humphries's six techniques + Schwietert & Hilgert's methods) | Papers propose hiding; nobody ships detection | High |
@@ -856,7 +859,7 @@ AGPL-3.0 consequence accepted (see plan.md §3.3 for the license analysis).
    no xattr (0x18), INODE_EXTREF (0x0D), EXTENT_CSUM (0x80),
    ROOT_REF/BACKREF (0x9C/0x90), SHARED_*_REF (0xB6/0xB8),
    TREE_BLOCK_REF (0xB0), BLOCK_GROUP_ITEM (0xC0), DEV_EXTENT (0xCC),
-   FREE_SPACE_* (0xDD–0xDF), DIR_LOG_* (0x3C/0x48), STRING_ITEM (0xFD).
+   FREE_SPACE_* (0xC6–0xC8), DIR_LOG_* (0x3C/0x48), STRING_ITEM (0xFD).
 8. **EXTENT_ITEM address taken from the wrong key field** (added
    2026-09-15, found on `feature/m1-backup-roots` commit `1d48203`, §10.5).
    An EXTENT_ITEM key is `(logical address, EXTENT_ITEM 168, length in
@@ -972,7 +975,7 @@ marked):**
 
 | Work | Citation | Verification | Touches |
 |---|---|---|---|
-| **Toolan & Humphries, "Hiding data in Btrfs file systems"** — the §4.4/§4.8 SSRN preprint, **now published** | *FSI: Digital Investigation* 58:302198, Sept 2026, DOI 10.1016/j.fsidi.2026.302198 (Norwegian Police University College). OA per OpenAlex (CC BY) | Crossref verified. Abstract identical to the preprint (six techniques rated on capacity/stability/detection difficulty). 20 references (Bhat & Wani 2018, Wani 2020, fishy, Göbel 2024, Schwietert & Hilgert 2025); does **not** cite Beyond Carving. Full text **not obtained** (ScienceDirect 403), so §8.3 offsets remain reconstructed from Schwietert & Hilgert — any offset changes vs the preprint are UNVERIFIED | C5 (proposes hiding; still no detector) — **replace the SSRN citation with this DOI everywhere** |
+| **Toolan & Humphries, "Hiding data in Btrfs file systems"** — the §4.4/§4.8 SSRN preprint, **now published** | *FSI: Digital Investigation* 58:302198, Sept 2026, DOI 10.1016/j.fsidi.2026.302198 (Norwegian Police University College). OA per OpenAlex (CC BY) | Crossref verified. Abstract identical to the preprint (six techniques rated on capacity/stability/detection difficulty). 20 references (Bhat & Wani 2018, Wani 2020, fishy, Göbel 2025, Schwietert & Hilgert 2025); does **not** cite Beyond Carving. Full text **not obtained** (ScienceDirect 403), so §8.3 offsets remain reconstructed from Schwietert & Hilgert — any offset changes vs the preprint are UNVERIFIED | C5 (proposes hiding; still no detector) — **replace the SSRN citation with this DOI everywhere** |
 | **Bonnet, "Forensic Analysis of the Resilient File System (ReFS) Version 3.14"**, master's thesis, Univ. of Mons, 2026 — tool **`forefst`** | <https://github.com/xbqt/forefst> (GPL-3.0; created 2026-05-16, pushed 2026-09-13); write-up xbpt.gitlab.io/refs (2026-08-24). Thesis record itself UNVERIFIED (author statement only) | Repo verified. Five ReFS deletion-recovery methods: trash-table queue, **two-checkpoint object-table diff**, low-confidence object-table orphan scan, stream snapshots, and **B+-tree node-slack scan as "the primary method"** plus full-volume orphan-page scan. Per-result recoverability verdict (full / extent-backed / metadata-only), INCOMPLETE flag on truncated scans, journal super-timeline, timestomp detection | CoW analogs of C1 (slack + orphan pages), C4 (verdicts), C3 (weak), C5 (timestomp) — **on ReFS, not btrfs** |
 | **Prade, Groß & Dewald, "Forensic Analysis of the Resilient File System (ReFS) Version 3.4"** — *missed earlier* | *FSI: Digital Investigation* 32:300915, 2020, DOI 10.1016/j.fsidi.2020.300915 | Crossref verified | CoW-analog related work (§4.3b) |
 | **Oh & Hwang, "Advanced forensic recovery of deleted file data in F2FS"** — *missed earlier* | *FSI: Digital Investigation* 54:301976, Oct 2025 (DFRWS APAC 2025), DOI 10.1016/j.fsidi.2025.301976, OA (CC BY-NC-ND per OpenAlex) | Crossref verified; abstract only (PDF blocked). Carves metadata to **rebuild the F2FS address table**, then recovers deleted data; tool benchmarked | Conceptual analog of C6 (address-map reconstruction from carved metadata) |
@@ -1038,7 +1041,7 @@ Note: the `docs/*.pdf` files are **tracked in git**, not ignored.
 |---|---|
 | C1 orphan-item / slack archaeology | **Open for btrfs.** SecurityRonin lists kernel ORPHAN_ITEMs only; `forefst` does node-slack scanning on **ReFS** → phrase C1 as btrfs-specific and cite `forefst` / Prade 2020 as CoW analogs |
 | C2 FST forensics | Open (nothing found) |
-| C3 generation diffing → timelines | **Narrower.** Backup-root deletion diffs now exist in Beyond Carving (objectid sets) *and* SecurityRonin (`recover_deleted`, leaf diff over the 4 backups). The claim must rest on **full-state, multi-source (backups + discovered old roots + reconstructed fragments), per-inode lifecycle** timelines, not on "diffing generations" |
+| C3 generation diffing → timelines | **Narrower.** Deletion diffs now exist in Beyond Carving (objectid sets over the historical root trees it discovers by scanning chunk-mapped tree regions, not bounded by the backups; §10.12) *and* SecurityRonin (`recover_deleted`, an inode diff of the FS tree 5 root named by each of the 4 backup slots). The claim must rest on **full-state, multi-source (backups + discovered old roots + reconstructed fragments), per-inode lifecycle** timelines, not on "diffing generations" |
 | C4 confidence + provenance | **Narrower.** Graded findings (SecurityRonin severity), extent-resolvability outcomes (Beyond Carving) and ReFS recoverability verdicts (`forefst`) exist. Ours must be the *evidence-rule-derived* tier with a per-artifact provenance chain spanning anchored and unanchored sources, plus csum-tree verification |
 | C5 hiding detection | Open, but SecurityRonin's `BACKUP-ROOT-DIVERGENCE` / CRC-mismatch findings are a first tamper-detection slice → cite; the target list is now peer-reviewed (Toolan & Humphries FSI:DI 2026) |
 | C6 relocated-chunk forensics | Open for btrfs (F2FS address-table rebuild is an analog); see §10.3 for the kernel changes that reshape it |
@@ -1056,9 +1059,10 @@ Note: the `docs/*.pdf` files are **tracked in git**, not ignored.
   findings: `BTRFS-SUPERBLOCK-CRC-MISMATCH`, `BTRFS-CRC-MISMATCH`,
   `BTRFS-BACKUP-ROOT-DIVERGENCE` (possible rollback / tampering),
   `BTRFS-IMPOSSIBLE-GEOMETRY`, and `BTRFS-ORPHANED-INODE` (kernel
-  ORPHAN_ITEM). `recover_deleted()` walks an older generation's FS_TREE
-  reached through a `btrfs_root_backup`, diffs it against the current FS_TREE,
-  and returns carved files with sha256 (verified from the README). Its README
+  ORPHAN_ITEM). `recover_deleted()` iterates all four `btrfs_root_backup`
+  slots, reads each slot's `fs_root` (FS tree 5 only) as one node, diffs its
+  inodes against the current FS_TREE, and returns carved files with sha256
+  (README; source read at commit `e6cd73f` on 2026-09-15, §10.12). Its README
   mentions **crc32c only**. Claims of 100 % line coverage and fuzzing are
   UNVERIFIED (not run).
   **Overlap:**
@@ -1506,7 +1510,8 @@ block-group tree (objectid 11).
 2. **plan §1 claims table + plan §8 positioning — re-word C3 and C4, and cite the new
    prior art.**
    - Rationale: backup-root deletion diffing is now shipped by
-     `SecurityRonin/btrfs-forensic` (and Beyond Carving); graded findings /
+     `SecurityRonin/btrfs-forensic` (Beyond Carving diffs historical roots it
+     discovers by scanning, not only the backups; §10.12); graded findings /
      recoverability verdicts exist there and in `forefst` (ReFS).
    - C3 becomes "full-state, multi-source (backup + discovered old roots +
      reconstructed fragments) per-inode lifecycle timelines".
@@ -1623,8 +1628,11 @@ Kernel references are to tag v7.0.
   reachable only through ROOT_ITEMs in each backup's `tree_root`. Two
   consequences:
   - a diff of `backup_fs_root` states sees nothing of a deletion in any other
-    subvolume. That is the method attributed to Beyond Carving and
-    SecurityRonin `recover_deleted` in plan.md §1. Per-subvolume history needs
+    subvolume. That is the method of SecurityRonin `recover_deleted`, which
+    diffs the `fs_root` of each backup slot. Beyond Carving is not limited to
+    it: it extracts subvolume roots from every historical root tree it
+    discovers (its §VI.E.2; corrected 2026-09-15, §10.12). Per-subvolume
+    history needs
     a walk of each backup's root tree (M1 task 7);
   - the deletions already predate all four backup roots. Inferred from the
     scenario order: the deletion commit precedes the six churn commits, and
@@ -1909,9 +1917,11 @@ Observed with the scan kernel, targeted regions and orphan classification
   - On the s01 images, only 24–26 of 338–371 orphans (7 %) are. Their
     generations are 30–37, while the orphans outside the chunk map are
     generations 2–23.
-  - So a tool bounded by the four backup roots (Beyond Carving,
-    SecurityRonin, plan.md §1) sees about one orphan in fourteen on these
-    images.
+  - So a tool bounded by the four backup roots (SecurityRonin
+    `recover_deleted`, `btrfs restore` without find-root) sees about one
+    orphan in fourteen on these images. Beyond Carving is not bounded this
+    way: it scans chunk-mapped tree regions for root-tree blocks (corrected
+    2026-09-15, §10.12).
   - Threat to validity: small, quiescent images with one scenario and no
     discard.
 - **Orphans outside the chunk map on generated images** (`m1_xxhash`,
@@ -1962,9 +1972,10 @@ Observed with the scan kernel, targeted regions and orphan classification
   - `sandbox.img` holds an unreferenced generation-14 fs-tree leaf (logical
     30605312, 3 items) on both DUP stripes, although the superblock
     generation is 14.
-  - A block already written in the running transaction is copied again on
-    its next change (ctree.c:621-625 `should_cow_block`: WRITTEN set means
-    COW). So one transaction can orphan its own blocks.
+  - A block already written to disk in the running transaction is copied
+    again on its next change (ctree.c:621-625 `should_cow_block`: WRITTEN set
+    means COW), while a dirty block not yet written is modified in place. So
+    one transaction can orphan its own blocks.
   - "generation < superblock generation" is therefore wrong in both
     directions.
     - It misses these 2 orphans.
@@ -2073,7 +2084,9 @@ fixes). Kernel references are to tag v7.0. Raw outputs: `images/scratch/m2b/root
   its own;
 - a **candidate root-tree block (state)** is an owner-1 candidate root. It stands for the root tree
   as far as that block reaches and the trees its ROOT_ITEMs name, resolved through the scanned
-  blocks by (bytenr, generation, level, owner, first key), never through a chunk map. It is
+  blocks by (bytenr, generation, level) and an acceptable owner, never through a chunk map. A
+  ROOT_ITEM carries no first key; child pointers inside a tree must also match their first key
+  (`src/btrfska/scan/roots.py` `_resolve`, `_outcome`, `_walk`; corrected 2026-09-15). It is
   evidence of one root tree, not proof of a whole committed filesystem state: a surviving leaf of
   a multi-leaf root tree whose parent is gone covers that leaf's ROOT_ITEMs only, and a forged
   owner-1 block is a state too (`level_consistent` flags a level that contradicts the blocks its
@@ -2109,7 +2122,11 @@ fixes). Kernel references are to tag v7.0. Raw outputs: `images/scratch/m2b/root
     named tree's root, all leaves here).
   - The generation-7 pair is one transaction writing its root tree twice, consistent with a
     WRITTEN block being copied again in the running transaction (ctree.c:621-625, §10.10).
-  - A tool bounded by the four backup roots (plan.md §1) sees generations 35–38 only.
+  - A tool bounded by the four backup roots (SecurityRonin `recover_deleted`, §10.12) sees
+    generations 35–38 only. A scan of the regions the current chunk map places, as Beyond Carving
+    describes, can also reach the root-tree blocks of generations 17–34, which lie in the current
+    metadata block group; the 13 states of generations 3, 6, 7 (two blocks) and 8–16 lie only
+    outside the current chunk map (below).
   - **Why they survive, and why this does not generalise** (EXP-002 §6.5). Generations 3–16 lie in
     the mkfs and pre-balance chunks that the scenario's final full balance relocated and deleted:
     no block of those states is placed by the current chunk map (`maps_current` 0), and nothing
@@ -2172,7 +2189,7 @@ fixes). Kernel references are to tag v7.0. Raw outputs: `images/scratch/m2b/root
     of generations 2–5, outside the current chunk map.
 
   Consistent with the source: under `DISCARD_SYNC`, `btrfs_finish_extent_commit` trims every range
-  unpinned at each commit, which includes COW-freed tree blocks (extent-tree.c:2994-3005). It also
+  unpinned at each commit, which includes COW-freed tree blocks (extent-tree.c:2997-3005). It also
   trims every block group deleted in the transaction (l.3058-3063), such as those the balance
   emptied (block-group.c:1755-1767). Blocks mkfs freed in userspace were never pinned by the
   kernel. This mechanism is read from the source, not measured.
@@ -2203,3 +2220,43 @@ fixes). Kernel references are to tag v7.0. Raw outputs: `images/scratch/m2b/root
   valid owner-1 level-7 block of generation G then demoted every real generation-G root-tree leaf
   to a fragment and removed that state from the report. Every unreferenced block is now a candidate
   at any level, and the planted block is reported as a level-inconsistent state of its own.
+
+### 10.12 Correction: Beyond Carving positioning (2026-09-15)
+
+Recorded during the fact-check review of `paper-draft.md` (catalog.md, checkpoint entry). Earlier
+text in plan.md §1, §5 M7 and §8 and in §10.1, §10.6, §10.7, §10.10 and §10.11 called Beyond
+Carving backup-root-bounded (≤ 4 generations). That was wrong; §4.1 already described its discovery
+correctly. Those places are corrected, each pointing here.
+
+- **What the paper says** (`docs/Beyond_Carving_Deterministic_Deleted_File_Recovery.pdf`):
+  - Algorithm 3: "for each candidate tree block b in mapped tree regions"; a block is kept when its
+    owner is 1 and its generation is below the current one, and per generation the highest level
+    wins;
+  - §VI.E.1: the method "scans filesystem regions mapped to Btrfs tree blocks using the chunk tree";
+  - §X.G: discovery is "a procedure that does not depend on the active root pointer stored in the
+    superblock"; a fallback to a backup superblock copy is described as an extension, not
+    implemented;
+  - §X.H.7: "The chunk parser reads the first stripe of each chunk item"; its audit log prints
+    "2 stripes detected, processing 1";
+  - no tree-block checksum validation is described; traversal prunes a branch on generation, level
+    or pointer validation (Algorithm 2, §X.G). Checksum-tree validation is future work (§X.H.6).
+- **Consequences for positioning.**
+  - Beyond Carving can reach any state whose root-tree block lies in a region the current chunk map
+    places. By its description it cannot reach states only outside the current chunk map. On the
+    s01 images the root-tree blocks of generations 17–34 lie in the current metadata block group,
+    and the 13 states of generations 3, 6, 7 (two blocks) and 8–16 lie only outside the current map
+    (EXP-002 §6.3, §6.5; §10.11).
+  - The backup-root-bounded tools are SecurityRonin `recover_deleted` and `btrfs restore` without
+    find-root. SecurityRonin, source at commit `e6cd73f` (read 2026-09-15): `recover_deleted`
+    iterates all four `btrfs_root_backup` slots, reads each slot's `fs_root` (FS tree 5 only) as one
+    node and diffs its inode items against the current FS tree (`forensic/src/lib.rs`); chunk
+    translation takes stripe 0 (`core/src/chunk.rs` `logical_to_physical`); the superblock checksum
+    is verified for crc32c and `None` for the other types (`core/src/crc.rs`
+    `superblock_crc_status`); node checksums are computed as crc32c on every image and do not gate
+    recovery (`core/src/node.rs` `Node::parse`).
+  - Discovering roots beyond the backups is not a novelty claim. What remains ours: scanning
+    outside the current chunk map, per-copy validation on all four checksum types, the hardened
+    candidate definition, and completeness with failure classes per state.
+- **Follow-ups.** The M7 beyond-4-generations test is redesigned to separate the two cases
+  (plan.md M7). A near-term `btrfs-find-root -a` head-to-head against `btrfska roots` on the
+  existing images is planned (plan.md §8 "Paper-readiness experiments"; `paper-draft.md` §10).
