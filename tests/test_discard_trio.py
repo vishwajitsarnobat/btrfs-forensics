@@ -1,11 +1,14 @@
-"""The discard trio (EXP-000, EXP-002): btrfska's full sweep agrees exactly with
-corpus/vm/probe_stale_metadata.py, and old-root discovery per discard mode. Each image is the
+"""The discard trio (EXP-000, EXP-002): btrfska's full sweep counted under the probe's rules gives
+the same counts as corpus/vm/probe_stale_metadata.py (coverage agreement: the count reuses
+btrfska's scan plan and prefilter, so it is not an independent re-implementation), and old-root
+discovery per discard mode. Each image is the
 representative run of its mode (corpus/manifest.tsv); tests skip when it is absent."""
 
 import re
 
 import pytest
 
+from btrfska.cli import main
 from btrfska.scan.classify import scan_image
 from btrfska.scan.roots import discover_image
 from btrfska.substrate.fs import open_filesystem
@@ -44,7 +47,7 @@ def test_manifest_lists_the_discard_trio():
 
 
 @pytest.mark.parametrize("mode", TRIO)
-def test_full_sweep_candidates_agree_exactly_with_the_probe(mode):
+def test_full_sweep_candidates_cover_the_blocks_the_probe_counts(mode):
     path = image(mode)
     probe = probe_columns(path)
     compat = probe_compat(path)
@@ -83,7 +86,11 @@ def test_without_trims_every_backup_state_and_31_older_states_survive(trio, mode
     assert all(s.completeness == 1.0 for s in backups)
     beyond = [s for s in found.states if not s.known_as]
     assert len(beyond) == 31 and sum(s.completeness == 1.0 for s in beyond) == 30
-    assert [s.generation for s in beyond if s.completeness < 1] == [3]
+    # The generation-3 csum root is the mkfs leaf at 1130496 without the WRITTEN flag: present in
+    # the state's own chunk, so corrupt, not unmapped.
+    assert [(s.generation, s.missing) for s in beyond if s.completeness < 1] == [
+        (3, {"corrupt": 1})
+    ]
 
 
 def test_sync_discard_zeroes_the_older_backup_states(trio):
@@ -100,7 +107,19 @@ def test_sync_discard_zeroes_the_older_backup_states(trio):
     ]
     # The fs and csum roots of backups 35-37 are shared with the live state and survive.
     assert all(r.candidate for r in found.rediscovered if r.indexed)
-    assert [(s.generation, s.known_as) for s in found.states] == [
-        (38, ("backup:38", "current")),
-        (3, ()),
+    assert [(s.generation, s.known_as, s.missing) for s in found.states] == [
+        (38, ("backup:38", "current"), {}),
+        (3, (), {"corrupt": 1}),
     ]
+
+
+def test_the_sync_summary_counts_surviving_slot_references_and_distinct_blocks(capsys):
+    """26 superblock and backup slot references name 14 distinct blocks. Under sync discard 14
+    references survive, but only 6 of the 14 blocks: the lost references are the root, extent,
+    chunk and dev roots of backups 35-37, and backups 35-37 share one chunk and one dev root."""
+    assert main(["roots", str(image("sync")), "--full-sweep"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        "rediscovered: 14/26 superblock and backup root slot references are candidate roots "
+        "(14 indexed), naming 14 distinct blocks: 6/14 candidate roots (6 indexed)"
+    ) in lines

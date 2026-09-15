@@ -5,7 +5,10 @@ For every image given:
 1. `corpus/vm/probe_stale_metadata.py`, run unchanged as a subprocess, prints fsid_blocks,
    stale_blocks, needle_copies and nonzero_blocks.
 2. `probe_compat` recomputes the first two columns from btrfska's full-sweep scan candidates under
-   the probe's own rules (below). The per-image DoD is exact equality.
+   the probe's own rules (below). The per-image DoD is equality of the counts. This is a coverage
+   check, not an independent re-implementation: the count reuses btrfska's own scan plan and fsid
+   prefilter, so equality shows that both tools read the same 4 KiB offsets (up to the documented
+   skip ranges), match the same 16 bytes at +0x20 and read the same generation field at +0x50.
 3. btrfska's own classes (`scan_image`, full sweep) and old-root discovery (`discover_image`, full
    sweep).
 Results go to `images/scratch/exp/EXP-002/results.jsonl`, one line per image.
@@ -30,6 +33,8 @@ Results go to `images/scratch/exp/EXP-002/results.jsonl`, one line per image.
 Usage, from the repo root:
   uv run python experiments/exp002.py run IMAGE...   # append one JSON line per image
   uv run python experiments/exp002.py table          # agreement, classes and discovery per mode
+Both take `--results PATH` (default images/scratch/exp/EXP-002/results.jsonl), so a re-measurement
+with changed code goes to its own file.
 """
 
 import argparse
@@ -148,12 +153,16 @@ def measure(path: Path) -> dict:
         {
             "generation": s.generation, "bytenr": s.bytenr, "known_as": list(s.known_as),
             "found": s.found, "referenced": s.referenced, "completeness": s.completeness,
-            "missing": s.missing, "trees": len(s.trees),
+            "missing": s.missing, "trees": len(s.trees), "level_consistent": s.level_consistent,
+            "maps_current": s.maps_current, "maps_historical": s.maps_historical,
             "chunk_root_source": None if s.chunk_root is None else s.chunk_root.source,
         }
         for s in found.states
     ]  # fmt: skip
     backup_roots = [r for r in found.rediscovered if r.root.tree == "root"]
+    blocks: dict[tuple, list] = {}  # superblock and backup slot references by distinct block
+    for r in found.rediscovered:
+        blocks.setdefault((r.root.bytenr, r.root.generation, r.root.level), []).append(r)
     return {
         "image": path.name,
         "mode": match[1] if match else None,
@@ -171,6 +180,11 @@ def measure(path: Path) -> dict:
             "known_roots": len(found.rediscovered),
             "known_roots_indexed": sum(r.indexed for r in found.rediscovered),
             "known_roots_candidates": sum(r.candidate for r in found.rediscovered),
+            "known_blocks": len(blocks),
+            "known_blocks_indexed": sum(any(r.indexed for r in same) for same in blocks.values()),
+            "known_blocks_candidates": sum(
+                any(r.candidate for r in same) for same in blocks.values()
+            ),
             "root_tree_roots": [[r.root.source, r.indexed, r.candidate] for r in backup_roots],
             "beyond": sum(not s["known_as"] for s in states),
             "beyond_complete": sum(not s["known_as"] and s["completeness"] == 1 for s in states),
@@ -179,9 +193,9 @@ def measure(path: Path) -> dict:
     }
 
 
-def run(paths: list[Path]) -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
-    with RESULTS.open("a") as f:
+def run(paths: list[Path], results: Path = RESULTS) -> None:
+    results.parent.mkdir(parents=True, exist_ok=True)
+    with results.open("a") as f:
         for path in paths:
             result = measure(path)
             f.write(json.dumps(result) + "\n")
@@ -202,8 +216,8 @@ def cell(values: list[float]) -> str:
     return f"{text} ({min(values):g}–{max(values):g})"
 
 
-def table() -> None:
-    rows = [json.loads(line) for line in RESULTS.read_text().splitlines() if line.strip()]
+def table(results: Path = RESULTS) -> None:
+    rows = [json.loads(line) for line in results.read_text().splitlines() if line.strip()]
     latest = {}
     for row in rows:  # the last measurement of each image wins
         latest[row["image"]] = row
@@ -223,13 +237,16 @@ def table() -> None:
         cells = [cell([row["classes"][name] for row in mine]) for name in CLASSES]
         print(f"| {mode} | {len(mine)} | " + " | ".join(cells) + " |")
     print()
-    keys = ("root_tree_candidates", "known_roots_indexed", "known_roots_candidates", "beyond",
+    keys = ("root_tree_candidates", "known_roots_indexed", "known_roots_candidates",
+            "known_blocks", "known_blocks_indexed", "known_blocks_candidates", "beyond",
             "beyond_complete")  # fmt: skip
     print("| Mode | N | " + " | ".join(keys) + " | backup-state completeness |")
     print("|---|---|" + "---|" * (len(keys) + 1))
     for mode in MODES:
         mine = [row for row in runs if row["mode"] == mode]
-        cells = [cell([row["discovery"][key] for row in mine]) for key in keys]
+        cells = [
+            cell([row["discovery"][key] for row in mine if key in row["discovery"]]) for key in keys
+        ]
         backup = [
             s["completeness"]
             for row in mine
@@ -244,12 +261,14 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     run_cmd = sub.add_parser("run")
     run_cmd.add_argument("images", nargs="+", type=Path)
-    sub.add_parser("table")
+    table_cmd = sub.add_parser("table")
+    for command in (run_cmd, table_cmd):
+        command.add_argument("--results", type=Path, default=RESULTS)
     args = parser.parse_args()
     if args.command == "run":
-        run(args.images)
+        run(args.images, args.results)
     else:
-        table()
+        table(args.results)
 
 
 if __name__ == "__main__":
