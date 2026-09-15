@@ -448,3 +448,25 @@ def test_m1_discovery_rediscovers_every_superblock_and_backup_root(name):
         pytest.skip(f"{name}.img absent")
     # m1_badnode_both: the sv1 leaf (tree 256) is damaged on both copies (corpus/manifest.tsv).
     rediscovery_holds(path, {256: "corrupt"} if name == "m1_badnode_both" else None)
+
+
+@pytest.mark.vm
+def test_m2_logtree_superseded_logs_and_reused_backup_blocks():
+    path = SCENARIOS / "m2_logtree.img"
+    if not path.exists():
+        pytest.skip("m2_logtree.img absent")
+    with open_image(path) as img:
+        found = discover_image(img, open_filesystem(img)).discovery
+    # Generation 9 = superblock + 1: the live log (log root tree leaf 30982144, sv1 log leaf
+    # 30965760) and the first fsync's superseded log commit (30932992, 30949376), 2 copies each.
+    (log,) = found.logs
+    assert (log.generation, log.blocks, log.copies, log.live, log.superseded) == (9, 4, 8, 2, 2)
+    assert found.stats["log_accepted"] == 8 and found.stats["log_rejected"] == 0
+    # The oldest backup root's root, extent and dev tree blocks now hold generation-7 blocks.
+    reused = [(30441472, 1), (30474240, 2), (30457856, 4)]
+    assert found.walk_failures == tuple(
+        ("backup:5", tree, bytenr, "reused") for bytenr, tree in reused
+    )
+    assert [(r.root.bytenr, r.indexed) for r in found.rediscovered if not r.candidate] == [
+        (bytenr, False) for bytenr, _ in reused
+    ]
