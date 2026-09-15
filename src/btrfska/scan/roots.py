@@ -41,8 +41,13 @@ root-tree block it finds), fed into records instead of stdout:
    no longer match; `unmapped` means no map places the address and no invalid copy was scanned.
    - `referenced` counts the distinct blocks named by the state's found blocks: its root-tree
      blocks, every tree root its ROOT_ITEMs name, and every pointer below a found block;
-   - `completeness` = found / referenced. Nothing is known below a missing block, so this is an
-     upper bound on how much of the state survives.
+   - `completeness` = found / referenced. It covers the root tree reached from the candidate
+     block and every tree a ROOT_ITEM in its found leaves names, except ROOT_ITEMs naming tree 1
+     (not followed). The chunk tree and the log tree are excluded: no ROOT_ITEM names them. With
+     nothing missing it is 1.0 and means that every block of the root tree and of every
+     ROOT_ITEM-named tree was found, nothing more (no data, no chunk or log tree). Nothing is
+     known below a missing block, so it overstates how much of the state survives; `unchecked`
+     pointers beyond MAX_MISSING are not de-duplicated, which can understate it.
 4. **Chunk root of a state** (read-only analysis that feeds historical chunk maps, plan.md M5):
    the superblock's or a backup slot's chunk root when the state is one of theirs, else the newest
    owner-3 candidate root no newer than the state (`inferred`). When it differs from the current

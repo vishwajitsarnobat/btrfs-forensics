@@ -676,9 +676,11 @@ def build_parser() -> argparse.ArgumentParser:
         "roots",
         help="find historical tree roots among the scanned blocks and how complete each is",
         description=(
-            "Scan as `scan` does, index the valid tree blocks and find the candidate roots of "
-            "every owner and generation. Each root-tree candidate is a historical state: its "
-            "trees are resolved through the scanned blocks, with a completeness figure, and every "
+            "Scan as `scan` does, index the valid tree blocks and find the candidate roots: blocks "
+            "no parent of their generation or a newer one points to, at any level. Each "
+            "candidate root-tree block is one state: its root tree and the trees its ROOT_ITEMs "
+            "name are resolved through the scanned blocks, with a completeness figure (chunk and "
+            "log trees excluded), and every "
             "superblock and backup root is checked for rediscovery. A summary goes to stdout, or "
             "to stderr with --json."
         ),
