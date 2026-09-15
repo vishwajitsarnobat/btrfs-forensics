@@ -20,6 +20,57 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-15 — Checkpoint: paper draft starter
+
+- **Branch:** `docs/paper-draft` (from `main` at `26242a6`). Docs only: `paper-draft.md` (new), this
+  entry, a pointer in `README.md`. No code, experiment record or research note changed. Not pushed.
+- **Why:** the project stops at M2 to start the research paper. The draft starter lets the authors
+  write from the evidence that exists without over-claiming.
+
+**What `paper-draft.md` contains.**
+- Status banner (what M0–M2 support, what needs M3–M7); target venue (DFRWS/FSI:DI, fallback IEEE
+  Access; deadlines and limits marked "check"); five title options; abstract A for the current
+  evidence and a clearly labelled aspirational abstract B with placeholders.
+- Contribution status: C1–C7 plus eleven contributions that emerged (N1–N11). Only C6 and C7 among
+  the planned claims are partially supported; C1–C5 are not yet.
+- Section outline with prose seeds (introduction to conclusion), the as-built method, research
+  questions RQ1–RQ5.
+- Evaluation tables copied verbatim from EXP-000, EXP-001 (with its counting footnote), EXP-002
+  (coverage agreement, slot references vs distinct blocks, candidate root-tree blocks, balance
+  caveat) and EXP-003 (image vs allocated bytes, density sweep), with the environment summary and
+  regenerating commands.
+- Thirteen findings with confidence notes, a 28-row claim → evidence traceability table, a figures
+  plan (the prototype-era `diagrams/arch.png` is not the built architecture), a ranked gap list
+  (G1–G14) with the minimum experiment set, consolidated threats to validity, BibTeX with `TODO` for
+  every missing field, the blocked papers, and a terminology guide.
+
+**Inconsistencies found (Appendix A of the draft, 13 items; no doc was edited to resolve them).**
+- **Beyond Carving is not backup-root-bounded.** plan.md §1 (C3), §8 and research.md §10.10–§10.11
+  say it is; its Algorithm 3 (`docs/Beyond_Carving_…pdf`, historical root tree discovery) scans the
+  chunk-mapped tree regions for owner-1 blocks and keeps the highest level per generation, as
+  research.md §4.1 records. This also affects the M7 beyond-4-generations test design and
+  research.md §10.7's attribution of `backup_fs_root` diffing.
+- The M1c catalog entry has no `##` heading (its text follows the M2a entry).
+- EXP-002 §6.3 "8–13 blocks" vs research.md §10.11 "8–14 blocks" per surviving state.
+- plan.md §1 "21/71 outside the chunk map" (prototype definition) vs btrfska's 20 valid orphans.
+- EXP-003 §8 "slowest cell 501.0" is the slowest run of a cell whose median is 512.2.
+- Smaller items: stale catalog "Assets" section, Bhat & Wani size bands (research.md vs the paper's
+  abstract), the SSRN vs FSI:DI Toolan & Humphries citation, "Mind the slack?" author order,
+  dissect.btrfs still named a foundation in research.md §3, "seven" vs nine gaps.
+
+**Paper-readiness notes recorded in the draft (plan.md §7).** The hostile-walk timings and memory
+peaks in the M2a/M2b review fixes come from scripts under the gitignored `images/scratch/` and cannot
+be quoted until committed; the dissect.btrfs "validates nothing" observations have no committed
+script; the EXP-003 density sweep ran on a tree with 16 uncommitted files; the LZO harness,
+per-image scan and roots tables and oracle results should become EXP records.
+
+**Verification.** Every table in the draft was copied from the committed record it cites. Two DOIs
+not recorded in research.md (Hilgert et al. 2018, 2024) were read from the PDFs in `docs/` and are
+marked "verify". Scratch files (`pdftotext` output) are under `images/scratch/paper/`.
+`sandbox.img` was only read to confirm its sha256 (`07ca38d4…5876418`, unchanged). Section 6 of the
+draft was checked by script: every result-table row appears verbatim in its source record; only the
+environment summary table is composed from the env records.
+
 ## 2026-09-15 — M2b: old-root discovery, discard experiments (EXP-000, EXP-002), M2 closeout
 
 - **Branch:** `feature/m2b-old-roots-discard` (from `main` at `35d6916`). This is the second of
