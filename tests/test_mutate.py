@@ -193,3 +193,25 @@ def test_refuses_output_through_a_symlink(source):
     (d / "link.img").symlink_to(target)
     assert run(src, d / "link.img", "zero-primary-sb").returncode != 0
     assert target.read_bytes() == b"keep"
+
+
+def test_flip_byte_inverts_exactly_the_given_bytes(source):
+    src, d = source
+    offsets = [5 * 1024**2 + 7, 5 * 1024**2 + 8, 3 * 1024**2]
+    before = sha256(src)
+    result = run(src, d / "flipped.img", "flip-byte", *offsets)
+    assert result.returncode == 0, result.stderr
+    assert sha256(src) == before
+    expected = bytearray(src.read_bytes())
+    for offset in offsets:
+        expected[offset] ^= 0xFF
+    assert (d / "flipped.img").read_bytes() == bytes(expected)
+
+
+def test_flip_byte_refuses_offsets_outside_the_image(source):
+    src, d = source
+    for offset in (SIZE, -1):
+        result = run(src, d / "out.img", "flip-byte", 100, offset)
+        assert result.returncode != 0
+        assert "outside the image" in result.stderr
+        assert not (d / "out.img").exists()
