@@ -377,9 +377,11 @@ the M1a copy).
    `valid_stripe_count` for REMAPPED chunks (tree-checker.c:1002-1009). Its
    first lookup then divided by zero, and `btrfska walk` crashed with a
    traceback inside `open_filesystem`.
-   - Why the check matters here: the kernel maps a REMAPPED address the remap
-     tree does not translate through the chunk's own stripes
-     (volumes.c:6914-6930). Stripe geometry therefore matters.
+   - Why the check matters here: the kernel maps a REMAPPED address that is
+     covered by an identity remap item through the chunk's own stripes
+     (relocation.c:5164-5165, volumes.c:6914-6930); an address with no remap
+     item at all fails translation with `-ENOENT` (relocation.c:5123-5171).
+     Stripe geometry therefore matters.
    - `ChunkMap.copies()` now raises `MappingError` (`geometry is not
      computable`) whenever the stripe math cannot run, whatever problems the
      chunk records:

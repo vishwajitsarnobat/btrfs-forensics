@@ -275,7 +275,8 @@ REMAPPED_RAID10_NO_SUB = BG["SYSTEM"] | BG["RAID10"] | BG["REMAPPED"]
 
 def test_remapped_chunks_with_stripes_still_get_stripe_count_checks():
     # tree-checker.c:1002-1009 skips valid_stripe_count for REMAPPED chunks, but a REMAPPED chunk
-    # the remap tree does not translate is still mapped through its stripes (volumes.c:6914-6930).
+    # address covered by an identity remap item is still mapped through its stripes
+    # (relocation.c:5164-5165, volumes.c:6914-6930).
     data = raw_chunk(type_=REMAPPED_RAID10_NO_SUB, stripes=((1, 0), (2, 0)), sub_stripes=0)
     problems = parse_chunk(LOGICAL, data, sectorsize=4096).problems
     assert "num_stripes 2 sub_stripes 0 invalid for RAID10 (checked although REMAPPED)" in problems

@@ -198,8 +198,9 @@ def parse_chunk(
     if not mixed_ok and type_ & BG["METADATA"] and type_ & BG["DATA"]:
         problems.append(f"mixed chunk type {type_:#x} without MIXED_GROUPS")
     # The kernel skips valid_stripe_count for REMAPPED chunks (tree-checker.c:1002-1009), but a
-    # REMAPPED address the remap tree does not translate is still mapped through the chunk's own
-    # stripes (volumes.c:6914-6930), so btrfska checks every chunk that has stripes.
+    # REMAPPED address covered by an identity remap item is still mapped through the chunk's own
+    # stripes (relocation.c:5164-5165, volumes.c:6914-6930), so btrfska checks every chunk that
+    # has stripes.
     if (n or not remapped) and profile in PROFILES and not _valid_stripe_count(profile, n, sub):
         suffix = " (checked although REMAPPED)" if remapped else ""
         problems.append(f"num_stripes {n} sub_stripes {sub} invalid for {name}{suffix}")
