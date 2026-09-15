@@ -47,9 +47,12 @@ class TreeRoot:
     level: int | None
     generation: int | None
     via: str  # the anchor: "superblock", "backup slot N" or the ROOT_ITEM it came from
+    log: bool = False  # a log tree reached from the superblock's log_root (node.py, generation)
 
     def expect(self) -> Expect:
-        return Expect(level=self.level, owner=self.tree_id, generation=self.generation)
+        return Expect(
+            level=self.level, owner=self.tree_id, generation=self.generation, log=self.log
+        )
 
 
 @dataclass(frozen=True)
