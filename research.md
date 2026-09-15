@@ -1831,7 +1831,15 @@ v7.0. Raw probe output: `images/scratch/m1c/probe_extents.txt`.
     returned more than 4 KiB, where btrfska raises `output_overrun`;
     otherwise the two agree on 300 of 300 flips;
   - dissect.util's native decoder raises a non-`Exception` panic on 31–46
-    flips per seed and on the crafted stream.
+    flips per seed and on the crafted stream;
+  - the corpora added in the M1c review (truncation, one inserted or deleted
+    byte, random byte streams and instruction-level random streams, 300
+    each per seed) agree between btrfska and lzallright on every stream.
+    One inserted byte gives 9–14 wrong decodes and one deleted byte 32–71,
+    in both decoders alike. Before the review fix, btrfska accepted an end
+    marker with a copy length other than 3, which the kernel rejects. Only
+    the instruction-level corpus exposed it (6–11 streams per seed); the
+    byte-level corpora never produced that marker.
 
   Decode success is therefore never evidence of correct content (plan.md
   §3.5); data checksums are (M6).

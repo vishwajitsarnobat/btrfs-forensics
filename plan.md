@@ -285,6 +285,32 @@ other data and flip positions and is superseded. LZO carries no integrity
 check, so decode success is never evidence of correct content; only data
 checksums (csum tree, M6) are.
 
+**Beyond bit flips** (the same harness, seeds 1–5, 300 streams per corpus
+per seed; added in the M1c review):
+- truncation and random byte streams: every stream fails in btrfska and
+  lzallright;
+- one inserted byte: 9–14 per seed decode to wrong bytes within 4 KiB in
+  btrfska and lzallright alike, and lzallright returns more than 4 KiB for
+  57–71;
+- one deleted byte: 32–71 wrong, identically; lzallright over 4 KiB for
+  9–23;
+- instruction-level random streams (every field of every instruction
+  random, ending in a random `0001HLLL` terminator): 0–1 return bytes;
+- dissect.util's native decoder panics on 119–176 insertions, 95–172
+  deletions, 275–282 random byte streams and 272–277 instruction-level
+  streams per seed.
+
+btrfska and lzallright agree on all 300 streams of every corpus and seed,
+counting an lzallright output over 4 KiB as a failure. Before the review
+fix they did not: btrfska accepted the end-marker distance (16384) with
+any copy length, where the v7.0 kernel (`lib/lzo/lzo1x_decompress_safe.c`
+lines 208 and 274) and lzokay (`lzokay.cpp:284`) accept only length 3
+(`11 00 00`). The instruction-level corpus disagreed on 6–11 of 300
+streams per seed, all of them this case. The bit-flip, truncation,
+insertion, deletion and random-byte corpora agreed on every stream even
+then: no single-byte edit of `11 00 00` produces another length code
+together with a zero distance.
+
 Why our own decoder:
 - decompression was the only thing left to borrow, and it sits on the
   hostile-input path (the kernel uses the "safe" decoder for the same
