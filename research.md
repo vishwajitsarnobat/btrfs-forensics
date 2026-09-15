@@ -1859,3 +1859,113 @@ v7.0. Raw probe output: `images/scratch/m1c/probe_extents.txt`.
   - It lists `large_target.txt` four times; three entries are
     de-duplication markers with no output file (`output_path` "(duplicate)",
     legacy/utils/btree.py:659-666).
+
+### 10.10 Scan notes from M2a (2026-09-15)
+
+Observed with the scan kernel, targeted regions and orphan classification
+(catalog.md, M2a entry). Kernel references are to tag v7.0. Raw summaries:
+`images/scratch/m2a/scans/`. Definitions:
+- a **candidate** is a sector-aligned offset whose header fsid matches;
+- a candidate is **valid** when it passes every check that needs no
+  referrer;
+- **live**, **backup_reachable** and **unreferenced** mean the copy is
+  reached from the current state, from a backup root only, or from neither;
+- **orphans** are the last two.
+
+- **Orphans per image** (`btrfska scan IMAGE`, targeted; `--full-sweep`
+  finds the same valid nodes on every image below):
+
+  | Image | Candidates | Valid | Invalid | Live | Backup-reachable | Unreferenced | Orphans outside the current chunk map | Legacy-compatible orphans |
+  |---|---|---|---|---|---|---|---|---|
+  | `sandbox.img` | 85 | 84 | 1 | 20 | 34 | 30 | 20 | 71 |
+  | `m1_xxhash` | 367 | 362 | 5 | 22 | 24 | 316 | 172 | 355 |
+  | `m1_sha256_bgt` | 401 | 395 | 6 | 24 | 26 | 345 | 181 | 387 |
+  | `m1_blake2b` | 367 | 362 | 5 | 22 | 24 | 316 | 172 | 355 |
+  | `m1_lzo` | 365 | 360 | 5 | 22 | 24 | 314 | 170 | 353 |
+  | `m1_zlib` | 367 | 362 | 5 | 22 | 24 | 316 | 172 | 355 |
+  | `m1_badnode_both` | 367 | 360 | 7 | 20 | 24 | 316 | 172 | 353 |
+
+  Counts are physical copies: a DUP block that survives on both stripes
+  counts twice.
+- **Backup roots reach little of the surviving history.**
+  - On `sandbox.img`, 34 of 64 orphans (53 %) are reachable from a backup
+    root.
+  - On the s01 images, only 24–26 of 338–371 orphans (7 %) are. Their
+    generations are 30–37, while the orphans outside the chunk map are
+    generations 2–23.
+  - So a tool bounded by the four backup roots (Beyond Carving,
+    SecurityRonin, plan.md §1) sees about one orphan in fourteen on these
+    images.
+  - Threat to validity: small, quiescent images with one scenario and no
+    discard.
+- **Orphans outside the chunk map on generated images** (`m1_xxhash`,
+  `m1_sha256_bgt`) all lie in two unmapped gaps below the current metadata
+  chunk: 69632–67108864 and 67112960–105906176.
+  - No header bytenr of theirs maps under the current chunk map.
+  - 18 (xxhash) and 19 (sha256) claim their own physical offset: residue of
+    mkfs's temporary chunk at 1 MiB, whose logical and physical addresses
+    are equal.
+  - The other 154 and 162 claim addresses the current map no longer has:
+    the pre-balance metadata DUP stripes (§10.8).
+  - Owners (xxhash; sha256 adds 11 block-group-tree blocks):
+
+    | Tree | Blocks |
+    |---|---|
+    | root | 25 |
+    | extent | 25 (23 on sha256) |
+    | chunk | 11 |
+    | dev | 7 |
+    | fs | 9 |
+    | csum | 6 |
+    | uuid | 6 |
+    | free space | 27 |
+    | `sv1` (256) | 52 |
+    | snapshot (257) | 2 |
+    | data reloc | 2 |
+
+  - A historical chunk map (M5) is needed to read their pointers. The 52
+    `sv1` blocks are the candidates for the pre-deletion `sv1` leaf that
+    §10.8 expected to survive only unreferenced. That is not yet verified
+    (M4/M5).
+  - On `sandbox.img`, all 20 valid orphans outside the map claim their own
+    physical offset. They lie in 0x100000–0x12c000 and 0x500000–0x520000,
+    generations 1–4, in 8 trees.
+- **mkfs leaves tree blocks the kernel would reject.**
+  - Every s01 image has 5 or 6 generation-1 blocks at 1081344–1163264 whose
+    header flags are 0x0100000000000000: backref revision 1, WRITTEN not set.
+    They were made with host btrfs-progs v6.6.3.
+  - The kernel's tree-checker rejects such a block (tree-checker.c:2033-2036,
+    2186-2189). `sandbox.img` (mkfs version unknown) has the WRITTEN flag on
+    its blocks at the same offsets.
+  - Both corpora hold an empty generation-1 fs-tree leaf at 1114112, which
+    tree-checker.c:2047-2080 rejects (tree 5 must never be empty).
+  - These blocks are mkfs residue, not filesystem history. A scan must
+    report them as invalid candidates, never drop them (they are evidence of
+    the mkfs), and never count them as orphans.
+- **Orphans of the current generation exist.**
+  - `sandbox.img` holds an unreferenced generation-14 fs-tree leaf (logical
+    30605312, 3 items) on both DUP stripes, although the superblock
+    generation is 14.
+  - A block already written in the running transaction is copied again on
+    its next change (ctree.c:621-625 `should_cow_block`: WRITTEN set means
+    COW). So one transaction can orphan its own blocks.
+  - "generation < superblock generation" is therefore wrong in both
+    directions.
+    - It misses these 2 orphans.
+    - It counts 8 live blocks as orphans: chunk root generation 8, uuid tree
+      generation 7, data reloc tree generation 5 and dev tree generation 13,
+      two DUP copies each, all unchanged since their generation.
+  - The legacy 71 on `sandbox.img` reconcile as 8 live + 34 backup-reachable
+    + 28 unreferenced + 1 invalid (catalog.md, M2a).
+- **The extent tree adds nothing to the walker on this corpus.** On every
+  image above, the tree blocks the current extent tree lists (METADATA_ITEM,
+  and EXTENT_ITEM with TREE_BLOCK) equal the logical addresses the current
+  walks reach: 10 on sandbox, 11 on the s01 images, 12 on `m1_sha256_bgt`.
+  - Log trees, which the extent tree does not record, are absent on all of
+    them.
+  - The cross-check stays in the scan summary. A difference would point to
+    a dropping subvolume, a log tree or damage.
+- **A damaged live block stays visible.** On `m1_badnode_both`, the corrupt
+  `sv1` leaf (65159168, both copies) is 2 invalid candidates. The current
+  and all four backup walks report it as invalid, and live drops from 22 to
+  20.

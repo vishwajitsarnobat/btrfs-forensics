@@ -834,6 +834,21 @@ M1c; the evidence per bullet is in the catalog.md M1c entry.
     `images/`;
   - benchmark script committed.
 
+**Status 2026-09-15: M2a done** (catalog.md M2a entry).
+- **Delivered:**
+  - `scan/regions.py` with the MIXED_GROUPS fix, tree-11 block-group input
+    and `--full-sweep`;
+  - `scan/kernel_numpy.py`;
+  - `scan/classify.py`, which holds the live set that §4.1 names
+    `scan/live_set.py`;
+  - `btrfska scan`;
+  - EXP-003.
+- **Sandbox parity** holds on the prototype's orphan definition (71 offsets,
+  21 outside the map, identical). The reachability classes reconcile those
+  71 as 8 live, 34 backup-reachable, 28 unreferenced and 1 invalid.
+- **M2b** covers the rest: old-root discovery, the discard trio (EXP-002)
+  and the EXP-000 backfill.
+
 ### M3 — Evidence catalog (~1 week)
 - SQLite schema (versioned, documented in-repo):
   - `nodes(bytenr, phys, dev, gen, owner, level, nritems, csum_type,
