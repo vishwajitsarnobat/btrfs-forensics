@@ -71,6 +71,68 @@ marked "verify". Scratch files (`pdftotext` output) are under `images/scratch/pa
 draft was checked by script: every result-table row appears verbatim in its source record; only the
 environment summary table is composed from the env records.
 
+**Review round (fact-check, 2026-09-15).** A fact-checking review approved the draft with fixes, all
+applied on `docs/paper-draft` (PR #14). Docs only; no code changed.
+- **Numbers and claims in `paper-draft.md`.**
+  - F4: 13, not 14, states lie only outside the current chunk map (generations 3, 6, 7 ×2, 8–16;
+    EXP-002 §6.3).
+  - C7 is qualified as the first public *image* corpus with per-file ground truth across the
+    checksum, compression and discard axes, and cites Wani & Bhat 2018 and Schwietert & Hilgert 2025.
+  - N1 drops the dissect.btrfs comparison from its heading and the unsourced "most-used", and is
+    now Partially supported (no committed comparison script).
+  - Abstract A no longer says "scans the whole device": the targeted default skips agreeing DATA
+    chunks.
+  - Results identical across runs are reported as "identical in 15/15 runs" next to the medians.
+- **Btrfs facts.**
+  - Free-space-tree item keys are 198–200 (0xC6–0xC8), per kernel v7.0
+    `include/uapi/linux/btrfs_tree.h:266,272,280` (read on GitHub, not copied). Fixed in the draft,
+    research.md §6 and §8.1, and plan.md M6; no other `0xDD`–`0xDF` remains in the docs.
+  - COW: only a block already written to disk (WRITTEN) is copied again; a dirty unwritten block is
+    modified in place (ctree.c:621-625).
+  - The DISCARD_SYNC citation is extent-tree.c:2997-3005, fixed in the draft, research.md §10.11
+    and EXP-002 §6.4.
+- **Method vs code** (read in `src/btrfska/scan/roots.py`).
+  - ROOT_ITEMs resolve by (bytenr, generation, level) and an acceptable owner, with no first key
+    (the walk of a named tree starts without one, l.709). Also fixed in research.md §10.11.
+  - `roots` emits `not_scanned`, `changed` and `unchecked`.
+  - `substrate/fs.py` and `substrate/items.py` are now listed.
+  - `uv run pytest --collect-only -q` collects 724 tests, of which 37 are legacy tests.
+- **Beyond Carving positioning corrected at its source.** Its Algorithm 3 scans chunk-mapped tree
+  regions (§VI.E.1), independently of the superblock root pointer (§X.G). It reads the first stripe
+  only (§X.H.7) and describes no tree-block checksum validation. Corrected in plan.md §1, the M7
+  beyond-4-generations test (redesigned into (a) inside and (b) only outside the current chunk map
+  or only unreferenced) and §8; research.md §10.1, §10.2, §10.6, §10.7, §10.10 and §10.11. The dated
+  note is research.md §10.12.
+- **SecurityRonin** `recover_deleted` (source at `e6cd73f`) is described as backup-root-bounded
+  (all four slots, FS tree 5 only), stripe 0, superblock crc32c only, node crc32c not a gate.
+- **BibTeX checked against Crossref/doi.org.**
+  - `rodeh2008btrees`: DOI 10.1145/1326542.1326544, Article 2 (from Semantic Scholar; Crossref
+    carries no article number).
+  - `rodeh2013btrfs`: Article 9 (from the ACM PDF in `docs/`).
+  - `goebel2024generating` renamed `goebel2025generating`, year 2025.
+  - `toolan2025book`: "The Btrfs File System", pp. 303–352, Fergus Toolan.
+  - `hilgert2017pooled`: DOI 10.1016/j.diin.2017.06.003.
+  - `schwietert2026slack`: FSI:DI 57:302123, DOI 10.1016/j.fsidi.2026.302123.
+  - `lee2019extsfr` renamed `lee2020extsfr`, with the full title and year 2020.
+  - Toolan and Humphries first names added (Fergus, Georgina).
+  - The same errors are fixed in research.md §4.3–§4.8 and §10.1.
+- **Starter improvements.**
+  - G5 and G9 promoted to the top of the gap list.
+  - New near-term experiment E-findroot: `btrfs-find-root -a` per generation against
+    `btrfska roots` on the existing images.
+  - The minimum experiment set gains:
+    - real-SSD discard;
+    - no-balance, aged and ≥ 8 GiB images;
+    - the discovery false-positive rate on forged images;
+    - baseline runtimes;
+    - RAID profiles;
+    - a corpus-size and operations-log statement.
+  - The same experiments are in plan.md §8 "Paper-readiness experiments".
+- **Catalog.** The missing `## 2026-09-15 — M1c: …` heading is added above the unchanged M1c
+  entry (Appendix A item 4 resolved). Appendix A items 1–4 and 11 are marked resolved.
+- **Scratch.** Kernel headers, SecurityRonin sources and the edit script are under the gitignored
+  `images/scratch/` (`kernel/`, `secronin/`, `paper/`).
+
 ## 2026-09-15 — M2b: old-root discovery, discard experiments (EXP-000, EXP-002), M2 closeout
 
 - **Branch:** `feature/m2b-old-roots-discard` (from `main` at `35d6916`). This is the second of
@@ -1217,6 +1279,8 @@ btrfska already used −6 (`ondisk.TREE_LOG_OBJECTID = _U64 - 6`).
 - The oldest backup root on small images names reused blocks (`backup:5`
   problems on `m2_logtree`). That is expected, but the summary should
   separate it from damage.
+
+## 2026-09-15 — M1c: extent reads, decompression, oracles, EXP-001
 
 - **Branch:** `feature/m1c-extent-reads` (from `main` at `16e7c77`). This is
   the last of three M1 PRs. It covers plan.md §5 M1 task 8 (extent reads,
