@@ -213,6 +213,13 @@ def select(copies: list[SuperblockCopy]) -> Selection:
 
     Every present copy that is invalid, foreign, older, or different from the selected one is
     reported as a disagreement; the differing fields of same-filesystem copies are always named.
+
+    One deliberate difference from btrfs-progs: when mirror 0 carries the expected bytenr but a
+    zero magic, progs stops scanning and finds no superblock (l.2029-2033, "if magic is NULL, the
+    device was removed": device removal wipes only the magic). btrfska still falls back to the
+    other mirrors. A wiped primary is exactly the damage an examiner needs to see past, and the
+    fallback hides nothing: mirror 0 is reported as invalid, and `btrfska info` prints what the
+    kernel would mount. A fully zeroed primary (bytenr 0 too) makes progs fall back as well.
     """
     valid = [c for c in copies if c.valid]
     anchor = min(valid, key=lambda c: c.offset, default=None)
