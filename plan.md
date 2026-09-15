@@ -247,7 +247,8 @@ first draft of this section) does not work as intended:
 decompress path, which calls `lzo1x_decompress_safe`):
 - a 4-byte LE total compressed length;
 - then segments, each a 4-byte LE segment length followed by LZO1X data of
-  at most `lzo1x_worst_compress(sectorsize)` bytes (4 419 for 4 KiB) that
+  at most `lzo1x_worst_compress(sectorsize)` bytes (4 421 for 4 KiB by the v7.0
+  `include/linux/lzo.h:21` macro; the `lzo.c` header comment says 4 419) that
   decompresses to at most one sector;
 - a segment header never straddles a sector boundary: if fewer than 4 bytes
   remain in the current sector, they are zero padding and the next header
@@ -259,7 +260,7 @@ decompress path, which calls `lzo1x_decompress_safe`):
 | Option | Licence / state | Behaviour on hostile input (test below) | Verdict |
 |---|---|---|---|
 | `python-lzo` 1.15 | GPL | — | Rejected: GPL, incompatible with the Apache-2.0 decision |
-| `dissect.util` 3.24 `compression.lzo` (pure Python + Rust `_native`) | Apache-2.0, Fox-IT, maintained; the decoder dissect.btrfs uses | Pure Python: a back-reference before the start of output is silently accepted (the crafted stream returned 4 bytes, no error), and only `len == out_len` stops output. Native: **panics** (`pyo3_runtime.PanicException`, not an `Exception` subclass, so `except Exception` does not catch it) on the crafted stream and on 58/300 bit-flipped streams (single seeded run; counts are seed-dependent — the harness is committed in M1 as `tests/oracle/lzo_hostile.py` before any number is cited) | Rejected at runtime: a forensic reader must fail with a catchable, classified error on adversarial bytes. Its Apache-2.0 test vectors are reused, with attribution |
+| `dissect.util` 3.24 `compression.lzo` (pure Python + Rust `_native`) | Apache-2.0, Fox-IT, maintained; the decoder dissect.btrfs uses | Pure Python: a back-reference before the start of output is silently accepted (the crafted stream returned 4 bytes, no error), and only `len == out_len` stops output. Native: **panics** (`pyo3_runtime.PanicException`, not an `Exception` subclass, so `except Exception` does not catch it) on the crafted stream and on 31–46 of 300 bit-flipped 4 KiB streams per seed (median 37; `tests/oracle/lzo_hostile.py`, seeds 1–5, M1c; the earlier single scratch run's 58/300 is superseded) | Rejected at runtime: a forensic reader must fail with a catchable, classified error on adversarial bytes. Its Apache-2.0 test vectors are reused, with attribution |
 | `lzallright` 0.2.6 (Rust bindings of lzokay) | MIT; 2 stars, one maintainer; abi3 wheels | Raises `LZOError` cleanly on crafted, truncated and bit-flipped input | Not a runtime dependency (bus factor; a native wheel for a ~150-line function). **Adopted as an independent test oracle** and as fallback 1 |
 | `lzokay` 2.1.0 (lzokay-rs) | MIT; 1 star, last push 2025-10 | not tested | Rejected: weaker upkeep than `lzallright` |
 | **Own pure-Python LZO1X decoder** (`substrate/lzo.py`) | Ours (Apache-2.0) | Bounds-checked by design: input overrun, output overrun beyond the segment bound, lookbehind overrun, missing end marker; one `LzoError` class | **Chosen** |
@@ -274,8 +275,13 @@ lzallright==0.2.6`, scratch only):
 - a truncated stream (all three raise a catchable error);
 - 300 single-bit flips of one compressed 4 KiB sector.
 
-**Also observed** (single seeded run, see above): 139–160 of the 300 bit-flipped streams decoded
-"successfully" to wrong bytes in *every* decoder. LZO carries no integrity
+**Also observed** (`tests/oracle/lzo_hostile.py`, seeds 1–5, M1c): per seed,
+218–231 (median 227) of the 300 bit-flipped streams decoded "successfully" to
+wrong bytes within the 4 KiB bound in btrfska, lzallright and dissect.util's
+native decoder (258–277 in its pure-Python decoder). lzallright and both
+dissect.util decoders returned more than 4 KiB for another 22–41, where
+btrfska raises `output_overrun`. The earlier single scratch run (139–160) used
+other data and flip positions and is superseded. LZO carries no integrity
 check, so decode success is never evidence of correct content; only data
 checksums (csum tree, M6) are.
 
@@ -771,6 +777,9 @@ and proven against ground truth.
   to the guest SHA-256s; the LZO property tests pass.
 - Import-boundary and read-only tests pass; `sandbox.img` hash unchanged.
 
+**Status 2026-09-15: done.** Every DoD bullet is met across M1a, M1b and
+M1c; the evidence per bullet is in the catalog.md M1c entry.
+
 ### M2 — Scan kernel v1 (~1 week)
 - `scan/kernel_numpy.py`: mmap + `np.frombuffer` strided FSID compare +
   csum validation via `substrate/csum.py` + multiprocessing over image
@@ -1185,7 +1194,7 @@ and need one run plus the image hash.
 | Beyond Carving team ships their future work first (code repo created, still empty) | M4/M5 prototyped; watch repo; publish corpus fast (C7 uncontested) |
 | Our own parsing, extent-read or LZO/stream code has bugs a mature library would not | Differential tests vs `dump-tree`, dissect.btrfs streams, `lzallright` and guest SHA-256s; property tests on hostile input; csum-type and compression images from M1; §3.5 fallback ladder (lzallright at runtime, then dissect.btrfs at runtime with an AGPL relicence) |
 | dissect.btrfs (test oracle) drifts or is abandoned | Pinned `1.10.*` in the `dev` group; guest SHA-256s and `dump-tree` are independent oracles, so losing it costs one cross-check, not a runtime feature |
-| Decoding "succeeds" on corrupted compressed data (LZO has no integrity check: 139–160 of 300 bit-flipped streams decoded to wrong bytes in all three decoders tested, §3.5) | Decode success never raises confidence; content is Confirmed only by a data-checksum match (M6); decoder errors are recorded, not hidden |
+| Decoding "succeeds" on corrupted compressed data (LZO has no integrity check: 218–231 of 300 bit-flipped 4 KiB streams per seed decoded to wrong bytes in btrfska, lzallright and dissect.util native, §3.5) | Decode success never raises confidence; content is Confirmed only by a data-checksum match (M6); decoder errors are recorded, not hidden |
 | Licence ambiguity from test-only AGPL use | Oracle confined to the `dev` group and `tests/oracle/`; import-boundary test on `src/`; sdist contents checked before release (§3.3) |
 | New format features mis-read (remap tree, RST, fscrypt) | Incompat gate refuses unknown/unsupported bits (M1); later research items |
 | Discard destroys evidence on real media (sync: ~91 % stale metadata gone) | Discard axis in corpus + observed-discard input to overwrite-risk score and report caveat |
