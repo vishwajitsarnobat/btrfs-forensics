@@ -92,6 +92,44 @@ def write_sparse_image(path: Path, size: int, blocks: dict[int, bytes]) -> Path:
     return path
 
 
+LZO_END = b"\x11\x00\x00"  # 0001HLLL with distance 16384: end of stream (lzo.rst)
+
+
+def lzo_literal_stream(data: bytes) -> bytes:
+    """A valid LZO1X stream storing `data` as literals, built from kernel lzo.rst encodings.
+
+    1..238 bytes: first byte 17 + n. Longer: first byte 0 (state 0, long literal), whose length is
+    3 + 15 + 255 per zero byte + the first non-zero byte.
+    """
+    n = len(data)
+    if n == 0:
+        return LZO_END
+    if n <= 238:
+        return bytes([17 + n]) + data + LZO_END
+    zeros, last = divmod(n - 18, 255)
+    if last == 0:
+        zeros, last = zeros - 1, 255
+    return b"\x00" + bytes(zeros) + bytes([last]) + data + LZO_END
+
+
+def sector_pad(data: bytes, sectorsize: int = 4096) -> bytes:
+    return data + bytes(-len(data) % sectorsize)
+
+
+def lzo_extent(payloads: list[bytes], sectorsize: int = 4096) -> bytes:
+    """Frame LZO segments as fs/btrfs/lzo.c writes them: a LE32 total length, then per segment a
+    LE32 length and the payload, padding with zeros when fewer than 4 bytes are left in a sector.
+    The total includes that padding; on disk the extent is padded to whole sectors."""
+    buf = bytearray(4)
+    for payload in payloads:
+        buf += len(payload).to_bytes(4, "little") + payload
+        left = -len(buf) % sectorsize
+        if left < 4:
+            buf += bytes(left)
+    buf[:4] = len(buf).to_bytes(4, "little")
+    return bytes(buf)
+
+
 @contextmanager
 def scratch_dir(prefix: str):
     """A fresh directory under the gitignored images/scratch/, removed afterwards."""
