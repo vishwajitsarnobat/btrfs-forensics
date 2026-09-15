@@ -20,6 +20,379 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-15 — M1c: extent reads, decompression, oracle parity, EXP-001
+
+- **Branch:** `feature/m1c-extent-reads` (from `main` at `16e7c77`). This is
+  the last of three M1 PRs. It covers plan.md §5 M1 task 8 (extent reads,
+  decompression, `cat`, oracles) and task 11 (EXP-001), and closes the M1
+  DoD.
+- **Commits:**
+  - `c245e79` Add a bounds-checked LZO1X decoder with the dissect.util vectors and hostile-stream tests
+  - `13ef276` Split chunk-map ranges at chunk ends and 64 KiB stripe boundaries
+  - `33eea78` Decompress zlib, zstd and btrfs-framed LZO extents within the kernel's bounds
+  - `4295ef0` Read extents and assemble file content with a provenance record per extent
+  - `68f0c7d` Add btrfska cat: file bytes to stdout, extent records to stderr
+  - `d20b138` Add the dissect.btrfs and lzallright oracles and the LZO hostile-input harness
+  - `327fa72` Add EXP-001: checksum-type coverage of the legacy prototype and btrfska, with an environment record script
+  - `a1ac866` Cite the LZO harness counts and the 4 421-byte worst case in the plan, and mark M1 done
+  - `f7368fa` Record M1c extent-read, oracle and legacy findings
+  - `7365cfd` Report i_size clipping only when an extent reaches past the sector holding EOF
+  - `75ee852` Update the README status for M1 and document the cat records
+  - `c4c9790` Record EXP-001: legacy accepts no tree block on non-crc32c images
+  - this catalog entry (the commit after `c4c9790`)
+
+**What was done.**
+- **Tests first.** Each unit test module was written and seen failing before
+  its implementation:
+  - `test_lzo`, `test_compress` and `test_extents` failed with
+    ModuleNotFoundError;
+  - the `pieces` tests failed with AttributeError;
+  - the `cat` tests with `invalid choice: 'cat'`;
+  - the clipping test on an assertion.
+
+  The oracle tests are the exception (see Deviations).
+- **Kernel references** are tag v7.0, fetched from GitHub torvalds/linux into
+  `images/scratch/m1c/kernel/`: `fs/btrfs/lzo.c`, `compression.[ch]`,
+  `zlib.c`, `zstd.c`, `inode.c`, `tree-checker.c`, `volumes.h`,
+  `include/linux/lzo.h` and `Documentation/staging/lzo.rst`.
+  `lib/lzo/lzo1x_decompress_safe.c` (GPL) was fetched by mistake and deleted
+  unread, so the decoder stays written from lzo.rst and dissect.util's
+  Apache-2.0 code.
+
+1. **`substrate/lzo.py`.** An LZO1X decoder written from lzo.rst.
+   - `decompress(src, max_out)` raises only `LzoError(kind, detail)`. Its kinds
+     follow the kernel's `LZO_E_*` codes: `input_overrun`, `output_overrun`,
+     `lookbehind_overrun`, `missing_end_marker`, `trailing_input`, and
+     `unsupported_version` for LZO-RLE.
+   - Every read, copy and back-reference is checked before it happens.
+   - `tests/test_lzo.py` (45 tests):
+     - the four dissect.util 3.24 vectors (Apache-2.0, attributed; the
+       8 334-hex-digit "larger" stream is in `tests/fixtures/lzo_larger.hex`);
+     - the crafted lookbehind stream (`lookbehind_overrun`) and all nine
+       truncations of it;
+     - a missing end marker, output bound, trailing input and version byte;
+     - hand-assembled instructions of every opcode class, cross-checked with
+       lzallright before use;
+     - 3 000 random streams and 1 800 bit-flipped vectors that raise only
+       `LzoError` and never exceed the bound.
+2. **`substrate/compress.py`.** `decompress(compression, data, min_out=,
+   max_out=, sectorsize=, inline=)` returns `Decoded(data, slack)` or raises
+   `DecodeError(kind, detail)`.
+   - **zlib** follows `zlib_decompress_bio`: it inflates raw deflate after a
+     valid header, so the adler32 trailer is not checked.
+   - **zstd** decodes one frame with `compression.zstd`.
+   - Both are capped with `max_length`, and a one-byte probe tells a stream
+     that ends exactly at the cap from one that overruns it.
+   - **LZO** uses the btrfs framing: a LE32 total, then LE32 segment headers
+     that skip a sector tail of fewer than 4 bytes.
+     - Regular extents: the total may not exceed min(128 KiB, extent) nor
+       leave a whole sector unused (`lzo_decompress_bio`).
+     - Each segment is at most `lzo1x_worst_compress` = 4 421 bytes and
+       decodes to at most one sector; reading stops once `min_out` is
+       reached.
+     - Inline extents hold exactly one segment filling the item
+       (`lzo_decompress`).
+   - `tests/test_compress.py` (40 tests) covers:
+     - sector-tail padding framing: 0–5 bytes left, of which 1–3 are
+       padded;
+     - a straddling header, invalid totals and an oversized or overrunning
+       segment;
+     - decoder kinds surfacing as `lzo_<kind>`;
+     - overrun, short, truncated and corrupt input for zlib and zstd;
+     - a property test of 600 random or bit-flipped inputs per codec, in
+       regular and inline modes.
+3. **`ChunkMap.pieces(logical, length)`** splits a range at chunk ends and, in
+   striped profiles (RAID0/10/5/6), at 64 KiB boundaries.
+   - `BTRFS_STRIPE_LEN` is verified as `SZ_64K` in v7.0 `volumes.h:45`.
+   - 8 tests, including RAID0/10/5/6 splits that `copies()` accepts piece by
+     piece.
+4. **`substrate/extents.py`.**
+   - `read_extent(reader, item, leaf)` → `(ExtentRead, bytes | None)`:
+     - handles inline, regular, compressed and prealloc extents, and explicit
+       holes (`disk_bytenr` 0);
+     - honours `offset`, `num_bytes` and `ram_bytes`;
+     - reads through `reader.chunk_map`, whichever map that is.
+   - `read_file(reader, root, inode, no_holes=)` → `FileRead`:
+     - walks the fs tree and inserts implicit holes, reported as problems
+       when NO_HOLES is unset;
+     - clips to i_size;
+     - reports overlaps, a missing inode and a directory as errors.
+   - `FileRead.chunks()` raises `IncompleteRead` before yielding anything
+     when any error exists.
+   - `tests/test_extents.py` (29 tests) uses synthetic images under
+     `images/scratch/`: every kind, offset handling for all three codecs,
+     holes, clipping, overlap, decode failure, nine invalid-extent cases,
+     a RAID0 stripe crossing, a divergent DUP copy, a missing-device fallback,
+     JSON-readiness and 300 garbage items.
+5. **`btrfska cat IMAGE --inode N [--root current|backup:GEN|bytenr:N]
+   [--tree fs|ID] [--allow-unsupported]`.**
+   - It writes the file bytes to stdout only when the read is complete.
+   - stderr carries one JSON `extent` record per extent, one `file` record,
+     then a summary or `btrfska cat: error: …`.
+   - Exit codes: 0 read, 1 incomplete or unknown root, 2 refused.
+   - The gate handling is shared with `walk` (`_open_checked`).
+   - README.md gains "`btrfska cat` output"; `test_readme_documents_every_cat_key`
+     checks every record key.
+   - The read-only AST scan still passes: `cat` writes only to
+     `sys.stdout.buffer` and opens nothing.
+6. **Oracles** (`tests/oracle/`).
+   - `dissect.btrfs==1.10.*` and `lzallright==0.2.*` join the `dev` group;
+     the lock resolves to dissect.btrfs 1.10, dissect.util 3.24,
+     dissect.cstruct 4.7 and lzallright 0.2.6.
+   - Every oracle module calls `pytest.importorskip`.
+7. **LZO hostile-input harness** `tests/oracle/lzo_hostile.py`: the plan
+   §3.5 experiment as a committed, seeded script (results below).
+8. **EXP-001** (`experiments/exp001.py`, `experiments/env.sh`,
+   `experiments/EXP-001.md`).
+9. **Docs.**
+   - research.md §10.9 is new, and its §10.6 LZO count is updated.
+   - plan.md §3.5 and §9 now cite the harness counts and the 4 421-byte worst
+     case, and M1 gains a DoD status line.
+   - The README status is updated.
+
+**Design decisions.**
+- **Read records are flat, frozen dataclasses** (`ExtentRead`, `DataRange`,
+  `DataCopy`), JSON-ready through `dataclasses.asdict`. One record describes:
+  - the source item (leaf, slot, generation);
+  - the extent fields;
+  - the chunk-map source;
+  - every physical range with every copy (mirror, devid, physical, readable,
+    used, matches);
+  - the decoder output length, the SHA-256 of the supplied bytes, an error
+    kind and detail, and non-fatal problems.
+
+  M3's `file_extents` and `provenance` rows can store it as is.
+- **The kernel read path sets the bounds.** A regular compressed extent must
+  decode to exactly `ram_bytes`. A compressed inline extent decodes up to one
+  sector and must cover min(ram_bytes, sectorsize); the probe showed that the
+  kernel compresses the whole sector (research.md §10.9).
+- **Non-zero bytes are reported, never returned.** That covers bytes past
+  `ram_bytes` in an inline stream, and slack after a compressed stream or the
+  LZO total. They are problems, never content.
+- **Data copies.** Every copy of a data range is read; the first readable one
+  is used and the others are compared with it. Data checksums arrive in M6,
+  so no copy can be preferred on evidence yet.
+- **Clipping at i_size** is a problem only when an extent reaches past the
+  sector that holds EOF. A partial last sector is normal, and reporting it
+  made every non-aligned file noisy (seen in the `cat` samples below).
+- **Hostile values fail cleanly.** Compressed `ram_bytes` and
+  `disk_num_bytes` outside (0, 128 KiB] (`BTRFS_MAX_UNCOMPRESSED`,
+  `BTRFS_MAX_COMPRESSED`) are `invalid_extent`, so a hostile `ram_bytes` of
+  2^63 cannot allocate. Zero runs are yielded in pieces of at most 1 MiB.
+
+**Oracle results** (all M1 images present and matching `corpus/manifest.tsv`,
+so none were regenerated). Command: `uv run pytest -q tests/oracle`, rows
+dumped to `images/scratch/m1c/oracle/parity_rows.txt`.
+
+| Image | Root sets compared | File reads (distinct files) | Compression | With guest/script SHA-256 | Equal to dissect.btrfs | Equal to ground truth |
+|---|---|---|---|---|---|---|
+| `sandbox.img` | backup:11–14, current | 2 (2): `target_file.txt` gen 11, `large_target.txt` gen 13 | none | 0 (no scenario log) | 2 | n/a |
+| `m1_xxhash` | backup:35–38, current | 50 (10) | zstd | 50 | 50 | 50 |
+| `m1_lzo` | backup:35–38, current | 50 (10) | lzo | 50 | 50 | 50 |
+| `m1_zlib` | backup:35–38, current | 50 (10) | zlib | 50 | 50 | 50 |
+
+- The reads cover 152 files: 0 mismatches and 0 incomplete reads.
+- dissect's own directory walk lists exactly the regular files btrfska
+  inventories, in every subvolume of every root set.
+- **Deleted files.** The s01 deleted files (`deleted_big.txt`, 288 894 B in
+  3 extents; `deleted_inline.txt`, 13 B compressed inline) read from
+  snapshot 257 in every root set.
+- **Backup generations.** dissect reached every backup generation once its
+  `_root_tree` was swapped (test-only), so no root set fell back to guest
+  hashes only.
+- **dissect discrepancies:** no byte differences. There are behavioural ones
+  (research.md §10.9):
+  - dissect zero-fills reads of unmapped logical addresses: logical 13 631 488
+    on `m1_xxhash` reads as zeros, where btrfska raises `UnmappedAddress`;
+  - it checks the zlib adler32, which the kernel skips;
+  - its LZO loop ignores the total length.
+- **LZO against lzallright** (`test_lzo_oracle.py`): 2 000 seeded round
+  trips are identical, and 1 000 bit-flipped sectors agree once an lzallright
+  output over 4 KiB counts as a failure.
+
+**LZO harness results** (`uv run python tests/oracle/lzo_hostile.py --seeds 1 2
+3 4 5 --json images/scratch/m1c/lzo_hostile/results.json`, 20.7 s wall,
+deterministic per seed). Per seed: 2 000 round-trip vectors, the crafted
+stream, a half-truncated compressed sector, and 300 bit flips of one 4 KiB
+sector. Entries are median (range) over the 5 seeds.
+
+| Decoder | Round trip identical | Crafted stream | Truncated | Flips: correct | Flips: wrong bytes ≤ 4 KiB | Flips: > 4 KiB | Flips: `Exception` | Flips: non-`Exception` |
+|---|---|---|---|---|---|---|---|---|
+| btrfska | 2000 (all) | `LzoError` | `LzoError` | 0 (0–1) | 227 (218–231) | 0 (0–0) | 72 (68–82), all `LzoError` | 0 |
+| lzallright 0.2.6 | 2000 (all) | `LZOError` | `LZOError` | 0 (0–1) | 227 (218–231) | 36 (32–41) | 39 (31–47) | 0 |
+| dissect.util 3.24 pure Python | 2000 (all) | returns 4 bytes | `IndexError` | 1 (0–1) | 267 (258–277) | 30 (22–41) | 1 (0–2) | 0 |
+| dissect.util 3.24 native | 2000 (all) | `PanicException` | `ValueError` | 0 (0–1) | 227 (218–231) | 36 (32–41) | 0 (0–2) | 37 (31–46) |
+
+- btrfska and lzallright agree on 300 of 300 flips in every seed, with an
+  output over 4 KiB counted as a failure.
+- plan.md §3.5's earlier single scratch-run counts (58/300 panics, 139–160
+  wrong) are superseded by these.
+
+**EXP-001 summary** (`experiments/EXP-001.md`; `uv run python
+experiments/exp001.py --runs 2`; the two runs were identical; recorded at
+`f7368fa` with a clean tree):
+
+| Image | csum | Tool | Tree blocks accepted | Tree blocks rejected | Files listed per generation | Distinct files byte-identical / listed |
+|---|---|---|---|---|---|---|
+| `sandbox` | crc32c | legacy | 85 | 1 | gen 11: 1, gen 13: 1 | 2 / 2 |
+| `sandbox` | crc32c | btrfska | 27 | 0 | backup:11: 1, backup:12: 0, backup:13: 1, backup:14: 0, current: 0 | 2 / 2 |
+| `m1_xxhash` | xxhash64 | legacy | 0 | 368 | none | 0 / 0 |
+| `m1_xxhash` | xxhash64 | btrfska | 23 | 0 | backup:35–38 and current: 10 each | 10 / 10 |
+| `m1_sha256_bgt` | sha256 | legacy | 0 | 402 | none | 0 / 0 |
+| `m1_sha256_bgt` | sha256 | btrfska | 25 | 0 | backup:35–38 and current: 10 each | 10 / 10 |
+| `m1_blake2b` | blake2b | legacy | 0 | 368 | none | 0 / 0 |
+| `m1_blake2b` | blake2b | btrfska | 23 | 0 | backup:35–38 and current: 10 each | 10 / 10 |
+
+- Legacy's 85 accepted blocks on the sandbox are 71 orphans and 14
+  current-generation leaves.
+- The sandbox reference is dissect.btrfs (no scenario log). Image SHA-256s
+  were unchanged by both tools.
+- Before the result was recorded, a first version of the stricter "identical
+  every time" rule counted legacy's `(duplicate)` markers as mismatches (1/2
+  on the sandbox). Root cause: legacy de-duplicates extents and writes no
+  output for later entries (legacy/utils/btree.py:659-666). Fixed in
+  `327fa72` (amended) before the recorded run.
+
+**M1 DoD, bullet by bullet** (all met):
+
+| DoD bullet | Status | Evidence |
+|---|---|---|
+| Backup states gens 11–14 of `sandbox.img` walked with anchored provenance; task-1 ground-truth tests green | met (M1b) | `tests/test_ground_truth.py` (incl. `test_fs_tree_contents_per_generation[11..14]`) in the 601 passing tests; every `walk` record carries `root.via` (`backup slot N`); in this milestone `cat --root backup:13` reads `large_target.txt` through slot 0 |
+| `m1_xxhash`, `m1_sha256_bgt`, `m1_blake2b` fully walked; legacy finds nothing on non-crc32c images | met (M1b + M1c) | EXP-001 above: btrfska accepts 23/25/23 blocks and rejects 0; legacy accepts 0 and rejects 368/402/368. Block-by-block `dump-tree` agreement: M1b `test_walks_match_dump_tree_block_by_block` (vm, passing) |
+| `m1_unknown_incompat` refused, exit ≠ 0, `UNSUPPORTED_INCOMPAT` line | met (M1a/M1b) | `uv run btrfska info images/scenarios/m1_unknown_incompat.img` exits 2 with `gate: REFUSED` and `UNSUPPORTED_INCOMPAT UNKNOWN_BIT_40`; `walk` the same (exit 2); `cat` has a synthetic test (`test_cat_applies_the_incompat_gate`) |
+| `m1_badnode` reports a csum failure for that node instead of items | met (M1b, with the two-image deviation) | `walk images/scenarios/m1_badnode_both.img --tree 256` exits 0 with one `invalid_node` for 65159168: csum false on both copies, `mirror 1: csum: stored 6024af66d4ba356f computed 04ee33fa2966cb51` (and mirror 2), 0 items. `m1_badnode`, one corrupt copy: mirror 1 reported `csum` false, and the items come from mirror 2 under the mirror policy |
+| `m1_mirror_damage` selects mirror 1 and reports it | met (M1a) | `info` exits 0: `mirror 0 @ 65536: INVALID (magic mismatch, csum mismatch)`, `selected: mirror 1 (generation 38)`, `kernel would mount: mirror 0 (invalid: …)`, `disagreements: mirror 0 invalid: magic mismatch, csum mismatch` |
+| Task-8 oracle tests green: every file on `sandbox.img`, `m1_xxhash`, `m1_lzo`, `m1_zlib` byte-identical to dissect.btrfs and guest SHA-256s; LZO property tests pass | met (M1c) | Oracle table above (152/152), `uv run pytest -q tests/oracle` 11 passed; `sandbox.img` has no guest SHA-256s (no scenario log), so dissect is its only oracle; LZO property tests in `test_lzo.py` and `test_compress.py` pass |
+| Import-boundary and read-only tests pass; `sandbox.img` hash unchanged | met | 53 passed; `sha256sum sandbox.img` unchanged before and after, mtime 2026-04-26 18:49:36 |
+
+The plan has no per-milestone status markers, so M1 gained a single line:
+"**Status 2026-09-15: done.**"
+
+**Deviations** (with rationale):
+- **LZO worst case is 4 421 bytes, not 4 419.** The v7.0 `lzo.h:21` macro
+  (`x + x/16 + 64 + 3 + 2`) gives 4 421; the `lzo.c` comment and plan §3.5
+  said 4 419. The plan is corrected.
+- **LZO bounds are stricter than the kernel in two places.**
+  - A segment may decode to at most one sector, as plan §3.5 specifies; the
+    kernel's buffer is 4 421 bytes.
+  - Bytes after the end marker are an error (`trailing_input`, the kernel's
+    `LZO_E_INPUT_NOT_CONSUMED`).
+- **LZO-RLE streams are refused.** A stream whose first byte is 17 and that
+  is at least 5 bytes long is a versioned stream (lzo.rst); btrfska raises
+  `unsupported_version`. btrfs never writes one, and refusing is louder than
+  guessing at an untested encoding.
+- **zlib and zstd must reach their end of stream.** The kernel's bio paths
+  stop once `ram_bytes` are produced. No corpus extent hits the difference;
+  a truncated stream with full output is reported rather than trusted.
+- **A regular compressed extent must decode to exactly `ram_bytes`.** More
+  output is `output_overrun`, although the kernel ignores it. The probe
+  found exact lengths on every regular extent.
+- **`cat` is minimal.**
+  - It takes `--inode` only (no path lookup) and never writes files.
+  - `read_file` walks the whole fs tree per inode (no key search); M3's
+    catalog replaces repeated walks.
+- **Oracle tests were not seen failing first.** They exercise code that
+  already had failing-first unit tests. Their expectations come from
+  dissect.btrfs, lzallright and the guest logs, not from btrfska. Mutation
+  check: the harness found and classified every lzallright/btrfska
+  disagreement (all over-bound outputs).
+- **Skip check.** `uv run --no-dev` still used the synced venv. The skip was
+  therefore shown by blocking the imports
+  (`sys.modules['dissect'] = sys.modules['lzallright'] = None`); both oracle
+  modules skip.
+- **dissect reads backup generations** through a private attribute swap
+  (`Btrfs._root_tree`), in tests and the EXP-001 script only.
+- **`experiments/env.sh` arrives with EXP-001**, not EXP-000 as plan §7
+  says, because EXP-001 is the first record to need it.
+- **A clipping-report change came after EXP-001 ran** (`7365cfd`). It changes
+  only `problems` strings, none of EXP-001's metrics.
+
+**Verification** (local, branch `feature/m1c-extent-reads` at `c4c9790`, all
+M1 images present; logs in `images/scratch/m1c/verify/`):
+
+| Check | Command | Result |
+|---|---|---|
+| `sandbox.img` before | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime 2026-04-26 18:49:36 |
+| Tests (all) | `uv run pytest -q` | `601 passed` (was 461) |
+| vm tests | `uv run pytest -m vm -q` | `44 passed, 557 deselected` |
+| Tests without vm | `uv run pytest -m "not vm" -q` | `557 passed, 44 deselected` |
+| Oracle subset | `uv run pytest -q tests/oracle` | `11 passed` |
+| Oracles absent | the same tests with `dissect`/`lzallright` imports blocked | `2 skipped` |
+| New unit modules | `uv run pytest -q tests/test_lzo.py tests/test_compress.py tests/test_extents.py` | `114 passed` |
+| `cat` and `pieces` | `uv run pytest -q tests/test_cli.py -k cat`; `… tests/test_chunks.py -k pieces` | `7 passed`; `8 passed` |
+| Read-only scan and import boundary | `uv run pytest -q tests/test_readonly.py tests/test_import_boundary.py` | `53 passed`; `grep -rn 'dissect\|lzallright' src/` finds only the attribution in `lzo.py`'s docstring, no import |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `48 files already formatted` |
+| Legacy runner | `uv run python -m unittest discover -s legacy/tests` | `Ran 37 tests`, `OK` |
+| Lockfile | `uv lock --check` | `Resolved 14 packages` |
+| Shell syntax | `for f in corpus/vm/*.sh corpus/vm/scenarios/*.sh corpus/vm/init experiments/env.sh; do sh -n "$f"; done` | exit 0 |
+| `sandbox.img` after | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime unchanged |
+
+**`btrfska cat` samples** (`images/scratch/m1c/verify/cat_samples.txt`; long
+lines trimmed with `…`; taken before `7365cfd`, whose clip message would now
+be absent for the partial last sector):
+```
+$ uv run btrfska cat sandbox.img --root backup:13 --inode 257 | sha256sum
+dbbe5517996826bd5861ac22b745d21d11219055d89243ca1aea0ad31f552b12  -
+{"record":"extent","root":{"source":"backup:13","tree":"fs","tree_id":5,"bytenr":30539776,"level":0,"generation":13,"via":"backup slot 0"},"inode":257,"unsupported_format":false,"kind":"regular","file_offset":0,"length":5242880,"leaf":30539776,"slot":7,"generation":13,"compression":"none",…,"disk_bytenr":13631488,…,"chunk_map":"current","ranges":[{"logical":13631488,"length":5242880,"copies":[{"mirror":1,"devid":1,"physical":13631488,"readable":true,"used":true,"matches":null}]}],"decoded_bytes":null,"sha256":"dbbe55179968…",…}
+{"record":"file",…,"inode":257,"unsupported_format":false,"size":5242880,"complete":true,"extents":1,"errors":[],"problems":[]}
+btrfska cat: inode 257, 5242880 bytes, 1 extents
+
+$ uv run btrfska cat images/scenarios/m1_lzo.img --tree 257 --inode 258 | sha256sum     # deleted_big.txt from the snapshot
+44969d026ed4164dbe77d48d4d359e98ac4057008cafd61723be72bff83e5fd4  -                    # = guest SHA-256
+extent 0: regular lzo, disk 164691968+77824 -> 131072 decoded, physical 307298304
+extent 131072: regular lzo, disk 164769792+69632 -> 131072 decoded
+extent 262144: regular lzo, disk 164839424+16384 -> 28672 decoded, 26750 supplied
+btrfska cat: inode 258, 288894 bytes, 3 extents
+
+$ uv run btrfska cat images/scenarios/m1_xxhash.img --root backup:35 --tree 257 --inode 259 | od -c
+0000000   s   m   a   l   l       s   e   c   r   e   t  \n                                 # inline zstd, decoded_bytes 4096
+btrfska cat: inode 259, 13 bytes, 1 extents
+
+$ uv run btrfska cat sandbox.img --inode 257 | wc -c                                   # exit 1
+0
+btrfska cat: error: no INODE_ITEM for inode 257 in the tree at 30703616
+```
+
+**Research notes.** research.md §10.9 records:
+- compressed inline extents holding a whole sector;
+- zero slack after compressed streams;
+- the kernel skipping the zlib adler32 check;
+- read-stop semantics;
+- the 4 421-byte worst case;
+- an lzo.rst first-byte erratum;
+- dissect.btrfs zero-filling unmapped addresses;
+- historical generations reaching only post-balance extent addresses;
+- how often corrupt LZO still decodes;
+- legacy failure modes, among them "Move/Rename" artifacts that are really
+  inode-number reuse.
+
+**For M2 (scan kernel).**
+- **Validating scanned blocks.** A physical block from the scan is validated
+  with `node.check_block(block, ctx, None, expect)`.
+- **Content through any map.** Content from a scanned or historical tree goes
+  through `extents.read_file(NodeReader(img, chunk_map, ctx), TreeRoot(...),
+  inode, no_holes=)`, and a `ChunkMap` built from other chunk items works
+  unchanged. An extent in a chunk the map lacks is `unmapped`, never zeros.
+- **No oracle for historical extents.** dissect.btrfs zero-fills such reads,
+  so only guest SHA-256s can check them.
+- **What the s01 corpus limits.** All four backup roots of every s01 image
+  name the same `sv1` and snapshot leaves (gen 34). The pre-deletion `sv1`
+  leaf and the pre-balance data addresses survive only as unreferenced
+  blocks, which is exactly M2's target.
+- **EXP-000 inputs.** `experiments/env.sh` now exists for EXP-000, and the
+  discard trio images are under `images/scenarios/`.
+- **Legacy's targeted scan** on the sandbox accepts 85 blocks (71 orphans and
+  14 current leaves) and rejects 1 on crc32c. On every non-crc32c image it
+  rejects all fsid-matching blocks. The M2 parity gate (71/21) compares
+  against the sandbox only.
+- **Detector candidates for M6.** Non-zero bytes past `ram_bytes` in inline
+  streams and slack after compressed streams are already reported as
+  problems.
+- **CI.** CI's `uv sync --locked` installs the dev group, so the oracle LZO
+  tests and the sandbox parity test run there (about 6 s); the vm parity tests
+  skip.
+
 ## 2026-09-15 — M1b: validated node reader, chunk maps, anchored tree walking
 
 - **Branch:** `feature/m1b-validated-tree-walking` (from `main` at `a3c0e31`).
