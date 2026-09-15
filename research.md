@@ -2061,107 +2061,145 @@ Observed with the scan kernel, targeted regions and orphan classification
 
 ### 10.11 Old-root discovery and discard notes from M2b (2026-09-15)
 
-Observed with `btrfska roots` and EXP-000/EXP-002 (catalog.md, M2b entry).
-Kernel references are to tag v7.0. Raw outputs: `images/scratch/m2b/roots/`
-and `images/scratch/exp/EXP-00{0,2}/`. Definitions (README, `btrfska roots`):
-- a **candidate root** is a valid scanned block that no block of its owner and
-  generation points to, at the highest level of that owner and generation;
-- a **state** is a root-tree candidate. Its trees are resolved through the
-  scanned blocks by (bytenr, generation, level, owner, first key), never
-  through a chunk map;
-- **completeness** is found / referenced distinct blocks, an upper bound.
+Observed with `btrfska roots` and EXP-000/EXP-002 (catalog.md, M2b entry, including its review
+fixes). Kernel references are to tag v7.0. Raw outputs: `images/scratch/m2b/roots/` and
+`images/scratch/exp/EXP-00{0,2}/`; after the review fixes, `images/scratch/m2b-review/roots/` and
+`images/scratch/exp/EXP-002/review/`. Definitions (README, `btrfska roots`):
+- a block is **referenced** when an indexed internal block one level up, of an owner the owner
+  check accepts and of the block's generation or a newer one, points to it with its bytenr and
+  generation;
+- a **candidate root** is a valid scanned block that nothing references, at any level. A block only
+  a newer parent points to (`referenced_by_newer`) belongs to that newer tree, not to a state of
+  its own;
+- a **candidate root-tree block (state)** is an owner-1 candidate root. It stands for the root tree
+  as far as that block reaches and the trees its ROOT_ITEMs name, resolved through the scanned
+  blocks by (bytenr, generation, level, owner, first key), never through a chunk map. It is
+  evidence of one root tree, not proof of a whole committed filesystem state: a surviving leaf of
+  a multi-leaf root tree whose parent is gone covers that leaf's ROOT_ITEMs only, and a forged
+  owner-1 block is a state too (`level_consistent` flags a level that contradicts the blocks its
+  pointers name);
+- **completeness** is found / referenced distinct blocks of that root tree and of every tree a
+  ROOT_ITEM in its found leaves names, except ROOT_ITEMs naming tree 1. The chunk tree and the log
+  tree are excluded, since no ROOT_ITEM names them. With nothing missing, completeness 1 means
+  every block of the root tree and of every ROOT_ITEM-named tree was found, nothing more. Nothing
+  below a missing block is counted, so it overstates survival.
 
-- **Discovery per image** (`btrfska roots IMAGE --full-sweep`; deterministic
-  per image):
+- **Discovery per image** (`btrfska roots IMAGE --full-sweep`; deterministic per image). The
+  superblock and backup slots are counted as slot references, with the distinct blocks they name
+  in brackets:
 
-  | Image | Root-tree candidates | Superblock + backup roots rediscovered | States beyond the backups (generations) | … complete | Walk failures |
+  | Image | Root-tree candidates | Slot references rediscovered (distinct blocks) | States beyond the backups (generations) | … complete | Walk failures |
   |---|---|---|---|---|---|
-  | `sandbox.img` | 5 | 26/26 | 1 (3) | 1 | none |
-  | `m1_xxhash`, `m1_blake2b`, `m1_lzo`, `m1_zlib`, `m1_badnode`, `m1_mirror_damage`, `m1_foreign_mirror` | 35 | 26/26 | 31 (3, 6, 7 ×2, 8–34) | 30 | none |
-  | `m1_sha256_bgt` | 35 | 26/26 | 31 (3, 6, 7 ×2, 8–34) | 30 | none |
-  | `m1_badnode_both` | 35 | 26/26 | 31 (3, 6, 7 ×2, 8–34) | 29 | 5 `corrupt` |
-  | `m2_logtree` | 5 | 24/27 | 2 (3, 7) | 1 | 3 `reused` |
-  | `s01_discard_none_r1`, `s01_discard_async_r1` | 35 | 26/26 | 31 (3, 6, 7 ×2, 8–34) | 30 | none |
-  | `s01_discard_sync_r1` | 2 | 14/26 | 1 (3) | 0 | 12 `zeroed` |
+  | `sandbox.img` | 5 | 26/26 (18/18) | 1 (3) | 1 | none |
+  | `m1_xxhash`, `m1_blake2b`, `m1_lzo`, `m1_zlib`, `m1_badnode`, `m1_mirror_damage`, `m1_foreign_mirror` | 35 | 26/26 (14/14) | 31 (3, 6, 7 ×2, 8–34) | 30 | none |
+  | `m1_sha256_bgt` | 35 | 26/26 (14/14) | 31 (3, 6, 7 ×2, 8–34) | 30 | none |
+  | `m1_badnode_both` | 35 | 26/26 (14/14) | 31 (3, 6, 7 ×2, 8–34) | 29 | 5 `corrupt` |
+  | `m2_logtree` | 5 | 24/27 (19/22) | 2 (3, 7) | 1 | 3 `reused` |
+  | `s01_discard_none_r1`, `s01_discard_async_r1` | 35 | 26/26 (14/14) | 31 (3, 6, 7 ×2, 8–34) | 30 | none |
+  | `s01_discard_sync_r1` | 2 | 14/26 (6/14) | 1 (3) | 0 | 12 `zeroed` |
 
-- **Most of the history of a small quiescent image survives, far beyond the
-  backup roots.**
-  - On every s01 image without trims, one root-tree state per transaction
-    from generation 8 to 34 survives, plus generations 3, 6 and two
-    generation-7 blocks. That is 31 states beyond the 4 backup states.
-  - 30 of the 31 have every referenced block found: 8–14 blocks each (the
-    root-tree leaf and each named tree's root, all leaves here).
-  - The generation-7 pair is one transaction writing its root tree twice,
-    consistent with a WRITTEN block being copied again in the running
-    transaction (ctree.c:621-625, §10.10).
-  - A tool bounded by the four backup roots (plan.md §1) sees generations
-    35–38 only.
-  - Threats to validity: one scenario, 512 MiB, quiescent after the last
-    commit. Churn reuses these blocks, as the `reused` walk failures on
-    `m2_logtree` show. File content was not read per state (M4/M5).
+  Re-measured after the review fixes: every count is unchanged. The only change is the class of
+  the generation-3 state's missing csum root (below). No block on the corpus is referenced only by
+  a newer parent, no state is level-inconsistent, and every owner-1 block is level 0.
+- **Most of the history of this small quiescent image survives, far beyond the backup roots.**
+  - On every s01 image without trims, one candidate root-tree block (state) per transaction from
+    generation 8 to 34 survives, plus generations 3, 6 and two generation-7 blocks. That is 31
+    states beyond the 4 backup states.
+  - 30 of the 31 have every referenced block found: 8–14 blocks each (the root-tree leaf and each
+    named tree's root, all leaves here).
+  - The generation-7 pair is one transaction writing its root tree twice, consistent with a
+    WRITTEN block being copied again in the running transaction (ctree.c:621-625, §10.10).
+  - A tool bounded by the four backup roots (plan.md §1) sees generations 35–38 only.
+  - **Why they survive, and why this does not generalise** (EXP-002 §6.5). Generations 3–16 lie in
+    the mkfs and pre-balance chunks that the scenario's final full balance relocated and deleted:
+    no block of those states is placed by the current chunk map (`maps_current` 0), and nothing
+    reallocated those device ranges before unmount. Generations 17–34 lie in the 64 MiB metadata
+    block group the balance created. Every root-tree block of generations 17–38 lies within its
+    first 1.41 MiB, and the allocator continues from its last allocation (extent-tree.c:4235-4241,
+    4451-4466, 4620-4622), so it never came back to the blocks those generations freed (read from
+    the source, not measured). The survival of these states depends on the balance and on the
+    filesystem's short life (38 transactions).
+  - Other threats to validity: one scenario, 512 MiB, quiescent after the last commit. Churn
+    reuses these blocks, as the `reused` walk failures on `m2_logtree` show. File content was not
+    read per state (M4/M5).
 - **Pre-balance states resolve without the current chunk map.**
-  - States 3–16 on the s01 images have no block that the current chunk map
-    places where it was scanned.
-  - Each state's inferred chunk tree is the newest chunk-tree candidate root
-    no newer than the state: generations 3, 6, 17, 23, 24, 29 and 30 occur.
-    Their CHUNK_ITEMs, read through the index without the sys_chunk_array,
-    place every found block where it lies (`maps_neither` 0 in every state).
-  - Generations 17 and 18 straddle the balance: 5 of 10 and 10 of 13 blocks
-    map under the current map, all under their own chunk items.
-  - This is the input historical chunk-map reconstruction (M5, C6) needs.
-    btrfska only checks placement and keeps no historical map.
-- **The sandbox keeps less.** Its only extra state is generation 3 (7 of 7
-  blocks, chunk root generation 3). None of generations 4–10 was found. The
-  sandbox generator is unknown (§10.4), so no cause is claimed.
-- **The mkfs-era generation-3 state misses one tree on every s01 image.**
-  Its csum tree root is the generation-1 leaf at 1130496. That leaf is a scan
-  candidate but invalid (WRITTEN unset, §10.10), so it is not indexed.
-  - The fallback read through the current chunk map finds the address
-    unmapped, and the state reports it as `unmapped`.
-  - Limitation: missing blocks are classified through the current chunk map
-    only. An invalid scanned copy at the named address is not consulted; the
-    M3 catalog, which stores every candidate, can join them.
+  - States 3–16 on the s01 images have no block that the current chunk map places where it was
+    scanned.
+  - Each state's inferred chunk tree is the newest chunk-tree candidate root no newer than the
+    state: generations 3, 6, 17, 23, 24, 29 and 30 occur. Their CHUNK_ITEMs, read through the index
+    without the sys_chunk_array, place every found block where it lies (`maps_neither` 0 in every
+    state).
+  - Generations 17 and 18 straddle the balance: 5 of 10 and 10 of 13 blocks map under the current
+    map, all under their own chunk items.
+  - This is the input historical chunk-map reconstruction (M5, C6) needs. btrfska only checks
+    placement and reads missing blocks through those chunk items; it keeps no historical map.
+- **The sandbox keeps less.** Its only extra state is generation 3 (7 of 7 blocks, chunk root
+  generation 3). None of generations 4–10 was found. The sandbox generator is unknown (§10.4), so
+  no cause is claimed.
+- **The mkfs-era generation-3 state misses one tree on every s01 image.** Its csum tree root is the
+  generation-1 leaf at 1130496. That leaf is a scan candidate but invalid (WRITTEN unset, §10.10),
+  so it is not indexed, and it lies in the mkfs chunk the current chunk map no longer covers.
+  - Before the review fixes, missing blocks were read through the current chunk map only, and this
+    leaf was reported `unmapped` although it is present.
+  - Missing blocks are now also read through the state's own chunk items when the current map does
+    not place them, and checked against invalid scanned copies with the same bytenr and generation.
+    The leaf is `corrupt` (a failed integrity check) on all ten s01-derived images measured (the
+    nine m1 images, `m2_logtree` and the trio). Completeness is unchanged: 5 of 6, 6 of 7 on
+    `m1_sha256_bgt`. On a copy of `sandbox.img` with that leaf damaged, the same case reads
+    `corrupt` (`tests/test_scan_roots.py`).
 - **Reuse is not damage, and the classes separate them.**
-  - `m2_logtree`: backup root 5's root, extent and dev tree blocks (30441472,
-    30474240, 30457856) now hold intact generation-7 blocks of trees 10, 1
-    and 256. All 3 walk failures are `reused`, as the M2a review asked.
-  - `m1_badnode_both`: the damaged `sv1` leaf is `corrupt` in the current
-    walk and all four backup walks (5 failures). Every state naming it drops
-    to 9 of 10 (generation 34 to 11 of 12).
-  - Sync discard: the 12 unreachable backup-root blocks read as zeros,
-    `zeroed`.
-- **Superseded log commits are visible.** On `m2_logtree`, log generation 9
-  (superblock + 1) holds 4 blocks, 8 copies: 2 live, reached by the log walk,
-  and 2 superseded by the second fsync's log commit. The log rule indexes all
-  8 copies; no log candidate was rejected. No log block of a committed
-  transaction survives on the corpus.
-- **Owner 12 and 13.** No RAID stripe tree or remap tree block exists on the
-  corpus. The stock guest kernel cannot create either (§10.4).
-- **Sync discard removes the history the kernel frees (EXP-002).** On all
-  15 sync images:
-  - 2 root-tree states survive: the live one and the mkfs generation-3 state;
-  - the root, extent, chunk and dev tree roots of backups 35–37 read as
-    zeros. Their fs and csum roots are shared with the live state, hence 14
-    of 26 roots;
-  - `backup_reachable` falls from 24 to 0 and valid orphans from 340 to 16.
-    All 16 are mkfs residue of generations 2–5, outside the current chunk
-    map.
+  - `m2_logtree`: backup root 5's root, extent and dev tree blocks (30441472, 30474240, 30457856)
+    now hold intact generation-7 blocks of trees 10, 1 and 256. All 3 walk failures are `reused`,
+    as the M2a review asked.
+  - `m1_badnode_both`: the damaged `sv1` leaf is `corrupt` in the current walk and all four backup
+    walks (5 failures). Every state naming it drops to 9 of 10 (generation 34 to 11 of 12).
+  - Sync discard: the 12 unreachable backup-root slot references read as zeros, `zeroed`.
+- **Superseded log commits are visible.** On `m2_logtree`, log generation 9 (superblock + 1) holds
+  4 blocks, 8 copies: 2 live, reached by the log walk, and 2 superseded by the second fsync's log
+  commit. The log rule indexes all 8 copies; no log candidate was rejected. No log block of a
+  committed transaction survives on the corpus.
+- **Owner 12 and 13.** No RAID stripe tree or remap tree block exists on the corpus. The stock
+  guest kernel cannot create either (§10.4).
+- **Sync discard removes the history the kernel frees (EXP-002).** On all 15 sync images:
+  - 2 candidate root-tree blocks (states) survive: the live one and the mkfs generation-3 state;
+  - the root, extent, chunk and dev tree roots of backups 35–37 read as zeros. These are 12 of the
+    26 superblock and backup slot references but 8 distinct blocks: root ×3, extent ×3, and
+    chunk 131104768 and dev 64847872, each shared by the three backups. The fs and csum roots of
+    those backups are shared with the live state. So the 26 slot references name 14 distinct
+    blocks, and under sync 14 of 26 references but only **6 of 14 distinct blocks** survive
+    (distinct counts from the three kept images);
+  - `backup_reachable` falls from 24 to 0 and valid orphans from 340 to 16. All 16 are mkfs residue
+    of generations 2–5, outside the current chunk map.
 
-  Consistent with the source: under `DISCARD_SYNC`,
-  `btrfs_finish_extent_commit` trims every range unpinned at each commit,
-  which includes COW-freed tree blocks (extent-tree.c:2994-3005). It also
-  trims every block group deleted in the transaction (l.3058-3063), such as
-  those the balance emptied (block-group.c:1755-1767). Blocks mkfs freed in
-  userspace were never pinned by the kernel. This mechanism is read from the
-  source, not measured.
-  - Async discard with an unmount about a second later matched no discard
-    on every count in all 15 runs.
-  - Threats to validity: virtio-blk TRIM on a sparse raw file reads back as
-    zeros, whereas SSDs differ; one small scenario; quick unmount
-    (`experiments/EXP-002.md` §6.5).
-- **Probe reconciliation (EXP-002).** The probe and btrfska's full sweep read
-  the same 4 KiB offsets except blocks 0–15, which only the probe reads. The
-  kernel places no tree block below 64 KiB (block-group.c:2277-2330), and on
-  the corpus those blocks hold no fsid match. With invalid candidates
-  included and the probe's generation rule, the counts agree on 48 of 48
-  images.
+  Consistent with the source: under `DISCARD_SYNC`, `btrfs_finish_extent_commit` trims every range
+  unpinned at each commit, which includes COW-freed tree blocks (extent-tree.c:2994-3005). It also
+  trims every block group deleted in the transaction (l.3058-3063), such as those the balance
+  emptied (block-group.c:1755-1767). Blocks mkfs freed in userspace were never pinned by the
+  kernel. This mechanism is read from the source, not measured.
+  - Async discard with an unmount about a second later matched no discard on every count in all
+    15 runs.
+  - Threats to validity: virtio-blk TRIM on a sparse raw file reads back as zeros, whereas SSDs
+    differ; one small scenario; quick unmount (`experiments/EXP-002.md` §6.5).
+- **Probe reconciliation (EXP-002).** The probe and btrfska's full sweep read the same 4 KiB
+  offsets except blocks 0–15, which only the probe reads.
+  - No tree block can lie there: a regular device holds no device extent below
+    `BTRFS_DEVICE_RANGE_RESERVED`, 1 MiB (fs.h:104-108; volumes.c:1664-1671; volumes.c:8257-8266
+    warns about older mkfs layouts), and btrfs-progs mkfs places its first chunk at 1 MiB (v6.6.3
+    kernel-shared/ctree.h:207, mkfs/common.c:388). `exclude_super_stripes`
+    (block-group.c:2277-2330) concerns logical addresses below 64 KiB and the superblock copies,
+    not physical offsets. On the corpus those blocks hold no fsid match.
+  - With invalid candidates included and the probe's generation rule, the counts are equal on 48 of
+    48 images. This is **coverage agreement**: the compatibility count reuses btrfska's own scan
+    plan and FSID prefilter, so it verifies that btrfska reads the probe's offsets, matches the
+    same fsid bytes at +0x20 and reads the same generation field at +0x50. It is not an independent
+    re-implementation and does not validate btrfska's checks or classes.
+- **Hostile input: discovery cost (review).** A forged image with 185 allocated 4 KiB blocks (64
+  owner-1 level-2 roots sharing 121 level-1 nodes, each with 121 pointers to absent blocks) took
+  422 s, 130.7 MiB of peak Python heap and 937 024 block reads before walks were memoised per
+  subtree. After, it takes 2.8 s, 3.5 MiB and 256 reads (tracemalloc on for both). At most 256
+  missing blocks per state are read and classified; the rest are counted as `unchecked`.
+- **Hostile input: candidate definition (review).** Before the review fixes, candidates were the
+  unreferenced blocks at the highest level of their owner and generation. One planted, checksum-
+  valid owner-1 level-7 block of generation G then demoted every real generation-G root-tree leaf
+  to a fragment and removed that state from the report. Every unreferenced block is now a candidate
+  at any level, and the planted block is reported as a level-inconsistent state of its own.

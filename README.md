@@ -17,8 +17,9 @@ frozen, still runnable, under `legacy/`.
   since been removed. It classifies each one as `live`, `backup_reachable`,
   `unreferenced` or `invalid`.
 - `btrfska roots IMAGE [--full-sweep] [--json]` finds historical tree roots
-  among those blocks. It reports every historical root-tree state with the
-  trees it names and how completely they survive, checks that every
+  among those blocks. It reports every candidate root-tree block (a state)
+  with the trees it names and how completely they survive (chunk and log
+  trees excluded), checks that every
   superblock and backup root is rediscovered, and tells blocks reused by
   newer trees apart from damaged ones.
 - `btrfska info IMAGE` validates every superblock copy (all four checksum
@@ -275,8 +276,8 @@ backup root, `reused` is expected and is not damage.
 
 `btrfska roots IMAGE [--full-sweep] [--workers N] [--json]` finds historical
 tree roots among the scanned tree blocks, the idea of btrfs-progs
-`btrfs-find-root`, and reports how much of each historical root-tree state
-survives. The command opens no file other than the image.
+`btrfs-find-root`, and reports how much of each candidate root-tree block
+(state) survives. The command opens no file other than the image.
 
 **Method.**
 - It scans as `scan` does, with the same regions and options. Every valid
@@ -300,9 +301,16 @@ survives. The command opens no file other than the image.
   moved still resolves. A pointer or ROOT_ITEM is found when a valid scanned
   block has its bytenr, generation and level, an acceptable owner and the
   pointer's first key.
-- **Completeness** = found / referenced. Referenced blocks are the distinct
-  blocks the found blocks name: root-tree blocks, tree roots and child
-  pointers. Nothing below a missing block is known, so it is an upper bound.
+- **Completeness** = found / referenced distinct tree blocks. Referenced
+  blocks are the blocks of the root tree reached from the candidate block,
+  the tree root every ROOT_ITEM in its found leaves names, and every child
+  pointer of a found block. ROOT_ITEMs naming tree 1 are not followed, and
+  the chunk tree and the log tree are excluded (no ROOT_ITEM names them).
+  With nothing missing, completeness 1 means every block of the root tree
+  and of every ROOT_ITEM-named tree was found, nothing more. Nothing below a
+  missing block is known, so it overstates survival.
+- A state is evidence of one root tree, not proof of a whole committed
+  filesystem state: a forged owner-1 block is a state too.
 - Up to 64 states are evaluated: the superblock and backup ones first, then
   the newest.
 
@@ -318,7 +326,7 @@ applicable. Every record has `record` (its type) and `unsupported_format`
     them.
   - `indexed`: `true` when a valid scanned block matches it.
   - `candidate`: `true` when that block is a candidate root.
-- `state`: one historical root-tree state.
+- `state`: one candidate root-tree block (state).
   - `bytenr`, `generation`, `level`: the root-tree block; `copies`: the
     physical offsets where it was scanned.
   - `known_as`: the `current` and `backup:GEN` sources that name this block;
