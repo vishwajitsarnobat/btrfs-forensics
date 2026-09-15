@@ -152,6 +152,10 @@ overlapping extents) and `problems` (such as gaps on a filesystem without
 NO_HOLES). Decoding success is not evidence of correct content: LZO has no
 checksum and data checksums are verified from M6 on.
 
+`cat` currently holds the whole file in memory before writing it, with a
+peak of about twice the file size (explicit and implicit holes excepted).
+Streaming reads arrive with the recovery engine (plan.md M4).
+
 ## Tests and lint
 
 ```sh

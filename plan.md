@@ -833,6 +833,9 @@ M1c; the evidence per bullet is in the catalog.md M1c entry.
   `substrate/extents.py` (compression handled), `-m`-style metadata, xattrs (0x18),
   INODE_EXTREF (0x0D); `FT_ENCRYPTED` 0x80 masked; encrypted extents
   refused with a report line.
+- Streaming extent reads: M1c's `read_file` and `cat` hold a file fully in
+  memory (peak about 2× its size); extraction reads and writes extent by
+  extent.
 - Archaeology port: beyond-`nritems` orphan items (leaf + internal),
   node-slack residual mining, kernel ORPHAN_ITEM (0x30) resurrection —
   golden-tested against legacy outputs (with defect #8 corrected).
