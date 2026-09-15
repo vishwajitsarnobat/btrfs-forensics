@@ -393,6 +393,173 @@ btrfska cat: error: no INODE_ITEM for inode 257 in the tree at 30703616
   tests and the sandbox parity test run there (about 6 s); the vm parity tests
   skip.
 
+### Review fixes
+
+PR #10 was approved with fixes. Each code fix was written test-first and
+the tests were seen failing. All commits are local on
+`feature/m1c-extent-reads`, on top of `350a217`:
+- `dac57ec` Reject LZO end markers whose copy length is not 3
+- `8a19d34` Extend the LZO harness with truncation, insertion, deletion and random-stream corpora
+- `45c72cc` Bound uncompressed extent lengths by the image size and map read pieces lazily
+- `12a39ae` Note in-memory file reads and qualify the EXP-001 block counts
+- `47387bc` Cite the extended LZO harness results
+- this subsection (the commit after `47387bc`)
+
+1. **LZO end marker with any length code (medium).**
+   - **Defect.** `lzo.py` treated every `0001HLLL` instruction at distance
+     16384 as the end of the stream. The kernel accepts it only with copy
+     length 3, that is `11 00 00`.
+   - **Sources.** v7.0 `lib/lzo/lzo1x_decompress_safe.c`
+     (sha256 `f481e9df6835eea59c555017e4446cbf6f8d4062d0c04a52fa99d4de5846be04`):
+     - line 208 jumps to `eof_found` at that distance;
+     - line 274 returns `LZO_E_ERROR` when `t != 3`.
+
+     lzokay (MIT) `lzokay.cpp:284` checks `lblen != 3` the same way, and
+     lzo.rst says the marker takes 3 bytes. This GPL file was fetched into
+     `images/scratch/m1c/review/` only to confirm this one condition after
+     the decoder existed. Just those lines were read, no code was taken from
+     it, and it has been deleted, as has `lzodefs.h`. The `lzo.py` docstring
+     says so.
+   - **Fix.** A new kind, `invalid_end_marker`
+     (`lzo_invalid_end_marker` through `compress.py`).
+   - **Tests** (`test_lzo.py`, 45 → 50):
+     - `13 41 42 15 00 00` and `13 41 42 10 01 00 00` (the two review
+       repros), plus lengths 4 and 9;
+     - the length-3 form after literals still decodes.
+
+     The four repros failed before the fix (`4 failed, 46 passed`), and
+     lzallright raises `LZOError` on all four.
+2. **Harness corpora.**
+   - `tests/oracle/lzo_hostile.py` now has six corpora of `--mutations`
+     (300) streams each:
+     - bit flips, drawn from the seed exactly as before, so their counts are
+       unchanged;
+     - truncation, one inserted byte and one deleted byte. Every second
+       position is drawn from the last 8 bytes;
+     - `random_bytes`: a literal run and 1–16 low-biased bytes;
+     - `random_instructions`: 0–6 instructions with every field random and
+       a random `0001HLLL` terminator.
+   - Each stream records the btrfska/lzallright agreement and lists every
+     disagreement as hex.
+   - **The byte-level corpora did not find the bug.** A first run with only
+     uniform positions, and a second with tail positions and the
+     `random_bytes` corpus, both agreed 300/300 in every corpus and seed
+     against the pre-fix decoder (`images/scratch/m1c/review/run_prefix.py`
+     loads `350a217`'s `lzo.py`). No single-byte edit of `11 00 00` yields
+     another length code with distance 16384. Only `random_instructions`
+     exposed it.
+   - `test_every_hostile_corpus_agrees_with_lzallright` (seeds 11 and 12,
+     400 streams per corpus) fails against the pre-fix decoder: 399/400 and
+     382/400 on `random_instructions`.
+
+   **Results** (`uv run python tests/oracle/lzo_hostile.py --seeds 1 2 3 4 5
+   --json images/scratch/m1c/review/lzo_hostile_fixed.json`, 25.1 s wall;
+   median (range) over seeds 1–5, 300 streams per corpus per seed; for the
+   random corpora the first column counts returned bytes):
+
+   | Corpus | Decoder | Correct / returned | Wrong ≤ 4 KiB | > 4 KiB | `Exception` | non-`Exception` |
+   |---|---|---|---|---|---|---|
+   | bit_flips | btrfska | 0 (0–1) | 227 (218–231) | 0 (0–0) | 72 (68–82) | 0 (0–0) |
+   | bit_flips | lzallright 0.2.6 | 0 (0–1) | 227 (218–231) | 36 (32–41) | 39 (31–47) | 0 (0–0) |
+   | bit_flips | dissect.util 3.24 pure Python | 1 (0–1) | 267 (258–277) | 30 (22–41) | 1 (0–2) | 0 (0–0) |
+   | bit_flips | dissect.util 3.24 native | 0 (0–1) | 227 (218–231) | 36 (32–41) | 0 (0–2) | 37 (31–46) |
+   | truncation | btrfska | 0 (0–0) | 0 (0–0) | 0 (0–0) | 300 (300–300) | 0 (0–0) |
+   | truncation | lzallright 0.2.6 | 0 (0–0) | 0 (0–0) | 0 (0–0) | 300 (300–300) | 0 (0–0) |
+   | truncation | dissect.util 3.24 pure Python | 59 (54–70) | 0 (0–0) | 0 (0–0) | 241 (230–246) | 0 (0–0) |
+   | truncation | dissect.util 3.24 native | 0 (0–0) | 0 (0–0) | 0 (0–0) | 300 (300–300) | 0 (0–0) |
+   | insertion | btrfska | 0 (0–0) | 12 (9–14) | 0 (0–0) | 288 (286–291) | 0 (0–0) |
+   | insertion | lzallright 0.2.6 | 0 (0–0) | 12 (9–14) | 63 (57–71) | 225 (220–229) | 0 (0–0) |
+   | insertion | dissect.util 3.24 pure Python | 71 (70–78) | 152 (139–158) | 57 (50–65) | 17 (7–32) | 0 (0–0) |
+   | insertion | dissect.util 3.24 native | 21 (13–23) | 12 (9–14) | 63 (57–71) | 74 (26–93) | 132 (119–176) |
+   | deletion | btrfska | 0 (0–0) | 41 (32–71) | 0 (0–0) | 259 (229–268) | 0 (0–0) |
+   | deletion | lzallright 0.2.6 | 0 (0–0) | 41 (32–71) | 22 (9–23) | 240 (209–250) | 0 (0–0) |
+   | deletion | dissect.util 3.24 pure Python | 59 (50–60) | 185 (157–200) | 20 (11–25) | 40 (21–75) | 0 (0–0) |
+   | deletion | dissect.util 3.24 native | 0 (0–0) | 41 (32–71) | 22 (9–23) | 114 (78–137) | 119 (95–172) |
+   | random_bytes | btrfska | 0 (0–0) | 0 (0–0) | 0 (0–0) | 300 (300–300) | 0 (0–0) |
+   | random_bytes | lzallright 0.2.6 | 0 (0–0) | 0 (0–0) | 0 (0–0) | 300 (300–300) | 0 (0–0) |
+   | random_bytes | dissect.util 3.24 pure Python | 0 (0–0) | 0 (0–0) | 0 (0–0) | 300 (300–300) | 0 (0–0) |
+   | random_bytes | dissect.util 3.24 native | 0 (0–0) | 0 (0–0) | 0 (0–0) | 19 (18–25) | 281 (275–282) |
+   | random_instructions | btrfska | 0 (0–1) | 0 (0–0) | 0 (0–0) | 300 (299–300) | 0 (0–0) |
+   | random_instructions | lzallright 0.2.6 | 0 (0–1) | 0 (0–0) | 0 (0–0) | 300 (299–300) | 0 (0–0) |
+   | random_instructions | dissect.util 3.24 pure Python | 8 (6–13) | 0 (0–0) | 0 (0–0) | 292 (287–294) | 0 (0–0) |
+   | random_instructions | dissect.util 3.24 native | 2 (0–3) | 0 (0–0) | 0 (0–0) | 24 (22–27) | 274 (272–277) |
+
+   - **Agreement.** btrfska and lzallright now agree on 300 of 300 streams
+     in every corpus and seed. Every btrfska failure is `LzoError`.
+     - The only residual difference is the documented one-sector bound:
+       lzallright's over-4 KiB outputs, which btrfska rejects as
+       `output_overrun`.
+     - Against the pre-fix decoder, `random_instructions` agreed on
+       289/294/293/292/293. All 39 disagreements were btrfska returning
+       bytes where lzallright raised `LZOError`. The fixed decoder raises
+       `invalid_end_marker` on all 39, with copy lengths 4–9 (35 streams)
+       and 39, 51, 584 and 623 (zero-run lengths).
+     - btrfska's counts on the other five corpora are identical before and
+       after the fix.
+   - **Also observed.** dissect.util's pure-Python decoder returns the
+     original sector for 54–70 truncated streams per seed: its loop ends
+     once the output length is reached, before any end marker.
+   - **Docs updated.** plan.md §3.5 ("Beyond bit flips") and research.md
+     §10.9. The bit-flip numbers cited in plan.md §3.5 and §9, research.md
+     and the table above are unchanged.
+3. **Unbounded piece list for hostile striped extents (low-medium).**
+   - **Bound.** An uncompressed regular extent whose `disk_num_bytes` or
+     `num_bytes` exceeds the image size is now `invalid_extent`, rejected
+     before any mapping or allocation.
+     - Rationale: every readable copy comes from the one image, so a longer
+       extent cannot be read without aliasing.
+     - The kernel's allocator limit `BTRFS_MAX_EXTENT_SIZE` (128 MiB, v7.0
+       `fs.h:66`) is deliberately not used. `check_extent_data_item`
+       (`tree-checker.c:306-321`) enforces only alignment and end overflow,
+       so the kernel would still read a longer extent.
+     - Compressed extents keep their existing caps: `ram_bytes` and
+       `disk_num_bytes` in (0, 128 KiB]. `BTRFS_MAX_COMPRESSED` and
+       `BTRFS_MAX_UNCOMPRESSED` are re-verified as `SZ_128K` at v7.0
+       `compression.h:35` and `:40`.
+     - Holes and prealloc read no disk bytes and yield zeros in 1 MiB
+       pieces, so they are not bounded.
+   - **Laziness.** `ChunkMap.pieces` is now a generator. `_read` maps and
+     reads one piece at a time and stops at the first unmapped or unreadable
+     piece. An unmapped piece after readable ones now keeps the ranges read
+     so far in the record.
+   - **Tests.**
+     - `test_extent_lengths_beyond_the_image_are_rejected_quickly_in_bounded_memory`
+       covers three cases of 2^48 lengths in a 2^48-byte RAID0 chunk of a
+       128 MiB image. It asserts `invalid_extent`, no ranges, under 2 s and
+       a tracemalloc peak under 4 MiB. Before the fix it failed with
+       `MemoryError` at `extents.py:94` (run under `ulimit -v 3000000`).
+     - `test_pieces_are_produced_lazily` takes the first 3 of 2^31 pieces.
+       It also failed with `MemoryError` before the fix.
+     - `test_a_striped_read_stops_at_the_first_unreadable_piece` passed
+       before and after: the read result was already the same, and only the
+       work done changed. It is kept as a regression guard.
+     - Existing `pieces` tests now wrap the generator in `tuple()`.
+     - `test_extents.py` 29 → 33; `test_chunks.py` pieces tests 8 → 9.
+4. **In-memory reads (doc).** The `read_file` docstring and README "`btrfska
+   cat` output" now state that content is held fully in memory, with a peak
+   of about 2× the file size, and that streaming arrives with the recovery
+   engine. plan.md M4 gains a "Streaming extent reads" bullet.
+5. **EXP-001 block counts (doc).** The results table's accepted and
+   rejected headers carry a `[^blocks]` footnote. Legacy counts physical
+   scan hits (`legacy/utils/btree.py:516-517`), stale orphans included and
+   copies not merged. btrfska counts distinct logical blocks reached by
+   anchored walks. The two numbers are therefore not directly comparable.
+
+**Verification** (local, at `47387bc`; logs in
+`images/scratch/m1c/review/verify/`):
+
+| Check | Command | Result |
+|---|---|---|
+| `sandbox.img` before | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime 2026-04-26 18:49:36 |
+| Tests (all) | `uv run pytest -q` | `613 passed` (was 601) |
+| vm tests | `uv run pytest -m vm -q` | `44 passed, 569 deselected` |
+| Tests without vm | `uv run pytest -m "not vm" -q` | `569 passed, 44 deselected` |
+| Oracle subset | `uv run pytest -q tests/oracle` | `13 passed` (was 11) |
+| Read-only scan and import boundary | `uv run pytest -q tests/test_readonly.py tests/test_import_boundary.py` | `53 passed`; no `dissect` or `lzallright` import under `src/` |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `48 files already formatted` |
+| `sandbox.img` after | `sha256sum sandbox.img` | unchanged hash and mtime |
+
 ## 2026-09-15 — M1b: validated node reader, chunk maps, anchored tree walking
 
 - **Branch:** `feature/m1b-validated-tree-walking` (from `main` at `a3c0e31`).
