@@ -8,9 +8,15 @@ address and stripe index) or `unmapped_gap`. Kernel v7.0 references:
 - a stripe covers chunk length / data stripes on its device, where data stripes =
   (num_stripes - nparity) / ncopies (volumes.c:4023-4030 calc_data_stripes, l.7271-7276
   btrfs_calc_stripe_length);
-- tree blocks never overlap a superblock copy or the first 64 KiB: both are excluded from every
-  block group's free space (block-group.c:2277-2330 exclude_super_stripes). The ranges up to the
-  end of the primary superblock are skipped as `reserved`, the other copies as `superblock`;
+- tree blocks never overlap a superblock copy: exclude_super_stripes (block-group.c:2277-2330)
+  removes from every block group's free space the logical ranges that map onto a superblock copy,
+  and logical addresses below 64 KiB. That is a guarantee about logical addresses. Physically, a
+  regular device holds no device extent below BTRFS_DEVICE_RANGE_RESERVED, 1 MiB (fs.h:104-108;
+  volumes.c:1664-1671 dev_extent_search_start; volumes.c:8257-8266 warns about older mkfs layouts
+  that do not respect it), and btrfs-progs mkfs places its first chunk at 1 MiB (v6.6.3
+  kernel-shared/ctree.h:207, mkfs/common.c:388). The ranges up to the end of the primary
+  superblock are skipped as `reserved`, the other copies as `superblock`; the rest of the first
+  1 MiB is scanned, so a layout from an older mkfs is still covered;
 - with MIXED_GROUPS, block groups hold data and metadata alike (block-group.c:2429), so DATA
   chunks are scanned (the prototype's MIXED_GROUPS defect, research.md §8);
 - block-group items live in the block-group tree (tree 11) when compat_ro BLOCK_GROUP_TREE is set,

@@ -1,5 +1,7 @@
-"""The discard trio (EXP-000, EXP-002): btrfska's full sweep agrees exactly with
-corpus/vm/probe_stale_metadata.py, and old-root discovery per discard mode. Each image is the
+"""The discard trio (EXP-000, EXP-002): btrfska's full sweep counted under the probe's rules gives
+the same counts as corpus/vm/probe_stale_metadata.py (coverage agreement: the count reuses
+btrfska's scan plan and prefilter, so it is not an independent re-implementation), and old-root
+discovery per discard mode. Each image is the
 representative run of its mode (corpus/manifest.tsv); tests skip when it is absent."""
 
 import re
@@ -45,7 +47,7 @@ def test_manifest_lists_the_discard_trio():
 
 
 @pytest.mark.parametrize("mode", TRIO)
-def test_full_sweep_candidates_agree_exactly_with_the_probe(mode):
+def test_full_sweep_candidates_cover_the_blocks_the_probe_counts(mode):
     path = image(mode)
     probe = probe_columns(path)
     compat = probe_compat(path)
