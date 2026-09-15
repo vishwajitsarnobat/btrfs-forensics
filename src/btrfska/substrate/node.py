@@ -340,6 +340,12 @@ class NodeCopy:
         return all(check.ok is not False for check in self.checks)
 
     @property
+    def readable(self) -> bool:
+        """False when the copy's bytes could not be read (missing device, beyond the image end):
+        its only check is then `readable`, and none of `CHECK_NAMES` ran."""
+        return not any(check.name == "readable" for check in self.checks)
+
+    @property
     def problems(self) -> tuple[str, ...]:
         return tuple(f"{c.name}: {c.detail}" for c in self.checks if c.ok is False)
 

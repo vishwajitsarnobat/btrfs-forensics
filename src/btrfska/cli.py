@@ -10,7 +10,7 @@ from btrfska.substrate import csum, ondisk, superblock
 from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat, open_filesystem
 from btrfska.substrate.image import open_image
 from btrfska.substrate.items import KEY_TYPE_NAMES, summary
-from btrfska.substrate.node import ValidatedNode
+from btrfska.substrate.node import CHECK_NAMES, ValidatedNode
 from btrfska.substrate.roots import (
     TREE_IDS,
     RootNotFound,
@@ -161,7 +161,11 @@ def _tree_spec(text: str) -> str:
 
 
 def _node_record(node: ValidatedNode) -> dict:
-    """The node's identity and every physical copy's validation record."""
+    """The node's identity and every physical copy's validation record.
+
+    Every copy carries every check of `CHECK_NAMES`: null when not checked, which is all of them
+    for a copy that is not `readable`. Schema: README.md, "`btrfska walk` output".
+    """
     return {
         "bytenr": node.logical,
         "level": node.level,
@@ -173,9 +177,11 @@ def _node_record(node: ValidatedNode) -> dict:
                 "mirror": copy.mirror,
                 "devid": copy.devid,
                 "physical": copy.physical,
+                "readable": copy.readable,
                 "used": index == node.chosen,
                 "valid": copy.ok,
-                "checks": {check.name: check.ok for check in copy.checks},
+                "checks": dict.fromkeys(CHECK_NAMES)
+                | {check.name: check.ok for check in copy.checks if check.name in CHECK_NAMES},
                 "problems": list(copy.problems),
             }
             for index, copy in enumerate(node.copies)
