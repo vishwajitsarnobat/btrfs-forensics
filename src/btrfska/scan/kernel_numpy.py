@@ -13,10 +13,19 @@ their header starts, not only on nodesize boundaries:
 
 Regions are clipped to the image, sorted, and each offset is probed once, for the first region
 that holds it. A node may extend past its region's end; it belongs to the region holding its
-header. With `workers` > 1 (at most 4), regions are split into pieces that worker processes scan
-through their own read-only handle; records come back in the same order.
+header.
+
+With `workers` > 1 (at most 4), regions are split into pieces of `piece` bytes (4 MiB) that worker
+processes scan through their own read-only handle, opened once per process. Records come back in
+physical order, identical to one process. At most `workers` pieces are submitted ahead of the one
+being yielded, so the parent holds at most `workers` * piece / sectorsize records (4096 at the
+defaults) however large the image; a finished piece waits until its turn. Per-candidate
+validation dominates and records must be pickled back, so 4 workers are about as fast as one on
+candidate-dense input (1.31 s against 1.40 s on a 39 765-candidate flood; catalog.md, M2a review
+fixes); the default is 1.
 """
 
+from collections import deque
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -32,7 +41,7 @@ from btrfska.substrate.node import NO_EXPECTATIONS, Check, NodeContext, check_bl
 FSID_OFFSET = ondisk.HEADER.offset("fsid")
 MAX_WORKERS = 4
 WINDOW = 1 << 16  # offsets compared per numpy window
-PIECE = 256 << 20  # bytes per worker job
+PIECE = 4 << 20  # bytes per worker job
 
 
 @dataclass(frozen=True)
@@ -135,13 +144,21 @@ def _record(
     )
 
 
-def _scan_piece(job) -> list[NodeRecord]:
-    path, first, end, region, ctx, chunk_map = job
-    with open_image(path) as img:
-        return [
-            _record(img, physical, region, ctx, chunk_map)
-            for physical in _span_hits(img, first, end, ctx.fsid, ctx.sectorsize)
-        ]
+_WORKER: dict = {}  # per worker process: its own read-only image handle, context and chunk map
+
+
+def _init_worker(path, ctx: NodeContext, chunk_map: ChunkMap) -> None:
+    # Closed when the worker process exits.
+    _WORKER.update(img=open_image(path), ctx=ctx, chunk_map=chunk_map)
+
+
+def _scan_piece(job: tuple[int, int, Region]) -> list[NodeRecord]:
+    first, end, region = job
+    img, ctx, chunk_map = _WORKER["img"], _WORKER["ctx"], _WORKER["chunk_map"]
+    return [
+        _record(img, physical, region, ctx, chunk_map)
+        for physical in _span_hits(img, first, end, ctx.fsid, ctx.sectorsize)
+    ]
 
 
 def iter_candidate_nodes(
@@ -164,14 +181,21 @@ def iter_candidate_nodes(
                 yield _record(img, physical, region, ctx, chunk_map)
         return
     piece = max(step, piece // step * step)
-    jobs = [
-        (img.path, start, min(start + piece, end), region, ctx, chunk_map)
+    jobs = (
+        (start, min(start + piece, end), region)
         for first, end, region in spans
         for start in range(first, end, piece)
-    ]
-    pool = ProcessPoolExecutor(max_workers=workers)
+    )
+    pool = ProcessPoolExecutor(
+        workers, initializer=_init_worker, initargs=(img.path, ctx, chunk_map)
+    )
+    pending = deque()
     try:
-        for records in pool.map(_scan_piece, jobs):
-            yield from records
+        for job in jobs:
+            pending.append(pool.submit(_scan_piece, job))
+            if len(pending) >= workers:
+                yield from pending.popleft().result()
+        while pending:
+            yield from pending.popleft().result()
     finally:
         pool.shutdown(cancel_futures=True)
