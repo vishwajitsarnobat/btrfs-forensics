@@ -7,14 +7,15 @@ import uuid
 from dataclasses import asdict
 
 from btrfska import __version__
-from btrfska.scan.classify import Classified, scan_image
+from btrfska.scan.classify import Classified, failure_counts, scan_image
 from btrfska.scan.kernel_numpy import MAX_WORKERS
+from btrfska.scan.roots import State, discover_image
 from btrfska.substrate import csum, ondisk, superblock
 from btrfska.substrate.extents import read_file
 from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat, open_filesystem
 from btrfska.substrate.image import open_image
 from btrfska.substrate.items import KEY_TYPE_NAMES, summary
-from btrfska.substrate.node import CHECK_NAMES, ValidatedNode
+from btrfska.substrate.node import CHECK_NAMES, FAILURE_CLASSES, ValidatedNode
 from btrfska.substrate.roots import (
     TREE_IDS,
     RootNotFound,
@@ -383,6 +384,17 @@ def _scan_record(item: Classified, unsupported_format: bool) -> dict:
     }
 
 
+def _failure_line(counts: dict[str, dict[str, int]]) -> str:
+    """Invalid nodes met by the current and the backup-root walks, reuse apart from damage."""
+
+    def side(found: dict[str, int]) -> str:
+        detail = ", ".join(f"{name} {found[name]}" for name in FAILURE_CLASSES if found.get(name))
+        return f"{sum(found.values())}" + (f" ({detail})" if detail else "")
+
+    current, backup = side(counts["current"]), side(counts["backup"])
+    return f"walk failures: current {current}; backup roots {backup}"
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     """Scan for tree blocks and classify them; the summary goes to stderr with --json."""
     stream = sys.stderr if args.json else sys.stdout
@@ -418,6 +430,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         f"extent tree: {s['extent_tree']} tree blocks; reached only by walks: {s['walk_only']}; "
         f"listed only by the extent tree: {s['extent_tree_only']}",
         f"log tree: {s['log_tree_blocks']} blocks ({s['log_tree']} live copies)",
+        _failure_line(s["walk_failures"]),
     ]
     for row in s["regions"]:
         region = row["region"]
@@ -428,6 +441,109 @@ def cmd_scan(args: argparse.Namespace) -> int:
             f"orphans {row['orphans']}"
         )
     lines += [f"problem: {problem}" for problem in (*plan.problems, *result.reach.problems)]
+    for line in lines:
+        print(line, file=stream)
+    return 0
+
+
+def _state_line(state: State) -> str:
+    labels = ", ".join(state.known_as) or "not a superblock or backup root"
+    named = [tree for tree in state.trees if tree.status != "skipped"]
+    found = sum(tree.status == "found" for tree in named)
+    missing = ", ".join(f"{name} {count}" for name, count in sorted(state.missing.items()))
+    line = (
+        f"state generation {state.generation} bytenr {state.bytenr} level {state.level} "
+        f"[{labels}]: trees {found}/{len(named)} found, blocks {state.found}/{state.referenced} "
+        f"(completeness {state.completeness:.3f}{'; missing ' + missing if missing else ''})"
+    )
+    root = state.chunk_root
+    if root is None:
+        line += "; chunk root unknown"
+    else:
+        differs = ", differs from current" if root.differs_from_current else ""
+        line += f"; chunk root {root.bytenr} generation {root.generation} ({root.source}{differs})"
+    line += f"; blocks placed by the current chunk map {state.maps_current}"
+    if state.maps_historical is not None:
+        line += f", by the state's chunk items {state.maps_historical}"
+    return line + f", by neither {state.maps_neither}"
+
+
+def cmd_roots(args: argparse.Namespace) -> int:
+    """Old-root discovery; the summary goes to stderr with --json. Schema: README.md."""
+    stream = sys.stderr if args.json else sys.stdout
+    with open_image(args.image) as img:
+        fs = _open_checked(img, args)
+        if fs is None:
+            return EXIT_REFUSED
+        run = discover_image(img, fs, full_sweep=args.full_sweep, workers=args.workers)
+    found, stats, plan = run.discovery, run.discovery.stats, run.plan
+
+    if args.json:
+
+        def emit(kind: str, payload: dict) -> None:
+            record = {"record": kind, "unsupported_format": fs.unsupported_format, **payload}
+            print(json.dumps(record, separators=(",", ":")))
+
+        for item in found.rediscovered:
+            emit("rediscovery", asdict(item.root) | {"indexed": item.indexed,
+                                                     "candidate": item.candidate})  # fmt: skip
+        for state in found.states:
+            emit("state", asdict(state))
+        for group in found.groups:
+            emit("group", asdict(group))
+        for log in found.logs:
+            emit("log", asdict(log))
+        for raw in found.raw:
+            emit("raw_block", raw)
+        for source, tree_id, bytenr, failure in found.walk_failures:
+            where = {"source": source, "tree_id": tree_id, "bytenr": bytenr}
+            emit("walk_failure", where | {"class": failure})
+
+    skipped_data = sum(r.end - r.start for r in plan.skipped if r.chunk is not None)
+    hint = "full sweep" if plan.full_sweep else "use --full-sweep to include reallocated ranges"
+    beyond = sum(not state.known_as for state in found.states)
+    candidates = sum(item.candidate for item in found.rediscovered)
+    indexed = sum(item.indexed for item in found.rediscovered)
+    lines = [
+        f"btrfska roots: {'full sweep' if plan.full_sweep else 'targeted'}, "
+        f"{stats['candidates']} candidates, {stats['indexed_copies']} valid copies of "
+        f"{run.index.nodes} tree blocks indexed",
+        f"skipped as DATA: {skipped_data} bytes ({hint})",
+        f"log candidates: {stats['log_accepted']} indexed one generation ahead, "
+        f"{stats['log_rejected']} rejected",
+        f"groups: {len(found.groups)} (owner, generation, level); candidate roots: "
+        f"{sum(group.candidates for group in found.groups)}",
+        f"root tree candidates: {found.root_tree_candidates} ({len(found.states)} evaluated, "
+        f"{beyond} beyond the superblock and backup roots)",
+        f"rediscovered: {candidates}/{len(found.rediscovered)} superblock and backup roots are "
+        f"candidate roots ({indexed} indexed)",
+        *(
+            f"not rediscovered: {item.root.source} {item.root.tree} {item.root.bytenr} "
+            f"generation {item.root.generation} ({'indexed' if item.indexed else 'not indexed'})"
+            for item in found.rediscovered
+            if not item.candidate
+        ),
+        *(_state_line(state) for state in found.states),
+    ]
+    for log in found.logs:
+        lines.append(
+            f"log generation {log.generation}: {log.blocks} blocks ({log.copies} copies), "
+            f"candidate roots {log.candidates}, live {log.live}, superseded {log.superseded}"
+            + (", left by a committed transaction" if log.committed else "")
+        )
+    if not found.logs:
+        lines.append("log trees: none")
+    lines += [
+        f"raid stripe tree blocks: {stats['raid_stripe_blocks']}; "
+        f"remap tree blocks: {stats['remap_blocks']}",
+        _failure_line(failure_counts(found.walk_failures)),
+        *(f"problem: {problem}" for problem in (*plan.problems, *run.walk_problems)),
+        *(
+            f"problem: state generation {state.generation} bytenr {state.bytenr}: {problem}"
+            for state in found.states
+            for problem in state.problems
+        ),
+    ]
     for line in lines:
         print(line, file=stream)
     return 0
@@ -542,6 +658,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue past unsupported or unknown incompat features (records are flagged)",
     )
     scan_cmd.set_defaults(func=cmd_scan)
+
+    roots_cmd = sub.add_parser(
+        "roots",
+        help="find historical tree roots among the scanned blocks and how complete each is",
+        description=(
+            "Scan as `scan` does, index the valid tree blocks and find the candidate roots of "
+            "every owner and generation. Each root-tree candidate is a historical state: its "
+            "trees are resolved through the scanned blocks, with a completeness figure, and every "
+            "superblock and backup root is checked for rediscovery. A summary goes to stdout, or "
+            "to stderr with --json."
+        ),
+    )
+    roots_cmd.add_argument("image", help="path to a raw Btrfs image")
+    roots_cmd.add_argument(
+        "--full-sweep",
+        action="store_true",
+        help="probe DATA chunks too (everything except the boot area and superblock copies)",
+    )
+    roots_cmd.add_argument(
+        "--workers",
+        type=_workers,
+        default=1,
+        help=f"worker processes for the scan, 1 to {MAX_WORKERS} (default 1)",
+    )
+    roots_cmd.add_argument("--json", action="store_true", help="JSON lines records on stdout")
+    roots_cmd.add_argument(
+        "--allow-unsupported",
+        action="store_true",
+        help="continue past unsupported or unknown incompat features (records are flagged)",
+    )
+    roots_cmd.set_defaults(func=cmd_roots)
     return parser
 
 
