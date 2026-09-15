@@ -18,6 +18,16 @@ btrfs_get_extent):
 Content is clipped to i_size; clipping is reported only when an extent reaches past the sector
 holding the end of the file. Data checksums are not verified here (M6).
 
+Hostile lengths are bounded before any read or allocation:
+- compressed extents: ram_bytes and disk_num_bytes in (0, 128 KiB] (BTRFS_MAX_UNCOMPRESSED and
+  BTRFS_MAX_COMPRESSED, compression.h:35 and :40);
+- uncompressed regular extents: disk_num_bytes and num_bytes at most the image size. Every byte
+  of a readable copy comes from this one image, so a longer extent cannot be read without
+  aliasing. btrfska does not assume the kernel allocator's 128 MiB limit (BTRFS_MAX_EXTENT_SIZE,
+  fs.h:66): the tree checker does not enforce it (tree-checker.c:306-321 checks only alignment
+  and end overflow), so an image may hold a longer extent that the kernel still accepts.
+Ranges are mapped and read one piece at a time, stopping at the first unmapped or unreadable one.
+
 Every physical range records all copies (DUP, RAID1*): the first readable copy is used and every
 other readable copy is compared with it, a divergent copy being reported. Failures are records,
 never truncated or padded content: `ExtentRead.error_kind` is one of unmapped, unreadable,
@@ -90,12 +100,16 @@ def _read(reader: NodeReader, logical: int, length: int):
     """(bytes or None, ranges, problems, (error kind, detail) or None) for a logical range."""
     chunk_map, img = reader.chunk_map, reader.img
     out, ranges, problems = bytearray(), [], []
-    try:
-        pieces = chunk_map.pieces(logical, length)
-        mapped = [(piece, chunk_map.copies(*piece)) for piece in pieces]
-    except MappingError as exc:
-        return None, (), (), ("unmapped", str(exc))
-    for (start, size), copies in mapped:
+    pieces = chunk_map.pieces(logical, length)
+    while True:  # one piece at a time: stop at the first unmapped or unreadable one
+        try:
+            piece = next(pieces, None)
+            if piece is None:
+                break
+            start, size = piece
+            copies = chunk_map.copies(start, size)
+        except MappingError as exc:
+            return None, tuple(ranges), tuple(problems), ("unmapped", str(exc))
         blocks = [
             None
             if copy.missing_device or copy.physical + size > img.size
@@ -176,6 +190,11 @@ def read_extent(reader: NodeReader, item: Item, leaf: int) -> tuple[ExtentRead, 
     info["chunk_map"] = reader.chunk_map.source
     offset, ram, disk_bytes = fe["offset"], fe["ram_bytes"], fe["disk_num_bytes"]
     if code == compress.NONE:
+        image_size = reader.img.size
+        for name, value in (("disk_num_bytes", disk_bytes), ("num_bytes", length)):
+            if value > image_size:
+                return failed("invalid_extent", f"{name} {value} exceeds the image size "
+                              f"{image_size}")  # fmt: skip
         if offset + length > disk_bytes:
             return failed("invalid_extent", f"offset {offset} + num_bytes {length} > "
                           f"disk_num_bytes {disk_bytes}")  # fmt: skip
@@ -283,7 +302,11 @@ class FileRead:
 
 
 def read_file(reader: NodeReader, root: TreeRoot, inode: int, *, no_holes: bool) -> FileRead:
-    """Read `inode` from the fs tree at `root`; `no_holes` is the superblock's NO_HOLES bit."""
+    """Read `inode` from the fs tree at `root`; `no_holes` is the superblock's NO_HOLES bit.
+
+    The content is held fully in memory: every non-zero extent's bytes are kept in the `FileRead`,
+    and each is built from a read buffer first, so the peak is about twice the file size (zero
+    runs excepted). Streaming reads arrive with the recovery engine (plan.md M4)."""
     errors, problems, inode_fields, found = [], [], None, []
     for visit in walk(reader, root.bytenr, root.expect()):
         node = visit.node

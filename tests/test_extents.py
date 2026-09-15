@@ -4,10 +4,12 @@ import hashlib
 import json
 import random
 import struct
+import time
+import tracemalloc
 import zlib
 from compression import zstd
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -273,6 +275,45 @@ def test_invalid_extents_are_errors_not_content(item, kind):
         result = read(reader)
     assert not result.complete
     assert result.extents[0].error_kind == kind
+
+
+@pytest.mark.parametrize(
+    ("disk_num_bytes", "num_bytes"), [(1 << 48, 1 << 48), (1 << 48, SECTOR), (SECTOR, 1 << 48)]
+)
+def test_extent_lengths_beyond_the_image_are_rejected_quickly_in_bounded_memory(
+    disk_num_bytes, num_bytes
+):
+    """A hostile uncompressed extent in a 2^48-byte RAID0 chunk of a 128 MiB image: one piece per
+    64 KiB would be 2^32 tuples. It must be an error record, not an allocation."""
+    chunk = replace(data_chunk("RAID0", stripes=((1, DATA_PHYS), (1, DATA_PHYS + 32 * MIB))),
+                    length=1 << 48)  # fmt: skip
+    item = regular(DATA_LOGICAL, disk_num_bytes, 0, num_bytes)
+    with filesystem([(0, item)], size=num_bytes, data={DATA_PHYS: bytes(SECTOR)},
+                    chunk=chunk) as reader:  # fmt: skip
+        tracemalloc.start()
+        started = time.monotonic()
+        result = read(reader)
+        elapsed = time.monotonic() - started
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+    (extent,) = result.extents
+    assert (extent.error_kind, extent.ranges, extent.sha256) == ("invalid_extent", (), None)
+    assert "image size" in extent.error_detail
+    assert not result.complete and elapsed < 2 and peak < 4 * MIB
+
+
+def test_a_striped_read_stops_at_the_first_unreadable_piece():
+    """Stripe 2 is on a missing device: the read stops there instead of mapping every piece."""
+    chunk = data_chunk("RAID0", stripes=((1, DATA_PHYS), (2, DATA_PHYS)))
+    item = regular(DATA_LOGICAL, 64 * MIB, 0, 64 * MIB)
+    with filesystem([(0, item)], size=64 * MIB, data={DATA_PHYS: bytes(SECTOR)},
+                    chunk=chunk) as reader:  # fmt: skip
+        result = read(reader)
+    (extent,) = result.extents
+    assert extent.error_kind == "unreadable"
+    assert [(r.logical, r.length) for r in extent.ranges] == [
+        (DATA_LOGICAL, STRIPE_LEN), (DATA_LOGICAL + STRIPE_LEN, STRIPE_LEN),
+    ]  # fmt: skip
 
 
 def test_missing_inode_and_directories_are_errors():
