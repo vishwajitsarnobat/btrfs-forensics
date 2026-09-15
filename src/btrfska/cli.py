@@ -468,6 +468,22 @@ def _state_line(state: State) -> str:
     return line + f", by neither {state.maps_neither}"
 
 
+def _rediscovery_line(rediscovered) -> str:
+    """Superblock and backup survival per slot reference and per distinct block: backup slots name
+    the same block many times (an fs root unchanged across backups), so the two counts differ."""
+    blocks: dict[tuple, list] = {}
+    for item in rediscovered:
+        key = (item.root.bytenr, item.root.generation, item.root.level)
+        blocks.setdefault(key, []).append(item)
+    return (
+        f"rediscovered: {sum(item.candidate for item in rediscovered)}/{len(rediscovered)} "
+        "superblock and backup root slot references are candidate roots "
+        f"({sum(item.indexed for item in rediscovered)} indexed), naming {len(blocks)} distinct "
+        f"blocks: {sum(any(i.candidate for i in same) for same in blocks.values())}/{len(blocks)} "
+        f"candidate roots ({sum(any(i.indexed for i in same) for same in blocks.values())} indexed)"
+    )
+
+
 def cmd_roots(args: argparse.Namespace) -> int:
     """Old-root discovery; the summary goes to stderr with --json. Schema: README.md."""
     stream = sys.stderr if args.json else sys.stdout
@@ -502,8 +518,6 @@ def cmd_roots(args: argparse.Namespace) -> int:
     skipped_data = sum(r.end - r.start for r in plan.skipped if r.chunk is not None)
     hint = "full sweep" if plan.full_sweep else "use --full-sweep to include reallocated ranges"
     beyond = sum(not state.known_as for state in found.states)
-    candidates = sum(item.candidate for item in found.rediscovered)
-    indexed = sum(item.indexed for item in found.rediscovered)
     lines = [
         f"btrfska roots: {'full sweep' if plan.full_sweep else 'targeted'}, "
         f"{stats['candidates']} candidates, {stats['indexed_copies']} valid copies of "
@@ -515,8 +529,7 @@ def cmd_roots(args: argparse.Namespace) -> int:
         f"{sum(group.candidates for group in found.groups)}",
         f"root tree candidates: {found.root_tree_candidates} ({len(found.states)} evaluated, "
         f"{beyond} beyond the superblock and backup roots)",
-        f"rediscovered: {candidates}/{len(found.rediscovered)} superblock and backup roots are "
-        f"candidate roots ({indexed} indexed)",
+        _rediscovery_line(found.rediscovered),
         *(
             f"not rediscovered: {item.root.source} {item.root.tree} {item.root.bytenr} "
             f"generation {item.root.generation} ({'indexed' if item.indexed else 'not indexed'})"
@@ -663,9 +676,11 @@ def build_parser() -> argparse.ArgumentParser:
         "roots",
         help="find historical tree roots among the scanned blocks and how complete each is",
         description=(
-            "Scan as `scan` does, index the valid tree blocks and find the candidate roots of "
-            "every owner and generation. Each root-tree candidate is a historical state: its "
-            "trees are resolved through the scanned blocks, with a completeness figure, and every "
+            "Scan as `scan` does, index the valid tree blocks and find the candidate roots: blocks "
+            "no parent of their generation or a newer one points to, at any level. Each "
+            "candidate root-tree block is one state: its root tree and the trees its ROOT_ITEMs "
+            "name are resolved through the scanned blocks, with a completeness figure (chunk and "
+            "log trees excluded), and every "
             "superblock and backup root is checked for rediscovery. A summary goes to stdout, or "
             "to stderr with --json."
         ),

@@ -17,8 +17,9 @@ frozen, still runnable, under `legacy/`.
   since been removed. It classifies each one as `live`, `backup_reachable`,
   `unreferenced` or `invalid`.
 - `btrfska roots IMAGE [--full-sweep] [--json]` finds historical tree roots
-  among those blocks. It reports every historical root-tree state with the
-  trees it names and how completely they survive, checks that every
+  among those blocks. It reports every candidate root-tree block (a state)
+  with the trees it names and how completely they survive (chunk and log
+  trees excluded), checks that every
   superblock and backup root is rediscovered, and tells blocks reused by
   newer trees apart from damaged ones.
 - `btrfska info IMAGE` validates every superblock copy (all four checksum
@@ -275,8 +276,8 @@ backup root, `reused` is expected and is not damage.
 
 `btrfska roots IMAGE [--full-sweep] [--workers N] [--json]` finds historical
 tree roots among the scanned tree blocks, the idea of btrfs-progs
-`btrfs-find-root`, and reports how much of each historical root-tree state
-survives. The command opens no file other than the image.
+`btrfs-find-root`, and reports how much of each candidate root-tree block
+(state) survives. The command opens no file other than the image.
 
 **Method.**
 - It scans as `scan` does, with the same regions and options. Every valid
@@ -285,18 +286,31 @@ survives. The command opens no file other than the image.
 - A log block (owner −6) whose only failed check is its generation, equal to
   the superblock generation + 1, is indexed too. That covers superseded log
   commits no walk reaches. Other failing log candidates are rejected.
-- Within one owner and generation, a block is referenced when an internal
-  block of the same owner and generation points to it. The **candidate
-  roots** are the unreferenced blocks at the highest level of their owner and
-  generation.
-- Every root-tree (owner 1) candidate is a **state**. Its trees are resolved
+- A block is referenced when an internal block one level up, of an owner the
+  kernel's owner check accepts and of the same or a newer generation, points
+  to it with its bytenr and generation. The **candidate roots** are the blocks
+  nothing references, at any level, so a planted higher-level block cannot
+  hide the real roots of its generation. A block that only a newer parent
+  points to is part of that newer tree, not a candidate.
+- Every owner-1 candidate root, a **candidate root-tree block**, is one
+  **state**: a historical root tree as far as that block reaches. On a
+  multi-leaf root tree whose parent node is gone, a surviving old leaf that
+  no newer parent uses is its own state, covering that leaf's ROOT_ITEMs
+  only. Its trees are resolved
   through the index, never through a chunk map, so a state whose chunks have
   moved still resolves. A pointer or ROOT_ITEM is found when a valid scanned
   block has its bytenr, generation and level, an acceptable owner and the
   pointer's first key.
-- **Completeness** = found / referenced. Referenced blocks are the distinct
-  blocks the found blocks name: root-tree blocks, tree roots and child
-  pointers. Nothing below a missing block is known, so it is an upper bound.
+- **Completeness** = found / referenced distinct tree blocks. Referenced
+  blocks are the blocks of the root tree reached from the candidate block,
+  the tree root every ROOT_ITEM in its found leaves names, and every child
+  pointer of a found block. ROOT_ITEMs naming tree 1 are not followed, and
+  the chunk tree and the log tree are excluded (no ROOT_ITEM names them).
+  With nothing missing, completeness 1 means every block of the root tree
+  and of every ROOT_ITEM-named tree was found, nothing more. Nothing below a
+  missing block is known, so it overstates survival.
+- A state is evidence of one root tree, not proof of a whole committed
+  filesystem state: a forged owner-1 block is a state too.
 - Up to 64 states are evaluated: the superblock and backup ones first, then
   the newest.
 
@@ -312,7 +326,7 @@ applicable. Every record has `record` (its type) and `unsupported_format`
     them.
   - `indexed`: `true` when a valid scanned block matches it.
   - `candidate`: `true` when that block is a candidate root.
-- `state`: one historical root-tree state.
+- `state`: one candidate root-tree block (state).
   - `bytenr`, `generation`, `level`: the root-tree block; `copies`: the
     physical offsets where it was scanned.
   - `known_as`: the `current` and `backup:GEN` sources that name this block;
@@ -324,13 +338,17 @@ applicable. Every record has `record` (its type) and `unsupported_format`
     - `status`: `found`, `skipped` (a ROOT_ITEM naming the root tree itself
       is not followed), `not_scanned` (a read through the current chunk map
       is valid but the scan plan skipped that range), `changed` (the bytes no
-      longer match the scan record) or a failure class;
+      longer match the scan record), `unchecked` (beyond the state's first
+      256 missing blocks, not read) or a failure class;
     - `blocks`, `missing`: the tree's distinct blocks found, and referenced
       but not found.
   - `root_tree_blocks`, `root_tree_missing`: the same for the root tree.
   - `found`, `referenced`, `completeness`: the state totals.
   - `missing`: an object mapping each status of the missing blocks to its
-    count.
+    count. A state walk reads and classifies at most 256 distinct missing
+    blocks; `unchecked` counts the further missing pointers without reading
+    them. That count is not de-duplicated, so `referenced` is then an upper
+    bound and `completeness` a lower one.
   - `chunk_root`: `null` when unknown, else an object:
     - `bytenr`, `generation`, `level`;
     - `source`: `current` or `backup:GEN` when those name the state, else
@@ -343,15 +361,23 @@ applicable. Every record has `record` (its type) and `unsupported_format`
     sys_chunk_array (`null` unless `differs_from_current`). `maps_neither`:
     found blocks neither places. This is a read-only check; historical chunk
     maps come with plan.md M5.
+  - `level_consistent`: `false` when a pointer of this block names an
+    indexed block of the pointer's bytenr and generation only at a level
+    other than the block's level − 1 (for example a planted level-7 block
+    over real leaves). A problem line gives the count.
   - `problems`: at most 32, then a count: malformed or inconsistent
     ROOT_ITEMs (for example one newer than the state), pointers to blocks
     already reached (not followed) and first-key mismatches.
 - `group`: one per (owner, generation, level) of indexed blocks.
   - `owner`, `generation`, `level`.
   - `blocks`: distinct blocks; `copies`: physical copies.
-  - `unreferenced`: blocks no same-owner, same-generation block points to.
+  - `unreferenced`: blocks no internal block of the same generation points
+    to.
+  - `referenced_by_newer`: of those, blocks an internal block of a newer
+    generation points to; they are not candidates.
   - `top`: `true` for the highest level of this owner and generation.
-  - `candidates`: unreferenced blocks when `top`, else 0.
+  - `candidates`: the unreferenced blocks that no newer parent points to, at
+    any level.
   - `listed`: the bytenrs of the first 16 candidates.
 - `log`: one per generation of log-tree blocks (owner −6).
   - `generation`, `blocks`, `copies`, `levels`, `candidates`, `listed`: as
@@ -378,7 +404,19 @@ this order of precedence:
 - `overwritten`: no tree block of this filesystem is there.
 - `zeroed`: the copy reads as zeros, for example trimmed by discard.
 - `unreadable`: beyond the image end or on a missing device.
-- `unmapped`: the current chunk map places the address nowhere.
+- `unmapped`: no chunk map places the address. For `roots`, neither the
+  current chunk map nor the state's own chunk items place it, and no invalid
+  scanned copy carries its bytenr and generation.
+
+In `roots`, a missing block is classified from every source that has it, and
+the class earliest in the list above wins:
+- a read through the current chunk map;
+- when the current map does not place the address, a read through the
+  state's own chunk items, so a block of a pre-balance state is read where
+  that state had it;
+- up to 16 invalid scanned copies whose header carries the block's bytenr and
+  generation, checked against what the referrer expects. A present but
+  invalid block is therefore `corrupt` or `mismatch`, not `unmapped`.
 
 ## Tests and lint
 
