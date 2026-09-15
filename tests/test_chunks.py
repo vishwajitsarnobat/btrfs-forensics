@@ -245,6 +245,87 @@ def test_mixed_groups_allow_data_and_metadata():
     assert parse_chunk(LOGICAL, data, sectorsize=4096, incompat=incompat).problems == ()
 
 
+REMAPPED_RAID10_NO_SUB = BG["SYSTEM"] | BG["RAID10"] | BG["REMAPPED"]
+
+
+def test_remapped_chunks_with_stripes_still_get_stripe_count_checks():
+    # tree-checker.c:1002-1009 skips valid_stripe_count for REMAPPED chunks, but a REMAPPED chunk
+    # the remap tree does not translate is still mapped through its stripes (volumes.c:6914-6930).
+    data = raw_chunk(type_=REMAPPED_RAID10_NO_SUB, stripes=((1, 0), (2, 0)), sub_stripes=0)
+    problems = parse_chunk(LOGICAL, data, sectorsize=4096).problems
+    assert "num_stripes 2 sub_stripes 0 invalid for RAID10 (checked although REMAPPED)" in problems
+
+    data = raw_chunk(type_=BG["DATA"] | BG["RAID6"] | BG["REMAPPED"], stripes=((1, 0),))
+    problems = parse_chunk(LOGICAL, data, sectorsize=4096).problems
+    assert "num_stripes 1 < nparity 2" in problems
+
+
+def test_raid10_stripes_must_be_a_multiple_of_sub_stripes():
+    data = raw_chunk(
+        type_=BG["DATA"] | BG["RAID10"], stripes=((1, 0), (2, 0), (3, 0)), sub_stripes=2
+    )
+    assert "num_stripes 3 is not a multiple of sub_stripes 2" in (
+        parse_chunk(LOGICAL, data, sectorsize=4096).problems
+    )
+
+
+@pytest.mark.parametrize(
+    ("profile", "n", "sub"),
+    [("RAID10", 2, 0), ("RAID10", 3, 2), ("RAID10", 2, 4), ("RAID5", 1, 1), ("RAID6", 2, 1),
+     ("RAID6", 1, 1)],
+)  # fmt: skip
+def test_uncomputable_geometry_raises_mapping_error_even_without_problems(profile, n, sub):
+    chunk_map = mapping(striped(profile, n, sub))
+    with pytest.raises(MappingError, match="geometry"):
+        chunk_map.copies(LOGICAL + OFFSET, 4096)
+
+
+def test_remapped_raid6_with_one_stripe_never_translates():
+    data = raw_chunk(type_=BG["DATA"] | BG["RAID6"] | BG["REMAPPED"], stripes=((1, 10 * GIB),))
+    chunk_map = ChunkMap("test", [parse_chunk(LOGICAL, data, sectorsize=4096)], {1: DEV_UUID})
+    result = None
+    with pytest.raises(MappingError):
+        result = chunk_map.copies(LOGICAL + OFFSET, 4096)
+    assert result is None
+
+
+def _assert_lookups_raise_only_mapping_errors(chunk_map: ChunkMap, rng: random.Random) -> int:
+    """Translate addresses in every chunk the map accepted; return how many translated."""
+    translated = 0
+    for chunk in chunk_map.chunks:
+        for _ in range(4):
+            logical = chunk.logical + rng.randrange(0, chunk.length)
+            try:
+                copies = chunk_map.copies(logical, rng.choice([1, 4096, 16384]))
+            except MappingError:
+                continue
+            translated += 1
+            n = chunk.num_stripes
+            assert copies and all(0 <= c.physical for c in copies) and len(copies) <= n
+    return translated
+
+
+def test_random_chunk_geometry_translates_or_raises_mapping_error():
+    rng = random.Random(11)
+    profiles = [0, *(BG[p] for p in ("RAID0", "RAID1", "RAID1C3", "RAID1C4", "RAID5", "RAID6",
+                                     "DUP", "RAID10"))]  # fmt: skip
+    translated = 0
+    for _ in range(3000):
+        n, sub = rng.randrange(0, 6), rng.randrange(0, 4)
+        type_ = BG["DATA"] | rng.choice(profiles) | rng.choice([0, BG["REMAPPED"]])
+        if rng.random() < 0.1:
+            type_ |= rng.choice(profiles)  # sometimes two profile bits
+        stripes = tuple((1, rng.randrange(0, 64) * GIB) for _ in range(n))
+        parsed = parse_chunk(LOGICAL, raw_chunk(type_=type_, stripes=stripes, sub_stripes=sub),
+                             sectorsize=4096)  # fmt: skip
+        direct = Chunk(LOGICAL, GIB, type_, tuple(Stripe(d, o, DEV_UUID) for d, o in stripes), sub)
+        for chunk in (parsed, direct):
+            translated += _assert_lookups_raise_only_mapping_errors(
+                ChunkMap("fuzz", [chunk], {1: DEV_UUID}), rng
+            )
+    assert translated > 1000  # the property is not vacuous
+
+
 def test_zero_stripe_remapped_chunk_is_tolerated_and_flagged():
     data = raw_chunk(type_=BG["DATA"] | BG["REMAPPED"], stripes=())
     chunk = parse_chunk(LOGICAL, data, sectorsize=4096)
@@ -320,7 +401,9 @@ def test_sys_chunk_array_garbage_never_raises():
             "sectorsize": 4096,
         }
         parsed, problems = parse_sys_chunk_array(fields)
-        ChunkMap("fuzz", parsed, {1: DEV_UUID}, problems)
+        _assert_lookups_raise_only_mapping_errors(
+            ChunkMap("fuzz", parsed, {1: DEV_UUID}, problems), rng
+        )
 
 
 @pytest.mark.sandbox
