@@ -31,6 +31,7 @@ class Visit:
     slot: int | None  # the pointer's slot in the parent
     depth: int
     problems: tuple[str, ...] = ()  # hop findings; node findings are in node.problems
+    expect: Expect = NO_EXPECTATIONS  # what the referrer said the block must be
 
 
 def walk(reader: NodeReader, bytenr: int, expect: Expect = NO_EXPECTATIONS) -> Iterator[Visit]:
@@ -67,7 +68,7 @@ def walk(reader: NodeReader, bytenr: int, expect: Expect = NO_EXPECTATIONS) -> I
                 children.append(
                     (ptr.blockptr, child_expect, logical, index, depth + 1, child_upper)
                 )
-        yield Visit(node, parent, slot, depth, tuple(problems))
+        yield Visit(node, parent, slot, depth, tuple(problems), expected)
         stack.extend(reversed(children))
 
 

@@ -52,7 +52,7 @@ from btrfska.scan.regions import Region, ScanPlan, plan_scan, stripe_extents, th
 from btrfska.substrate import items, ondisk
 from btrfska.substrate.fs import Filesystem
 from btrfska.substrate.image import ImageHandle
-from btrfska.substrate.node import Check, NodeContext, NodeReader
+from btrfska.substrate.node import Check, NodeContext, NodeReader, node_failure
 from btrfska.substrate.roots import RootNotFound, RootSet, TreeRoot, resolve_tree, root_sets
 from btrfska.substrate.tree import walk
 
@@ -70,6 +70,8 @@ class Reachability:
     problems: tuple[str, ...]
     log: frozenset[tuple[int, int]] = frozenset()  # the subset of `live` the log walk reached
     log_logical: frozenset[int] = frozenset()  # logical addresses the log walk reached
+    # (root set source, tree id, logical, node.FAILURE_CLASSES entry) per invalid node walked
+    walk_failures: tuple[tuple[str, int, int, str], ...] = ()
 
     @classmethod
     def empty(cls) -> Reachability:
@@ -98,6 +100,8 @@ class Walked:
     log_pairs: set[tuple[int, int]] = field(default_factory=set)
     log_logicals: set[int] = field(default_factory=set)
     problems: list[str] = field(default_factory=list)
+    # (tree id, logical, failure class) per invalid node: reuse is told apart from damage
+    failures: list[tuple[int, int, str]] = field(default_factory=list)
 
 
 def _log_root(fields: dict | None) -> TreeRoot | None:
@@ -134,6 +138,8 @@ def walk_root_set(reader: NodeReader, root_set: RootSet, fields: dict | None = N
                 walked.log_pairs |= pairs
             if not node.valid:
                 walked.problems.append(f"{where} is invalid: {'; '.join(node.problems)}")
+                failure = node_failure(node, visit.expect)
+                walked.failures.append((tree.tree_id, node.logical, failure))
                 continue
             walked.problems += [f"{where}: {p}" for p in visit.problems]
             if node.level or not names_trees:
@@ -185,10 +191,12 @@ def reachability(fs: Filesystem) -> Reachability:
     sets = root_sets(fs.fields)
     current = walk_root_set(fs.reader, sets[-1], fs.fields)
     backup, problems = set(), list(current.problems)
+    failures = [("current", *failure) for failure in current.failures]
     for root_set in sets[:-1]:
         walked = walk_root_set(fs.reader, root_set)
         backup |= walked.pairs
         problems += walked.problems
+        failures += [(root_set.source, *failure) for failure in walked.failures]
     extent, found = extent_tree_blocks(fs.reader, sets[-1])
     return Reachability(
         live=frozenset(current.pairs),
@@ -198,7 +206,17 @@ def reachability(fs: Filesystem) -> Reachability:
         problems=tuple(problems + found),
         log=frozenset(current.log_pairs),
         log_logical=frozenset(current.log_logicals),
+        walk_failures=tuple(failures),
     )
+
+
+def failure_counts(failures: Iterable[tuple[str, int, int, str]]) -> dict[str, dict[str, int]]:
+    """Walk failures per class, for the current state and for all backup roots together."""
+    counts = {"current": {}, "backup": {}}
+    for source, _, _, failure in failures:
+        side = counts["current" if source == "current" else "backup"]
+        side[failure] = side.get(failure, 0) + 1
+    return counts
 
 
 def _merge(ranges: Iterable[tuple[int, int]]) -> list[list[int]]:
@@ -307,6 +325,7 @@ class Tally:
             "extent_tree_only": len(reach.extent_tree - reach.live_logical),
             "log_tree_blocks": len(reach.log_logical),
             "skipped_data_bytes": self.skipped_data_bytes,
+            "walk_failures": failure_counts(reach.walk_failures),
             "regions": list(self.regions.values()),
         }
 
