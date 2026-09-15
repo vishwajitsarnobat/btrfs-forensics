@@ -22,7 +22,8 @@ Profiles:
   missing device cannot be read.
 Striped reads must not cross a 64 KiB stripe boundary; callers split longer ranges. A stripe is
 readable only when its devid and device uuid are in `devices`; other copies are returned flagged
-`missing_device`.
+`missing_device`. Every lookup failure is a `MappingError`, including stripe geometry the math
+cannot use (RAID10 stripes not a non-zero multiple of sub_stripes, RAID5/6 without a data stripe).
 """
 
 import bisect
@@ -120,6 +121,23 @@ def _valid_stripe_count(profile: int, num_stripes: int, sub_stripes: int) -> boo
     return num_stripes == (2 if profile == BG["DUP"] else 1)
 
 
+def _geometry_problem(chunk: Chunk) -> str | None:
+    """Why the stripe math cannot run on a chunk that has stripes, whatever its recorded problems.
+
+    Guards the divisions in `ChunkMap.copies`: RAID10 divides by sub_stripes and by
+    num_stripes // sub_stripes, RAID5/6 by the data stripe count.
+    """
+    n, profile, sub = chunk.num_stripes, chunk.type & PROFILE_MASK, chunk.sub_stripes
+    if profile not in PROFILES:
+        return f"profile flags {profile:#x} are not one profile"
+    if profile == BG["RAID10"] and (sub <= 0 or n % sub):
+        return f"num_stripes {n} is not a non-zero multiple of sub_stripes {sub}"
+    nparity = PROFILES[profile][2]
+    if nparity and n <= nparity:
+        return f"num_stripes {n} leaves no data stripe beside {nparity} parity"
+    return None
+
+
 def parse_chunk(
     logical: int, data: bytes, *, sectorsize: int, incompat: int = 0, origin: str = ""
 ) -> Chunk:
@@ -154,6 +172,8 @@ def parse_chunk(
         problems.append(f"num_stripes {n} < ncopies {ncopies}")
     if nparity and n == nparity:
         problems.append(f"num_stripes {n} == nparity {nparity}")
+    if nparity and 0 < n < nparity:  # btrfska: no data stripe at all (the kernel checks == only)
+        problems.append(f"num_stripes {n} < nparity {nparity}")
     if logical % sectorsize:
         problems.append(f"logical {logical} not aligned to sectorsize {sectorsize}")
     if fields["sector_size"] != sectorsize:
@@ -177,8 +197,16 @@ def parse_chunk(
     mixed_ok = incompat & ondisk.INCOMPAT["MIXED_GROUPS"]
     if not mixed_ok and type_ & BG["METADATA"] and type_ & BG["DATA"]:
         problems.append(f"mixed chunk type {type_:#x} without MIXED_GROUPS")
-    if not remapped and profile in PROFILES and not _valid_stripe_count(profile, n, sub):
-        problems.append(f"num_stripes {n} sub_stripes {sub} invalid for {name}")
+    # The kernel skips valid_stripe_count for REMAPPED chunks (tree-checker.c:1002-1009), but a
+    # REMAPPED address the remap tree does not translate is still mapped through the chunk's own
+    # stripes (volumes.c:6914-6930), so btrfska checks every chunk that has stripes.
+    if (n or not remapped) and profile in PROFILES and not _valid_stripe_count(profile, n, sub):
+        suffix = " (checked although REMAPPED)" if remapped else ""
+        problems.append(f"num_stripes {n} sub_stripes {sub} invalid for {name}{suffix}")
+    # btrfska: the allocator adds RAID10 stripes in pairs (btrfs_raid_array devs_increment 2,
+    # volumes.c:54-66); the kernel checker does not test it.
+    if profile == BG["RAID10"] and sub and n % sub:
+        problems.append(f"num_stripes {n} is not a multiple of sub_stripes {sub}")
     return Chunk(logical, length, type_, stripes, sub, origin, tuple(problems))
 
 
@@ -281,6 +309,8 @@ class ChunkMap:
                 "by the remap tree"
             )
         n, profile = chunk.num_stripes, chunk.type & PROFILE_MASK
+        if problem := _geometry_problem(chunk):
+            raise MappingError(f"chunk {chunk.logical} geometry is not computable: {problem}")
         stripe_nr, stripe_offset = divmod(logical - chunk.logical, STRIPE_LEN)
         if profile & _STRIPED and stripe_offset + length > STRIPE_LEN:
             raise MappingError(

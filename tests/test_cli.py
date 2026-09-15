@@ -7,8 +7,13 @@ import pytest
 from btrfska import __version__
 from btrfska.cli import main
 from btrfska.substrate import ondisk
+from btrfska.substrate.fs import open_filesystem
+from btrfska.substrate.image import open_image
 from conftest import SANDBOX_SHA256
 from tests.helpers import SANDBOX_INCOMPAT, make_block, scratch_dir, write_sparse_image
+from tests.test_chunks import entry, raw_chunk
+
+BG = ondisk.BLOCK_GROUP_FLAGS
 
 
 def test_version_exits_zero_and_prints_version():
@@ -323,6 +328,30 @@ def test_walk_applies_the_incompat_gate(capsys):
         assert main(["walk", "--allow-unsupported", image, "--tree", "root"]) == 0
         (record,) = _records(capsys.readouterr().out)
         assert record["record"] == "invalid_node" and record["unsupported_format"] is True
+
+
+def _remapped_raid10_image(directory) -> str:
+    """A superblock whose only bootstrap chunk is SYSTEM|RAID10|REMAPPED, 2 stripes, sub_stripes 0,
+    covering the chunk root: the review's ZeroDivisionError case."""
+    chunk_type = BG["SYSTEM"] | BG["RAID10"] | BG["REMAPPED"]
+    raw = entry(1 << 30, raw_chunk(type_=chunk_type, stripes=((1, 0), (1, 1 << 20)), sub_stripes=0))
+    block = make_block(sys_chunk_array=raw, sys_chunk_array_size=len(raw), chunk_root=1 << 30)
+    return _image_with(directory, "remapped_raid10.img", {ondisk.sb_offset(0): block})
+
+
+def test_remapped_raid10_without_sub_stripes_opens_and_walks_without_a_traceback(capsys):
+    with scratch_dir("test_cli_") as d:
+        image = _remapped_raid10_image(d)
+        with open_image(image) as img:
+            fs = open_filesystem(img)
+        assert not fs.chunk_root.valid
+        assert any("sub_stripes 0 invalid for RAID10" in p for p in fs.chunk_root.problems)
+
+        assert main(["walk", image, "--tree", "root"]) == 0
+        captured = capsys.readouterr()
+        (record,) = _records(captured.out)
+        assert record["record"] == "invalid_node"
+        assert "sub_stripes 0 invalid for RAID10" in captured.err
 
 
 def test_walk_without_a_valid_superblock_is_refused(capsys):
