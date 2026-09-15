@@ -6,6 +6,7 @@ import re
 
 import pytest
 
+from btrfska.cli import main
 from btrfska.scan.classify import scan_image
 from btrfska.scan.roots import discover_image
 from btrfska.substrate.fs import open_filesystem
@@ -108,3 +109,15 @@ def test_sync_discard_zeroes_the_older_backup_states(trio):
         (38, ("backup:38", "current"), {}),
         (3, (), {"corrupt": 1}),
     ]
+
+
+def test_the_sync_summary_counts_surviving_slot_references_and_distinct_blocks(capsys):
+    """26 superblock and backup slot references name 14 distinct blocks. Under sync discard 14
+    references survive, but only 6 of the 14 blocks: the lost references are the root, extent,
+    chunk and dev roots of backups 35-37, and backups 35-37 share one chunk and one dev root."""
+    assert main(["roots", str(image("sync")), "--full-sweep"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        "rediscovered: 14/26 superblock and backup root slot references are candidate roots "
+        "(14 indexed), naming 14 distinct blocks: 6/14 candidate roots (6 indexed)"
+    ) in lines
