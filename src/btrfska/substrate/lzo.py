@@ -8,6 +8,10 @@ dissect.util 3.24's Apache-2.0 decoder; not derived from GPL decoder sources. Ev
 - output_overrun: the output would exceed `max_out` (LZO_E_OUTPUT_OVERRUN);
 - lookbehind_overrun: a match reaches before the start of the output (LZO_E_LOOKBEHIND_OVERRUN);
 - missing_end_marker: the input ends between instructions (LZO_E_EOF_NOT_FOUND);
+- invalid_end_marker: the end-marker distance (16384) with a copy length other than 3. lzo.rst says
+  the marker takes 3 bytes; the v7.0 kernel decoder returns LZO_E_ERROR for any other length, as
+  lzokay does. This check was compared against the kernel source after the decoder was written;
+  no code was taken from it;
 - trailing_input: bytes follow the end marker (LZO_E_INPUT_NOT_CONSUMED);
 - unsupported_version: a versioned (LZO-RLE, version 1) stream, which btrfs never writes.
 
@@ -22,7 +26,7 @@ instruction copied (0, 1..3, or 4 for four or more):
 - 0000DDSS H, state 1..3: copy 2 bytes from (H << 2) + D + 1;
 - 0000DDSS H, state 4: copy 3 bytes from (H << 2) + D + 2049;
 - 0001HLLL LE16: copy 2 + length (3-bit run) from 16384 + (H << 14) + (LE16 >> 2); a distance of
-  exactly 16384 is the end marker;
+  exactly 16384 is the end marker, valid only as `11 00 00` (length 3);
 - 001LLLLL LE16: copy 2 + length (5-bit run) from (LE16 >> 2) + 1;
 - 01LDDDSS H: copy 3 + L from (H << 3) + D + 1;
 - 1LLDDDSS H: copy 5 + L from (H << 3) + D + 1.
@@ -129,6 +133,12 @@ def decompress(src: bytes, max_out: int) -> bytes:
             ip += 2
             distance = _END_DISTANCE + ((op & 8) << 11) + (le16 >> 2)
             if distance == _END_DISTANCE:
+                if length != 3:
+                    raise LzoError(
+                        "invalid_end_marker",
+                        f"end-marker distance with copy length {length}, not 3, at input offset "
+                        f"{ip - 3}",
+                    )
                 if ip != n:
                     raise LzoError("trailing_input", f"{n - ip} bytes after the end marker")
                 return bytes(out)
