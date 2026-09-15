@@ -1,12 +1,25 @@
 """Command-line interface."""
 
 import argparse
+import json
 import sys
 import uuid
 
 from btrfska import __version__
 from btrfska.substrate import csum, ondisk, superblock
+from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat, open_filesystem
 from btrfska.substrate.image import open_image
+from btrfska.substrate.items import KEY_TYPE_NAMES, summary
+from btrfska.substrate.node import CHECK_NAMES, ValidatedNode
+from btrfska.substrate.roots import (
+    TREE_IDS,
+    RootNotFound,
+    TreeRoot,
+    find_root_set,
+    parse_root_spec,
+    resolve_tree,
+)
+from btrfska.substrate.tree import walk
 
 EXIT_ERROR = 1
 # The image was read but btrfska will not interpret it: no valid superblock, or the feature
@@ -132,6 +145,155 @@ def cmd_info(args: argparse.Namespace) -> int:
     return EXIT_REFUSED if verdict.refused else 0
 
 
+def _root_spec(text: str) -> str:
+    try:
+        parse_root_spec(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+    return text
+
+
+def _tree_spec(text: str) -> str:
+    if text in TREE_IDS or text.isdigit():
+        return text
+    names = ", ".join(TREE_IDS)
+    raise argparse.ArgumentTypeError(f"invalid tree {text!r}: expected {names} or a tree id")
+
+
+def _node_record(node: ValidatedNode) -> dict:
+    """The node's identity and every physical copy's validation record.
+
+    Every copy carries every check of `CHECK_NAMES`: null when not checked, which is all of them
+    for a copy that is not `readable`. Schema: README.md, "`btrfska walk` output".
+    """
+    return {
+        "bytenr": node.logical,
+        "level": node.level,
+        "generation": node.generation,
+        "owner": node.owner,
+        "valid": node.valid,
+        "copies": [
+            {
+                "mirror": copy.mirror,
+                "devid": copy.devid,
+                "physical": copy.physical,
+                "readable": copy.readable,
+                "used": index == node.chosen,
+                "valid": copy.ok,
+                "checks": dict.fromkeys(CHECK_NAMES)
+                | {check.name: check.ok for check in copy.checks if check.name in CHECK_NAMES},
+                "problems": list(copy.problems),
+            }
+            for index, copy in enumerate(node.copies)
+        ],
+        "problems": list(node.problems),
+    }
+
+
+def _start(fs, args: argparse.Namespace) -> tuple[TreeRoot, dict]:
+    """The walk's start block and its provenance record."""
+    kind, number = parse_root_spec(args.root)
+    tree = int(args.tree) if args.tree and args.tree.isdigit() else args.tree
+    if kind == "bytenr":
+        tree_id = TREE_IDS.get(tree, tree)
+        start = TreeRoot(tree_id, number, None, None, "bytenr")
+        source, name = args.root, args.tree
+    else:
+        root_set = find_root_set(fs.fields, args.root)
+        start = resolve_tree(fs.reader, root_set, tree or "fs")
+        source, name = root_set.source, args.tree or "fs"
+    record = {
+        "source": source,
+        "tree": name,
+        "tree_id": start.tree_id,
+        "bytenr": start.bytenr,
+        "level": start.level,
+        "generation": start.generation,
+        "via": start.via,
+    }
+    return start, record
+
+
+def cmd_walk(args: argparse.Namespace) -> int:
+    def emit(record: dict) -> None:
+        print(json.dumps(record, separators=(",", ":")))
+
+    def note(line: str) -> None:
+        print(line, file=sys.stderr)
+
+    with open_image(args.image) as img:
+        try:
+            fs = open_filesystem(img, allow_unsupported=args.allow_unsupported)
+        except NoValidSuperblock:
+            note("NO_VALID_SUPERBLOCK")
+            return EXIT_REFUSED
+        except UnsupportedFormat as exc:
+            note("gate: REFUSED")
+            for line in exc.verdict.report_lines():
+                note(line)
+            return EXIT_REFUSED
+        for line in fs.verdict.report_lines():
+            note(line)
+        for problem in fs.chunk_map.problems:
+            note(f"chunk map: {problem}")
+        try:
+            start, root = _start(fs, args)
+        except RootNotFound as exc:
+            note(f"btrfska: error: {exc}")
+            return EXIT_ERROR
+
+        common = {
+            "root": root,
+            "chunk_map": fs.chunk_map.source,
+            "unsupported_format": fs.unsupported_format,
+        }
+        nodes = invalid = item_count = hop_problems = 0
+        for visit in walk(fs.reader, start.bytenr, start.expect()):
+            node, nodes = visit.node, nodes + 1
+            node_record = _node_record(node)
+            where = {"parent": visit.parent, "parent_slot": visit.slot}
+            if visit.problems:
+                hop_problems += len(visit.problems)
+                emit(
+                    {
+                        "record": "walk_problem",
+                        **common,
+                        "node": node_record,
+                        **where,
+                        "problems": list(visit.problems),
+                    }
+                )
+            if not node.valid:
+                invalid += 1
+                emit({"record": "invalid_node", **common, "node": node_record, **where})
+                continue
+            for item in node.items if node.level == 0 else ():
+                item_count += 1
+                key = item.key
+                type_name = KEY_TYPE_NAMES.get(key.type, f"UNKNOWN.{key.type}")
+                emit(
+                    {
+                        "record": "item",
+                        **common,
+                        "node": node_record,
+                        "slot": item.slot,
+                        "key": {
+                            "objectid": key.objectid,
+                            "type": key.type,
+                            "type_name": type_name,
+                            "offset": key.offset,
+                        },
+                        "size": item.size,
+                        "summary": summary(key, item.data),
+                    }
+                )
+    note(
+        f"btrfska walk: {nodes} nodes ({invalid} invalid), {item_count} items, "
+        f"{hop_problems} walk problems"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="btrfska",
@@ -151,6 +313,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue past unsupported or unknown incompat features (output is flagged)",
     )
     info.set_defaults(func=cmd_info)
+
+    walk_cmd = sub.add_parser(
+        "walk",
+        help="walk one tree of the current state, a backup root or a block (JSON lines)",
+        description=(
+            "Emit one JSON line per leaf item, with the root it was reached from and every "
+            "physical copy's validation record. Invalid nodes and walk problems are records "
+            "too; a summary goes to stderr."
+        ),
+    )
+    walk_cmd.add_argument("image", help="path to a raw Btrfs image")
+    walk_cmd.add_argument(
+        "--root",
+        default="current",
+        type=_root_spec,
+        help="current (default), backup:GEN (a backup root by generation) or bytenr:N (one block)",
+    )
+    walk_cmd.add_argument(
+        "--tree",
+        type=_tree_spec,
+        help=(
+            f"{', '.join(TREE_IDS)} or a tree id (default fs); with bytenr:N it only sets the "
+            "expected owner"
+        ),
+    )
+    walk_cmd.add_argument(
+        "--allow-unsupported",
+        action="store_true",
+        help="continue past unsupported or unknown incompat features (records are flagged)",
+    )
+    walk_cmd.set_defaults(func=cmd_walk)
     return parser
 
 

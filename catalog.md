@@ -20,6 +20,479 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-15 — M1b: validated node reader, chunk maps, anchored tree walking
+
+- **Branch:** `feature/m1b-validated-tree-walking` (from `main` at `a3c0e31`).
+  This is the second of three M1 PRs. It covers plan.md §5 M1 tasks 5–7, the
+  `walk` half of task 10 and the `m1_badnode` image of task 9.
+- **Commits:**
+  - `a41f583` Add chunk maps with stripe math for every profile and chunk item checks
+  - `566d249` Add the node reader: every copy validated, each check recorded
+  - `32fad0e` Add item payload parsers with never-raising JSON summaries
+  - `c22432c` Walk trees from any root with per-hop checks; resolve backup roots and subvolumes
+  - `d086270` Add btrfska walk: JSON lines per item with root and copy provenance
+  - `c5561f7` Explain why superblock selection passes a wiped primary that btrfs-progs stops at
+  - `de42668` Add a flip-byte operation to corpus/mutate.py for corrupt tree-block copies
+  - `f3edc42` Add the m1_badnode images and vm tests for chunk maps, full walks and sv1 history
+  - `3939c74` Record M1b tree-walking notes, the mirror policy and the README status
+  - this catalog entry (the commit after `3939c74`)
+
+**What was done.** Unit, synthetic and sandbox tests were written first and
+seen failing (ImportError, or `invalid choice: 'walk'` for the CLI and
+`flip-byte`) before the implementation.
+1. **`substrate/chunks.py` (task 6).**
+   - `parse_chunk()` records every `btrfs_check_chunk_valid` failure
+     (tree-checker.c:825-1014): stripe counts per profile, ncopies/nparity,
+     alignment, sector_size, stripe_len, type and profile bits, mixed groups
+     and item size.
+   - `parse_sys_chunk_array()` is bounds-checked: a truncated key or item, a
+     non-CHUNK_ITEM key and a non-SYSTEM chunk are reported, never raised.
+   - `ChunkMap(source, chunks, devices)` sorts chunks and flags overlaps,
+     invalid chunks, zero-stripe REMAPPED chunks (tolerated; their addresses
+     raise `UnmappedAddress`) and stripes on missing devices or with a foreign
+     device uuid.
+   - `copies(logical, length)` follows volumes.c:6632-6849:
+     - SINGLE, DUP and RAID1/1C3/1C4 return every stripe in stripe order;
+     - RAID0 returns one stripe, RAID10 its sub_stripes mirrors;
+     - RAID5/6 return the data stripe with rotated parity (parity
+       reconstruction is unsupported);
+     - striped reads may not cross a 64 KiB stripe boundary;
+     - an unmapped range raises `UnmappedAddress` naming the map's source.
+2. **`substrate/node.py` (task 5).**
+   - `check_block(block, ctx, logical, expect)` returns one `Check(name, ok,
+     detail)` per check, in order: csum, bytenr, fsid (tree fsid),
+     chunk_tree_uuid, generation ≤ superblock, level (< 8, equal to the
+     expected level), nritems, WRITTEN flag, layout, owner (kernel
+     `btrfs_check_eb_owner` rule), parent_generation and first_key.
+   - The layout check follows tree-checker.c: keys strictly ascending, item
+     data contiguous from the block end and clear of the item headers; for
+     nodes, non-null sector-aligned pointers.
+   - A check whose reference is unknown records `ok=None`.
+   - `parse_items()` and `parse_key_ptrs()` clamp nritems and never slice
+     outside the block.
+   - `read_node(img, chunk_map, logical, ctx, expect)` returns a
+     `ValidatedNode`; `NodeReader` bundles the three inputs.
+   - Property test: 900 seeded rounds (random blocks, mutated leaves and
+     nodes, and mutated blocks with a recomputed csum so the layout checks see
+     the damage). Nothing raises, and every mutated block with a stale csum
+     fails a check.
+3. **`substrate/tree.py`, `roots.py`, `fs.py`, `items.py` (task 7).**
+   - `fs.open_filesystem()`:
+     - selects the superblock and applies the gate (`UnsupportedFormat`);
+     - builds the bootstrap map from the sys_chunk_array;
+     - reads the chunk root to learn the chunk tree uuid;
+     - walks the chunk tree into `ChunkMap(source="current")`, cross-checked
+       against the sys_chunk_array.
+   - `tree.walk(reader, bytenr, expect)` is depth-first in key order. Each
+     child is read with level − 1, the tree owner, the pointer's generation
+     and its key. The `Visit` records hop problems: a pointer already reached
+     (cycle or shared block, not followed) or keys at or above the parent's
+     next key. Invalid nodes are yielded, never descended.
+   - `tree.fs_tree_inventory(reader, bytenr, expect)` raises `IncompleteTree`
+     rather than return a partial inventory.
+   - `roots.root_sets(fields)` lists the backup sets by generation, then
+     current. `resolve_tree()` resolves slot trees from the slot fields and
+     numeric ids from the set's root tree ROOT_ITEM (highest key offset).
+     `subvolumes()` pairs ROOT_ITEM, ROOT_REF and ROOT_BACKREF and reports
+     one-sided refs.
+   - `items.py` parses inode, ref/extref, dir/xattr, file extent, root item
+     (legacy 239 B too) and root ref items, raising only `ItemError`. Names
+     keep undecodable bytes (surrogateescape). `summary()` never raises.
+   - The four ground-truth tests are ordinary tests now: xfail markers
+     removed, real API used. Each resolves `backup:GEN` → slot → fs root,
+     checks bytenr and generation, compares the inventory and asserts both
+     DUP copies valid.
+4. **CLI (task 10, `walk` half).** `btrfska walk IMAGE [--root
+   current|backup:GEN|bytenr:N] [--tree fs|root|chunk|extent|dev|csum|ID]
+   [--allow-unsupported]`:
+   - stdout carries one JSON line per record:
+     - `item`: key with type name, size, cheap summary, `slot`;
+     - `invalid_node`: the node instead of its items;
+     - `walk_problem`: hop findings;
+   - every record carries `root` (source, tree, tree_id, bytenr, level,
+     generation, `via`), `node` (bytenr, level, generation, owner, valid,
+     each copy's mirror/devid/physical/used/valid/checks/problems),
+     `chunk_map` and `unsupported_format`;
+   - stderr carries a one-line summary, chunk-map problems, and on refusal
+     `gate: REFUSED` with `UNSUPPORTED_INCOMPAT` lines;
+   - exit status: 0 when walked (invalid nodes are records, not errors), 1 for
+     an unknown root or tree, 2 when refused or `NO_VALID_SUPERBLOCK`.
+5. **Corpus (task 9).** `corpus/mutate.py flip-byte OFFSET...` inverts bytes
+   at physical offsets, behind the existing output guards. Two derived images
+   are added to `corpus/manifest.tsv`.
+6. **Doc nit.** The `superblock.select` docstring now explains the one
+   difference from btrfs-progs recover mode (v7.1 `disk-io.c:2029-2033`).
+   Progs stops when mirror 0 has the expected bytenr but a zero magic (device
+   removal wipes only the magic); btrfska falls back and reports mirror 0
+   invalid.
+
+**Design decisions.**
+- **Mirror handling.**
+  - `read_node` reads every physical copy of a tree block and validates each
+    on its own. It uses the first valid copy in mirror order and keeps every
+    copy's checks in `ValidatedNode.copies` as provenance.
+  - If no copy is valid, the node is flagged: the header of the first
+    readable copy is reported, and `items` and `key_ptrs` raise `InvalidNode`.
+  - Valid copies whose bytes differ are reported (`mirror 2 is valid but
+    differs from mirror 1`). With crc32c this is possible in the 28 csum-field
+    bytes the checksum does not cover.
+  - Why: the kernel reports neither the copy it did not read nor which copy
+    it did. Which copy it reads depends on the profile (corrected in the
+    review fixes below):
+    - DUP: mirror 1, falling back to mirror 2 only when mirror 1 fails
+      (`map_blocks_dup`, volumes.c:6751-6765);
+    - RAID1/1C3/1C4/10: `find_live_mirror` (volumes.c:6276-6342) picks by
+      PID under the default `pid` read policy, so different readers see
+      different copies.
+
+    btrfs-progs warns without saying which copy. A forensic tool must never
+    hide that one copy is corrupt, and a divergent second copy is itself
+    evidence (research.md §10.8).
+  - Cost: two reads per DUP block, negligible at tree-block scale. plan.md
+    §3.5 and M1 task 5 now state the policy.
+- **Parent generation is checked for equality**, as the kernel does
+  (disk-io.c:410-417), not as the brief's "child generation ≤ parent
+  pointer generation". An older child is as inconsistent as a newer one. The
+  failure detail names the direction: newer means rewritten after the parent.
+  The check is part of each copy's validation, so a stale mirror with a wrong
+  generation falls back to the other copy exactly as a csum failure does.
+- **Designed for M1c/M2/M3.**
+  - `ChunkMap.copies()` is the only translation, so extent reads can take any
+    map (current now, historical or reconstructed in M5).
+  - `check_block(block, ctx, None, expect)` validates raw physical blocks for
+    the M2 scan kernel without a logical address.
+  - `ValidatedNode`, `Visit` and the CLI's record shape carry the provenance
+    an M3 evidence row needs.
+
+**dump-tree cross-check** (btrfs-progs v6.6.3, only ever on byte-identical
+0444 copies in `images/scratch/m1b/ro/`, sha256 checked; outputs in
+`images/scratch/m1b/dump/`):
+```sh
+cp --sparse=always images/scenarios/m1_xxhash.img images/scratch/m1b/ro/ && chmod 0444 images/scratch/m1b/ro/m1_xxhash.img   # likewise sandbox-ro, m1_sha256_bgt, m1_blake2b, m1_badnode, m1_badnode_both
+btrfs inspect-internal dump-tree -t chunk images/scratch/m1b/ro/<image>.img
+btrfs inspect-internal dump-tree -t root  images/scratch/m1b/ro/<image>.img
+btrfs inspect-internal dump-tree -b 30801920 images/scratch/m1b/ro/sandbox-ro.img   # and 30883840, 30572544, 30720000 (gens 11-14)
+btrfs inspect-internal dump-tree -b 65208320 images/scratch/m1b/ro/m1_xxhash.img    # and 65273856, 65323008 (gens 35-37)
+btrfs inspect-internal dump-tree -b 65159168 images/scratch/m1b/ro/m1_xxhash.img    # sv1; 64208896 fs, 65126400 snapshot, 64962560 data reloc
+btrfs inspect-internal dump-tree -b 131104768 images/scratch/m1b/ro/m1_xxhash.img   # gen-30 chunk root; 64847872 gen-30 dev root
+btrfs inspect-internal dump-tree -b 65159168 images/scratch/m1b/ro/m1_badnode.img   # and m1_badnode_both.img
+```
+- **Chunk maps match dump-tree exactly** (`test_chunk_map_matches_dump_tree`:
+  logical, length, stripe_len, type, num_stripes, sub_stripes, every
+  stripe's devid and offset; `problems == ()`):
+
+  | Image | DATA\|single | SYSTEM\|DUP | METADATA\|DUP |
+  |---|---|---|---|
+  | `sandbox.img` | 13631488 (8 MiB) → 13631488 | 22020096 (8 MiB) → 22020096, 30408704 | 30408704 (32 MiB) → 38797312, 72351744 |
+  | `m1_xxhash`, `m1_sha256_bgt`, `m1_blake2b` | 164626432 (64 MiB) → 307232768 | 131072000 (32 MiB) → 240123904, 273678336 | 63963136 (64 MiB) → 105906176, 173015040 |
+
+  The sandbox map is also committed in `tests/ground_truth/sandbox.json`, so
+  CI checks it without btrfs-progs.
+- **Walks match dump-tree block by block**
+  (`test_walks_match_dump_tree_block_by_block`). For every distinct tree root
+  of every root set of the three csum images, our (bytenr, nritems,
+  generation) sequence equals `dump-tree -b <root> --follow`: at least 20
+  roots per image.
+- **Corrupt copies agree with dump-tree.** The stored and computed xxhash64
+  values match progs' `wanted 0x6024af66d4ba356f found 0x04ee33fa2966cb51`.
+  Progs prints it once on `m1_badnode` (then prints the leaf from mirror 2)
+  and twice plus `ERROR: failed to read tree block 65159168` on
+  `m1_badnode_both`.
+
+**Per-generation inventories.**
+- `sandbox.img`: every tree of every root set is valid on both copies, and
+  the fs trees match `tests/ground_truth/sandbox.json`.
+
+  | Root set | Root tree | fs tree (slot and ROOT_ITEM agree) | Contents |
+  |---|---|---|---|
+  | backup:11 (slot 2) | 30801920 | 30785536 gen 11, 8 items | dir 256 (30 B) → `target_file.txt` 257, 31 B inline |
+  | backup:12 (slot 3) | 30883840 | 30867456 gen 12, 2 items | dir 256 only (0 B) |
+  | backup:13 (slot 0) | 30572544 | 30539776 gen 13, 8 items | dir 256 (32 B) → `large_target.txt` 257, 5 242 880 B regular at 13631488 |
+  | backup:14 (slot 1) | 30720000 | 30703616 gen 14, 2 items | dir 256 only |
+  | current | 30720000 | 30703616 gen 14 | same as gen 14 |
+
+  Only subvolume 5 exists in any generation.
+- **`m1_xxhash` `sv1` history.** The four backup sets (gens 35–38, slots 2, 3,
+  0, 1) and current share the ROOT_ITEMs below. Sizes are asserted against
+  the guest script (`seq 1 20000` = 108 894 B, `seq 1 50000` = 288 894 B,
+  `small secret\n` = 13 B, `genN\n` = 5 B).
+
+  | Subvolume | Leaf (gen) | Contents in every generation |
+  |---|---|---|
+  | 5 | 64208896 (19) | dir 256 → `sv1` 256, `snap_before_delete` 257 |
+  | 256 `sv1`, parent 5, otransid 7 | 65159168 (34) | `keep.txt` 108 894 B, `churn_1..6` 5 B each |
+  | 257 `snap_before_delete`, read-only, otransid 8 | 65126400 (34) | `keep.txt`, `deleted_big.txt` 288 894 B (3 extents), `deleted_inline.txt` 13 B |
+
+  Gens 35–37 differ from 38 and current in the root tree: a `BALANCE
+  TEMPORARY_ITEM` and a gen-32 DATA_RELOC tree with orphan inode 259 (4
+  extents). They also name the gen-30 chunk root 131104768, which still
+  holds the pre-balance data chunk 13631488 (research.md §10.8).
+- **All backup roots were fully walkable.** No tree block in any root set of
+  `sandbox.img` or the five s01 images is invalid or has a divergent copy.
+  That is 144 distinct tree blocks, all DUP pairs
+  (`images/scratch/m1b/explore.py` → `explore.txt`).
+
+**New images** (derived from `m1_xxhash`; host mkfs btrfs-progs v6.6.3,
+guest kernel 7.0.0-31-generic via the source):
+
+| Name | Generator | Damage | sha256 |
+|---|---|---|---|
+| `m1_badnode` | `uv run python corpus/mutate.py images/scenarios/m1_xxhash.img images/scenarios/m1_badnode.img flip-byte 107118591` | last byte of mirror 1 of the `sv1` leaf 65159168 (physical 107102208 + 16383, inside item 0's data) | `d189151f5e0c2a7b750cf9ed03a152a52d6e0a51bcc2d35de9fb3c808ab381d6` |
+| `m1_badnode_both` | `… images/scenarios/m1_badnode_both.img flip-byte 107118591 174227455` | the same byte in both copies (mirror 2 at 174211072 + 16383) | `35d4f05d0e24f87c3e186d9127277a552903b10cc1881ef2fd47848b8d8fe99d` |
+
+- `m1_badnode`: the leaf is valid through mirror 2; mirror 1 fails only
+  `csum`; all 37 items are walked in every root set. The `sv1` leaf is shared
+  by all five sets.
+- `m1_badnode_both`: the node is an `invalid_node` record with `csum` false
+  on both copies and no items. `fs_tree_inventory` raises `IncompleteTree`;
+  the snapshot tree is unaffected.
+
+**Deviations** (the one plan change is the mirror-policy lines in plan.md
+§3.5 and M1 task 5):
+- **Parent generation equality** instead of "≤" (see design decisions).
+- **Two badnode images.** The plan names one `m1_badnode`. The mirror policy
+  needs both cases: one corrupt copy (reported, other copy used) and both
+  corrupt (`m1_badnode_both`, csum failure instead of items).
+- **API names.** `fs_tree_inventory` keeps its placeholder name; its signature
+  is `(reader, bytenr, expect)`, not `(img, bytenr)`, and the ground-truth
+  test was updated. The walker needs the chunk map and validation context, so
+  an image handle alone is not enough.
+- **Physical reads.** The plan says `read_node(logical|physical)`. A logical
+  read maps through the chunk map. A physical block (M2) is validated with
+  `check_block(block, ctx, None, expect)`; no second reader is added before
+  M2 needs one.
+- **Tree resolution in backup sets.** Slot trees come from the slot fields,
+  which the superblock csum covers. Numeric ids go through the set's root
+  tree. `test_sandbox_backup_trees_resolve_through_slots_and_root_items_alike`
+  shows both agree for fs, extent and csum in gens 11–14.
+- **`subvolumes()` returns `(subvolumes, problems)`** so root-tree walk
+  problems are not dropped.
+- **Backup roots walk through the current chunk map.** Historical maps are M5.
+  On these images every tree block is in chunks the old and new maps share.
+- **Multi-device.** Only the superblock's own device (dev_item devid and
+  uuid) is readable; other stripes are copies flagged `missing_device`.
+  RAID5/6 reads return the data stripe only.
+- **Empty backup slots** (tree_root 0) are skipped by `root_sets`.
+- **`walk` exits 0 when it finds invalid nodes.** They are evidence records,
+  counted in the stderr summary, not errors.
+- **Test order for the vm tests.** The M1b vm tests were written after the
+  implementation and the badnode images existed, so they were not seen
+  failing first. Their expectations come from dump-tree output and the guest
+  script, not from btrfska.
+
+**Verification** (local, branch `feature/m1b-validated-tree-walking`, all M1
+images present; logs in `images/scratch/m1b/verify/`):
+
+| Check | Command | Result |
+|---|---|---|
+| `sandbox.img` before | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime 2026-04-26 18:49:36 |
+| Tests (all) | `uv run pytest -q` | `446 passed` (was `288 passed, 4 xfailed`); no xfails left |
+| Tests without vm | `uv run pytest -q -m "not vm"` | `408 passed, 38 deselected` |
+| vm tests | `uv run pytest -m vm -q` | `38 passed, 408 deselected` (was 21) |
+| Read-only scan and import boundary | `uv run pytest -q tests/test_readonly.py tests/test_import_boundary.py` | `53 passed`; `grep -rn 'dissect\|lzallright' src/` finds nothing |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `37 files already formatted` |
+| Legacy runner | `uv run python -m unittest discover -s legacy/tests` | `Ran 37 tests`, `OK` |
+| Shell syntax | `for f in corpus/vm/*.sh corpus/vm/scenarios/*.sh corpus/vm/init; do sh -n "$f"; done` | exit 0 |
+| Lockfile | `uv lock --check` | `Resolved 10 packages` |
+| `sandbox.img` after | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime unchanged |
+
+**`btrfska walk` samples** (full output in
+`images/scratch/m1b/verify/walk-samples.txt`; long lines trimmed with `…`):
+```
+$ uv run btrfska walk sandbox.img --root backup:11 --tree fs | head -1
+{"record":"item","root":{"source":"backup:11","tree":"fs","tree_id":5,"bytenr":30785536,"level":0,"generation":11,"via":"backup slot 2"},"chunk_map":"current","unsupported_format":false,"node":{"bytenr":30785536,"level":0,"generation":11,"owner":5,"valid":true,"copies":[{"mirror":1,"devid":1,"physical":39174144,"used":true,"valid":true,"checks":{"csum":true,"bytenr":true,"fsid":true,"chunk_tree_uuid":true,"generation":true,"level":true,"nritems":true,"written":true,"layout":true,"owner":true,"parent_generation":true,"first_key":null},"problems":[]},{"mirror":2,"devid":1,"physical":72728576,"used":false,"valid":true,…}],"problems":[]},"slot":0,"key":{"objectid":256,"type":1,"type_name":"INODE_ITEM","offset":0},"size":160,"summary":{"generation":3,"transid":10,"size":30,"nbytes":16384,"nlink":1,"uid":1000,"gid":1000,"mode":"40755","flags":0}}
+
+$ uv run btrfska walk sandbox.img --root backup:13 --tree fs      # EXTENT_DATA record, stderr summary
+…"key":{"objectid":257,"type":108,"type_name":"EXTENT_DATA","offset":0},"size":53,"summary":{"generation":13,"ram_bytes":5242880,"compression":0,"encryption":0,"other_encoding":0,"type":"regular","disk_bytenr":13631488,"disk_num_bytes":5242880,"offset":0,"num_bytes":5242880}
+btrfska walk: 1 nodes (0 invalid), 8 items, 0 walk problems
+
+$ uv run btrfska walk images/scenarios/m1_badnode.img --tree 256 | head -1     # node section
+…"copies":[{"mirror":1,"devid":1,"physical":107102208,"used":false,"valid":false,"checks":{"csum":false,"bytenr":true,…},"problems":["csum: stored 6024af66d4ba356f computed 04ee33fa2966cb51"]},{"mirror":2,"devid":1,"physical":174211072,"used":true,"valid":true,…}],"problems":["mirror 1: csum: stored 6024af66d4ba356f computed 04ee33fa2966cb51"]}…
+btrfska walk: 1 nodes (0 invalid), 37 items, 0 walk problems
+
+$ uv run btrfska walk images/scenarios/m1_badnode_both.img --root backup:35 --tree 256      # exit 0
+btrfska walk: 1 nodes (1 invalid), 0 items, 0 walk problems
+{"record":"invalid_node","root":{"source":"backup:35","tree":"256","tree_id":256,"bytenr":65159168,"level":0,"generation":34,"via":"ROOT_ITEM (256 132 0) in root tree 65208320 leaf 65208320 slot 12"},…,"node":{"bytenr":65159168,…,"valid":false,"copies":[{"mirror":1,…,"used":false,"valid":false,"checks":{"csum":false,…}},{"mirror":2,…,"used":false,"valid":false,"checks":{"csum":false,…}}],"problems":["mirror 1: csum: stored 6024af66d4ba356f computed 04ee33fa2966cb51","mirror 2: csum: stored 6024af66d4ba356f computed 04ee33fa2966cb51"]},"parent":null,"parent_slot":null}
+
+$ uv run btrfska walk images/scenarios/m1_unknown_incompat.img                     # exit 2
+gate: REFUSED
+UNSUPPORTED_INCOMPAT UNKNOWN_BIT_40
+```
+
+**Research notes.** research.md §10.8 records:
+- all backup roots are fully walkable on the current corpus (with the
+  small-image threat);
+- DUP copies are identical. The kernel reads DUP mirror 1 first
+  (RAID1/1C3/1C4/10 pick a copy by PID), and crc32c leaves csum bytes 4–31
+  unchecked: two hiding-place hypotheses, the first scoped to DUP in the
+  review fixes;
+- the `sv1` per-generation result, with deletions visible only through the
+  snapshot;
+- backup chunk roots preserving the pre-balance data chunk;
+- mid-balance backup roots recording the relocation;
+- why parent-generation equality matters in historical walks.
+
+**For M1c (extents, decompression, oracles, EXP-001).**
+- **Reading extents.** Read through `fs.chunk_map.copies(disk_bytenr + offset,
+  length)`. Split ranges at 64 KiB stripe boundaries for RAID0/10/5/6
+  (`MappingError` otherwise). Keep `PhysicalCopy.mirror` in the per-extent
+  read record. Data chunks here are SINGLE, so there is one copy; data
+  checksums are not verified yet.
+- **What `items.file_extent()` returns.** Inline items have the 21-byte head
+  plus `inline_size`; the data starts at `ondisk.FILE_EXTENT_INLINE_DATA_START`.
+  Regular and prealloc items include `offset`, `num_bytes`, `ram_bytes`,
+  `disk_bytenr` and `disk_num_bytes`. The inventory's regular-extent entries
+  omit `offset` and `ram_bytes` to match the committed ground truth; extend
+  both together if needed.
+- **Oracle targets.**
+  - `sandbox.img`: gen 11 `target_file.txt` (31 B inline, uncompressed,
+    backup root only) and gen 13 `large_target.txt` (5 MiB regular at
+    13631488, backup root only).
+  - `m1_xxhash` `sv1`: `keep.txt` is zstd (disk 28 672 B, ram 110 592 B);
+    `churn_*` are zstd inline (23 B stored, 5 B ram).
+  - Snapshot 257 holds `deleted_big.txt` (3 zstd extents) and
+    `deleted_inline.txt` (31 B stored, 13 B ram) with the guest SHA-256s.
+    Current-tree-only oracles must include snapshot 257.
+- **Relocation.** The DATA_RELOC tree of gens 35–37 names the relocated data
+  extents. It is an orphan inode, so skip it (or treat it as evidence) when
+  listing files.
+- **EXP-001.** The csum-type half is ready: `btrfska walk` validates every
+  node on `m1_xxhash`, `m1_sha256_bgt` and `m1_blake2b` (23–25 distinct
+  blocks, all valid). The legacy tool still needs running against them.
+
+### Review fixes (2026-09-15)
+
+The M1b review approved the branch with six fixes. Every code fix was
+test-first: the new tests were run and seen failing (ZeroDivisionError,
+`DID NOT RAISE MappingError`, missing `rejected`/`readable`, missing README
+section) before the fix. Kernel references were re-read in v7.0
+(`git tag v7.0`, raw files from GitHub torvalds/linux, kept in
+`images/scratch/m1b-review-fixes/kernel/`; `volumes.c` is byte-identical to
+the M1a copy).
+
+1. **ZeroDivisionError on a REMAPPED RAID10 chunk (high).** A
+   `SYSTEM|RAID10|REMAPPED` bootstrap chunk with 2 stripes and sub_stripes 0
+   passed `parse_chunk`, because `btrfs_check_chunk_valid` skips
+   `valid_stripe_count` for REMAPPED chunks (tree-checker.c:1002-1009). Its
+   first lookup then divided by zero, and `btrfska walk` crashed with a
+   traceback inside `open_filesystem`.
+   - Why the check matters here: the kernel maps a REMAPPED address that is
+     covered by an identity remap item through the chunk's own stripes
+     (relocation.c:5164-5165, volumes.c:6914-6930); an address with no remap
+     item at all fails translation with `-ENOENT` (relocation.c:5123-5171).
+     Stripe geometry therefore matters.
+   - `ChunkMap.copies()` now raises `MappingError` (`geometry is not
+     computable`) whenever the stripe math cannot run, whatever problems the
+     chunk records:
+     - RAID10 with num_stripes not a non-zero multiple of sub_stripes;
+     - RAID5/6 with num_stripes ≤ nparity;
+     - more than one profile bit.
+     A chunk without stripes still raises `UnmappedAddress`.
+   - `parse_chunk` now runs the stripe-count check on every chunk that has
+     stripes, flagging `(checked although REMAPPED)`.
+   - It also adds `num_stripes N is not a multiple of sub_stripes 2` for
+     RAID10. The allocator adds RAID10 devices in pairs (`devs_increment 2`,
+     volumes.c:54-66); the kernel checker does not test this.
+   - Tests:
+     - `test_remapped_chunks_with_stripes_still_get_stripe_count_checks`,
+       `test_raid10_stripes_must_be_a_multiple_of_sub_stripes`;
+     - `test_uncomputable_geometry_raises_mapping_error_even_without_problems`
+       (6 cases);
+     - `test_random_chunk_geometry_translates_or_raises_mapping_error`: 3 000
+       random parsed and directly built chunks, over 1 000 successful
+       translations, only `MappingError` allowed;
+     - `test_sys_chunk_array_garbage_never_raises`, which now also translates
+       inside every accepted chunk;
+     - the end-to-end regression
+       `test_remapped_raid10_without_sub_stripes_opens_and_walks_without_a_traceback`
+       (`open_filesystem` and `btrfska walk`, exit 0).
+2. **False translation on a REMAPPED RAID6 chunk with one stripe (medium).**
+   Data stripes came out as -1, and Python's floor division and modulo
+   returned a physical offset without flagging anything.
+   - Fixed by the same guard. `parse_chunk` also flags `num_stripes N <
+     nparity M`; the kernel checks only `==`, tree-checker.c:910-914.
+   - Test: `test_remapped_raid6_with_one_stripe_never_translates` asserts
+     `MappingError` and that no copy is returned.
+3. **An invalid chunk still claimed address space (medium).** `ChunkMap`
+   now keeps chunks with problems in `rejected`. Only valid chunks take part
+   in lookup and overlap resolution; overlaps between valid chunks are still
+   reported and the later chunk ignored.
+   - Each rejected chunk is a map problem, `chunk L (origin, TYPE, length N)
+     is invalid and rejected: …`. `walk` prints map problems on stderr as
+     `chunk map: …`.
+   - A lookup that lands only in a rejected chunk raises `UnmappedAddress`
+     naming it: `… not in any valid chunk … (rejected chunk L is invalid:
+     …)`. That text is also the `invalid_node` record's problem.
+   - `btrfska info` does not open the chunk tree, so it shows no chunk
+     problems before or after.
+   - Test: `test_an_invalid_chunk_does_not_claim_address_space`. A corrupt
+     64 GiB item at 1 GiB (bad stripe_len) and a valid chunk at 3 GiB: the
+     valid chunk translates, the corrupt one is reported, and no overlap is
+     claimed.
+4. **Mirror-read statement corrected (medium, paper-critical).** "The kernel
+   reads mirror 1 and falls back silently" holds for DUP only.
+   - Updated here (design decisions, research notes) and in research.md
+     §10.8. plan.md §3.5 states btrfska's own policy only, so it is
+     unchanged.
+   - Verified in v7.0:
+     - DUP: `map_blocks_dup` (volumes.c:6751-6765) sets mirror 1. The retry
+       loop in `btrfs_read_extent_buffer` (disk-io.c:211-250) tries the next
+       mirror only after a failure.
+     - RAID1/1C3/1C4: `map_blocks_raid1` (l.6731-6749) calls
+       `find_live_mirror` (l.6276-6342); RAID10 goes through
+       `map_blocks_raid10` (l.6767-6793).
+     - Default read policy `pid`: `first + current->pid % num_stripes`
+       (l.6302-6304). `round-robin` and `devid` exist only under
+       `CONFIG_BTRFS_EXPERIMENTAL` (volumes.h:322-332, sysfs.c:1322-1343,
+       volumes.c:1271-1287), which the host kernel (`7.0.0-31-generic`)
+       leaves unset.
+     - Repair on fallback: `btrfs_repair_eb_io_failure` (disk-io.c:172-202,
+       called at l.246-247) rewrites the failed mirror unless the superblock
+       is read-only (l.180; `btrfs_repair_io_failure`, bio.c:952). Data reads
+       repair through bio.c:222.
+   - research.md now scopes the "altered mirror 2" hiding place to DUP and
+     states that a read-write mount can destroy the divergence.
+5. **Integrity vs linkage (low, plan only).** plan.md M5 gains a task to
+   split integrity checks (csum, bytenr, fsid, chunk-tree uuid, layout) from
+   linkage checks (parent generation, first key, owner, expected level). A
+   historical walk would then expose items from integrity-valid nodes with a
+   `linkage_mismatch` flag and a confidence penalty. No code change.
+6. **`walk` JSON schema (low).**
+   - Every copy now has `readable`, and `checks` always carries all 12
+     `CHECK_NAMES` keys in order, `null` when not checked (all of them for an
+     unreadable copy).
+   - README.md gains "`btrfska walk` output", the full JSON-lines schema.
+   - Tests:
+     - `test_unreadable_copies_carry_every_check_as_null`;
+     - `test_walk_records_follow_the_documented_schema`: exact key sets on
+       item and invalid_node records from `sandbox.img`;
+     - `test_readme_documents_every_walk_key`.
+
+Sample after the fix (`images/scratch/m1b-review-fixes/verify/`, the item 1
+image, exit 0; before the fix, the same walk crashed with ZeroDivisionError):
+```
+$ uv run btrfska walk images/scratch/m1b-review-fixes/verify/remapped_raid10.img --tree root
+chunk map: chunk tree node 1073741824: logical 1073741824 is not in any valid chunk of the sys_chunk_array chunk map (rejected chunk 1073741824 is invalid: num_stripes 2 sub_stripes 0 invalid for RAID10 (checked although REMAPPED))
+chunk map: sys_chunk_array chunk 1073741824 is not in the chunk tree; kept
+chunk map: chunk 1073741824 (sys_chunk_array, SYSTEM|REMAPPED|RAID10, length 1073741824) is invalid and rejected: num_stripes 2 sub_stripes 0 invalid for RAID10 (checked although REMAPPED)
+btrfska walk: 1 nodes (1 invalid), 0 items, 0 walk problems
+{"record":"invalid_node",…,"node":{"bytenr":1073758208,…,"valid":false,"copies":[],"problems":["logical 1073758208 is not in any valid chunk of the current chunk map (rejected chunk 1073741824 …"]},…}
+```
+
+**Verification after the fixes** (local, all M1 images present):
+
+| Check | Command | Result |
+|---|---|---|
+| Tests (all) | `uv run pytest -q` | `461 passed` (was 446) |
+| vm tests | `uv run pytest -m vm -q` | `38 passed, 423 deselected` |
+| Read-only scan and import boundary | `uv run pytest -q tests/test_readonly.py tests/test_import_boundary.py` | `53 passed`; `grep -rn 'dissect\|lzallright' src/` finds nothing |
+| Lint | `uv run ruff check .` | `All checks passed!` |
+| Format | `uv run ruff format --check .` | `37 files already formatted` |
+| Legacy runner | `uv run python -m unittest discover -s legacy/tests` | `Ran 37 tests`, `OK` |
+| Lockfile | `uv lock --check` | `Resolved 10 packages` |
+| `sandbox.img` | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime 2026-04-26 18:49:36 unchanged |
+
 ## 2026-09-15 — M1a: on-disk tables, checksums, superblock trust gate
 
 - **Branch:** `feature/m1a-trust-foundations` (from `main` at `85cbc07`).

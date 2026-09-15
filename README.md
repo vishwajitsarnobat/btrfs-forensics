@@ -8,12 +8,17 @@ goal is to catalog all of it, with provenance and confidence, and answer what
 existed, when, what changed, what can be recovered, and whether anything was
 hidden.
 
-**Status:** M1a (trust foundations). `btrfska info IMAGE` validates every
+**Status:** M1b (validated tree walking). `btrfska info IMAGE` validates every
 superblock copy (all four checksum types), selects the best one, reports
 disagreements, backup roots by generation, and refuses unsupported or unknown
 incompat features (exit 2, `UNSUPPORTED_INCOMPAT <name>`; override with
-`--allow-unsupported`). Tree walking and file recovery come next. The earlier
-prototype is frozen, still runnable, under `legacy/`.
+`--allow-unsupported`). `btrfska walk IMAGE --root {current,backup:GEN,bytenr:N}
+[--tree fs|root|chunk|extent|dev|csum|ID]` walks one tree through the chunk
+map and prints one JSON line per item. Each line carries the root it was
+reached from and the validation record of every physical copy (DUP mirrors
+included); invalid nodes are reported instead of items. File content
+recovery comes next. The earlier prototype is frozen, still runnable, under
+`legacy/`.
 
 **Licence:** Apache-2.0 (see `LICENSE`).
 
@@ -25,7 +30,67 @@ Requires [uv](https://docs.astral.sh/uv/); uv provisions Python 3.14.
 uv sync                     # create .venv from uv.lock
 uv run btrfska --help
 uv run btrfska info sandbox.img
+uv run btrfska walk sandbox.img --root backup:11 --tree fs
 ```
+
+### `btrfska walk` output
+
+`walk` writes one JSON object per line to stdout. A one-line summary, the
+chunk-map problems (rejected chunks included) and any gate refusal go to
+stderr. Every key below is always present; `null` means unknown or not
+applicable.
+
+Every record has these keys:
+- `record`: `item`, `invalid_node` or `walk_problem`.
+- `root`: where the walk started.
+  - `source`: `current`, `backup:GEN` or `bytenr:N`.
+  - `tree`: the `--tree` argument.
+  - `tree_id`.
+  - `bytenr`, `level` and `generation` of the start block, as the referrer
+    records them.
+  - `via`: how the start block was resolved (`superblock`, `backup slot N`,
+    `ROOT_ITEM (…) in root tree … leaf … slot …` or `bytenr`).
+- `chunk_map`: the source of the chunk map used (`current`).
+- `unsupported_format`: `true` when `--allow-unsupported` overrode the gate.
+- `node`: the tree block the record comes from.
+  - `bytenr`: the block's logical address.
+  - `level`, `generation` and `owner`: from the header of the copy used,
+    else of the first readable copy (`null` when no copy was read).
+  - `valid`: `true` when some copy passed every check.
+  - `copies`: one object per physical copy, in mirror order.
+  - `problems`: every failed check, as `mirror N: check: detail`, plus
+    node-level findings such as a valid mirror that differs from the one
+    used, or a mapping failure (then `copies` is empty).
+
+Each entry of `copies` has these keys:
+- `mirror`: 1-based, in stripe order.
+- `devid`, `physical`: where the copy lives.
+- `readable`: `false` when the bytes could not be read, because the device
+  is missing or the copy lies beyond the image end.
+- `used`: `true` for the copy whose items are reported.
+- `valid`: `true` when no check failed.
+- `checks`: every check, always in this order: `csum`, `bytenr`, `fsid`,
+  `chunk_tree_uuid`, `generation`, `level`, `nritems`, `written`, `layout`,
+  `owner`, `parent_generation`, `first_key`. Each value is `true`, `false`,
+  or `null` when not checked (no reference value, or the copy is not
+  readable).
+- `problems`: `check: detail` for each failed check, or
+  `readable: detail`.
+
+Keys added by each record type:
+- `item`: one leaf item of a valid leaf.
+  - `slot`.
+  - `key`: `objectid`, `type`, `type_name` and `offset`.
+  - `size`: the item's data size.
+  - `summary`: a cheap per-type decode.
+- `invalid_node`: a block without any valid copy. It is reported in place of
+  its items or children.
+  - `parent`: the parent's logical address (`null` for the start block).
+  - `parent_slot`: the pointer's slot in the parent.
+- `walk_problem`: hop findings for a valid node, emitted before its items.
+  - `parent`, `parent_slot`: as for `invalid_node`.
+  - `problems`: for example, a last key not below the parent's next key, or
+    a pointer to a block already reached, which is not followed.
 
 ## Tests and lint
 

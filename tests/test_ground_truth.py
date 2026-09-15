@@ -1,9 +1,7 @@
 """sandbox.img ground truth (tests/ground_truth/sandbox.json, captured with btrfs-progs dump-tree).
 
-Superblock-level facts are asserted now. The per-generation fs-tree contents
-need the tree walker (plan.md M1 task 7) and are strict xfails until M1b
-lands it: an unexpected pass fails the run, so M1b must remove the marker, and
-only an ImportError counts as the expected failure.
+Superblock-level facts, and the per-generation fs-tree contents walked from
+each backup root (plan.md M1 task 7).
 """
 
 import json
@@ -14,7 +12,10 @@ import pytest
 
 from btrfska.substrate import ondisk
 from btrfska.substrate import superblock as sb
+from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
+from btrfska.substrate.roots import find_root_set, resolve_tree
+from btrfska.substrate.tree import fs_tree_inventory, walk
 
 GROUND_TRUTH = json.loads((Path(__file__).parent / "ground_truth" / "sandbox.json").read_text())
 EXPECTED_SB = GROUND_TRUTH["superblock"]
@@ -116,15 +117,18 @@ def test_fs_tree_roots_in_ground_truth_match_backup_roots(selection):
         assert by_gen[int(gen)] == state["fs_root"]
 
 
-# raises=ImportError: only the missing walker module may make these xfail. Once M1b adds it, a
-# wrong inventory fails loudly instead of hiding behind the marker.
-@pytest.mark.xfail(strict=True, raises=ImportError, reason="tree walker lands in M1b")
 @pytest.mark.parametrize("gen", ["11", "12", "13", "14"])
 def test_fs_tree_contents_per_generation(sandbox_img, gen):
     """Gen 11: target_file.txt 31 B inline; gen 12: root dir only; gen 13: large_target.txt
-    5 242 880 B; gen 14: root dir only. M1b replaces the import with the real walker API."""
-    from btrfska.substrate.tree import fs_tree_inventory
-
+    5 242 880 B; gen 14: root dir only. Anchored: superblock -> backup slot -> fs tree."""
     expected = GROUND_TRUTH["fs_tree_by_generation"][gen]
     with open_image(sandbox_img) as img:
-        assert fs_tree_inventory(img, expected["fs_root"]) == expected["inodes"]
+        fs = open_filesystem(img)
+        fs_root = resolve_tree(fs.reader, find_root_set(fs.fields, f"backup:{gen}"), "fs")
+        assert (fs_root.bytenr, fs_root.generation) == (expected["fs_root"], int(gen))
+        inventory = fs_tree_inventory(fs.reader, fs_root.bytenr, fs_root.expect())
+        visits = list(walk(fs.reader, fs_root.bytenr, fs_root.expect()))
+    assert {str(inode): entry for inode, entry in inventory.items()} == expected["inodes"]
+    (leaf,) = visits
+    assert len(leaf.node.items) == expected["leaf_items"]
+    assert leaf.node.valid and [c.ok for c in leaf.node.copies] == [True, True]
