@@ -13,6 +13,9 @@ a refused run leaves no file behind. Unchanged all-zero regions stay sparse.
       copy DONOR's superblock copy MIRROR into the same mirror slot of the output, with its
       generation set to GENERATION and its csum recomputed with the donor's csum type
       (a leftover copy of an earlier, different filesystem)
+  uv run python corpus/mutate.py SRC DST flip-byte OFFSET [OFFSET ...]
+      invert (XOR 0xFF) the byte at each physical OFFSET, checksums left stale
+      (a corrupt tree-block copy; see corpus/manifest.tsv for which copies m1_badnode* hit)
 """
 
 import argparse
@@ -80,6 +83,16 @@ def transplant_sb(src, size: int, donor: Path, mirror: int, generation: int) -> 
     return {offset: patched}
 
 
+def flip_bytes(src, size: int, offsets: list[int]) -> dict[int, bytes]:
+    patches = {}
+    for offset in offsets:
+        if not 0 <= offset < size:
+            sys.exit(f"offset {offset} is outside the image (size {size})")
+        (value,) = os.pread(src.fileno(), 1, offset)
+        patches[offset] = bytes([value ^ 0xFF])
+    return patches
+
+
 def check_patches(size: int, patches: dict[int, bytes]) -> None:
     for offset, block in patches.items():
         if offset < 0 or offset + len(block) > size:
@@ -131,6 +144,8 @@ def main(argv: list[str] | None = None) -> None:
     transplant.add_argument("donor", type=Path)
     transplant.add_argument("mirror", type=int, choices=range(ondisk.SUPER_MIRROR_MAX))
     transplant.add_argument("generation", type=int)
+    flip = ops.add_parser("flip-byte")
+    flip.add_argument("offsets", type=int, nargs="+", metavar="OFFSET")
     args = parser.parse_args(argv)
 
     dst = checked_output(args.src, args.dst)
@@ -140,8 +155,10 @@ def main(argv: list[str] | None = None) -> None:
             patches = zero_primary_sb(src, size)
         elif args.op == "set-incompat-bit":
             patches = set_incompat_bit(src, size, args.bit)
-        else:
+        elif args.op == "transplant-sb":
             patches = transplant_sb(src, size, args.donor, args.mirror, args.generation)
+        else:
+            patches = flip_bytes(src, size, args.offsets)
         check_patches(size, patches)
         # "xb" is O_CREAT|O_EXCL: it fails on any existing path, including a dangling symlink.
         with open(dst, "xb") as out:

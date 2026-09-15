@@ -1,4 +1,4 @@
-"""Shared test helpers: synthetic superblocks and scratch images under images/scratch/."""
+"""Shared test helpers: synthetic superblocks and tree nodes, scratch images under images/."""
 
 import shutil
 import struct
@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from btrfska.substrate import csum, ondisk
+from btrfska.substrate.node import NodeContext
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRATCH = REPO_ROOT / "images" / "scratch"
@@ -100,3 +101,112 @@ def scratch_dir(prefix: str):
         yield path
     finally:
         shutil.rmtree(path)
+
+
+# ---------------------------------------------------------------------------
+# Synthetic tree nodes
+# ---------------------------------------------------------------------------
+FSID = bytes(range(16))
+CHUNK_TREE_UUID = bytes(range(16, 32))
+DEV_UUID = bytes(range(32, 48))
+NODESIZE = 4096
+_HEADER_FORMATS = {
+    "fsid": "16s",
+    "bytenr": "<Q",
+    "flags": "<Q",
+    "chunk_tree_uuid": "16s",
+    "generation": "<Q",
+    "owner": "<Q",
+    "nritems": "<I",
+    "level": "<B",
+}
+
+
+def node_ctx(**overrides) -> NodeContext:
+    """The node context matching make_node's defaults (superblock generation 100)."""
+    values = {
+        "nodesize": NODESIZE,
+        "sectorsize": 4096,
+        "csum_type": csum.XXHASH,
+        "fsid": FSID,
+        "generation": 100,
+        "chunk_tree_uuid": CHUNK_TREE_UUID,
+        **overrides,
+    }
+    return NodeContext(**values)
+
+
+def recsum(block, csum_type: int = csum.XXHASH) -> bytes:
+    """`block` with its tree-block checksum recomputed."""
+    block = bytearray(block)
+    block[: ondisk.CSUM_SIZE] = bytes(ondisk.CSUM_SIZE)
+    block[: csum.csum_size(csum_type)] = csum.compute(csum_type, block[ondisk.CSUM_SIZE :])
+    return bytes(block)
+
+
+def set_header(block, csum_type: int = csum.XXHASH, **fields) -> bytes:
+    """`block` with header fields replaced and the checksum recomputed."""
+    block = bytearray(block)
+    for name, value in fields.items():
+        struct.pack_into(_HEADER_FORMATS[name], block, ondisk.HEADER.offset(name), value)
+    return recsum(block, csum_type)
+
+
+def flip(block, offset: int) -> bytes:
+    """`block` with the byte at `offset` inverted and the checksum left stale."""
+    block = bytearray(block)
+    block[offset] ^= 0xFF
+    return bytes(block)
+
+
+def make_node(
+    bytenr: int,
+    *,
+    level: int = 0,
+    items=(),
+    ptrs=(),
+    owner: int = ondisk.FS_TREE_OBJECTID,
+    generation: int = 7,
+    nodesize: int = NODESIZE,
+    csum_type: int = csum.XXHASH,
+    fsid: bytes = FSID,
+    chunk_tree_uuid: bytes = CHUNK_TREE_UUID,
+    flags: int = ondisk.HEADER_FLAG_WRITTEN,
+    nritems: int | None = None,
+) -> bytes:
+    """A tree block laid out as the kernel writes it, with a correct checksum.
+
+    Leaves take `items` as ((objectid, type, offset), data) pairs, packed from the end of the
+    block. Internal nodes take `ptrs` as ((objectid, type, offset), blockptr, generation).
+    """
+    block = bytearray(nodesize)
+    count = len(items) if level == 0 else len(ptrs)
+    struct.pack_into(
+        ondisk.HEADER.format,
+        block,
+        0,
+        bytes(ondisk.CSUM_SIZE),
+        fsid,
+        bytenr,
+        flags,
+        chunk_tree_uuid,
+        generation,
+        owner,
+        count if nritems is None else nritems,
+        level,
+    )
+    base = ondisk.HEADER.size
+    if level == 0:
+        end = nodesize - base
+        for slot, (key, data) in enumerate(items):
+            end -= len(data)
+            struct.pack_into(
+                ondisk.ITEM.format, block, base + slot * ondisk.ITEM.size, *key, end, len(data)
+            )
+            block[base + end : base + end + len(data)] = data
+    else:
+        for slot, (key, blockptr, gen) in enumerate(ptrs):
+            struct.pack_into(
+                ondisk.KEY_PTR.format, block, base + slot * ondisk.KEY_PTR.size, *key, blockptr, gen
+            )
+    return recsum(block, csum_type)
