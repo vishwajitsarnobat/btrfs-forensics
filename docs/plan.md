@@ -1344,16 +1344,8 @@ one run of 15 (365/353/18/828), the async and sync rows never.
 
 ## 10. Working Conventions
 
-- One branch per feature (`feature/<name>`), PR to `main`, catalog.md entry
-  with every merge (numbers + verification + EXP ids).
-- Read-only guarantee: no code path may ever write to an evidence image. It
-  is enforced by:
-  - opening images `O_RDONLY` in exactly one place
-    (`substrate/image.py`);
-  - an AST test banning other open sites;
-  - a session test asserting the `sandbox.img` hash before and after.
-- Image rule: all images, mount points, VM tooling, tool builds and scratch
-  outputs live under the gitignored `images/`; nothing is created outside
-  the repo.
-- Every empirical claim destined for the paper follows §7 (EXP record +
-  committed regeneration script).
+The working rules moved to [`CONTRIBUTING.md`](../CONTRIBUTING.md) on
+2026-09-21 and are maintained there: one feature per branch and pull request
+with a catalog entry, plan then implement then test, the definition of done,
+the read-only guarantee, the image rule, the reproducibility target
+(`./setup.sh` from a fresh clone), the experiment protocol of §7, and cost.

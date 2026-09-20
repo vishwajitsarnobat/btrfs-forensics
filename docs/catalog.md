@@ -20,6 +20,25 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — CONTRIBUTING.md: the working rules in one place
+
+- **Branch:** `docs/contributing-rules` (from `main` at `b569d4c`). New `CONTRIBUTING.md`; a link
+  in `README.md`; plan.md §10 now points to it. No code change.
+- **Why:** the rules the project runs on were spread over plan.md §6, §7 and §10, several catalog
+  entries and decisions taken while the repository was set up on 2026-09-20 and 2026-09-21. Three
+  people and several parallel work sessions need one short page that says what is not negotiable.
+- **What it fixes in writing:** (1) one feature, one branch, one pull request: plan, implement in
+  small commits, test, catalog entry, describe for a reader who was not there, review the whole
+  diff and wait for CI, merge, delete the branch; when to ask the maintainer; (2) plain human
+  writing and no tool attribution anywhere; (3) the definition of done, including a from-scratch
+  `./setup.sh` run when a build script changes; (4) anyone can rebuild everything on any Linux
+  distribution, no root, nothing outside the repository, everything that decides on-disk bytes
+  pinned by hash; (5) read-only evidence, numbers only from committed scripts, guest runs never
+  quoted as constants, tests assert claims relative to the image; (6) `main` is never
+  force-pushed again, where documents and papers live, what is never deleted; (7) the project
+  spends nothing.
+- **Verification:** links resolve; ruff clean; `uv run pytest` 735 passed.
+
 ## 2026-09-21 — History rewrite: two commit messages corrected, cited hashes remapped
 
 - **Branch:** `docs/remap-commit-hashes` (from `main` at `d70ff99`). Docs and experiment records
