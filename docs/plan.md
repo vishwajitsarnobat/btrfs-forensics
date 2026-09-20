@@ -907,6 +907,11 @@ scenario's final balance and short life (EXP-002 §6.5).
   node-slack residual mining, kernel ORPHAN_ITEM (0x30) resurrection —
   golden-tested against legacy outputs (with defect #8 corrected).
 - Cross-generation dedup of recovered content (by extent tuple + sha256).
+- Settle whether copy-on-write zeroes node slack (research.md §10.13): Toolan &
+  Humphries 2026 report that a message in internal-node slack does not survive
+  the node's next copy. Read `btrfs_cow_block` at v7.0 and compare the slack of
+  superseded and live copies of the same node on the corpus, for internal nodes
+  and for leaves, before claiming slack as a recovery source (C1).
 - **DoD:**
   - migration-done criterion (§4.3) met;
   - deleted files recoverable from (a) anchored historical roots,
@@ -970,7 +975,11 @@ scenario's final balance and short life (EXP-002 §6.5).
 - Hiding detection: the research.md §8.3 target list (reserved regions,
   SB/chunk-array slack, STRING_ITEM 0xFD, ns-timestamp anomalies, inode
   reserved bytes) with correct reserved-range definitions (fixes defect #3
-  into a feature), plus backup-root divergence (cite SecurityRonin). Target
+  into a feature). **The reserved ranges are derived from the feature flags,
+  not taken as constants** (research.md §10.13): the published superblock
+  range, 0xF0 bytes at 0x23B, is a pre-5.0 layout; at v7.0 only 0x264–0x32A is
+  reserved, and `metadata_uuid`, `nr_global_roots` and the `remap_root` fields
+  are anomalies only when non-zero without their feature flag, plus backup-root divergence (cite SecurityRonin). Target
   list per Toolan & Humphries FSI:DI 58:302198. Validate against images
   generated with **fishy**'s btrfs module.
 - Foreign-FSID discovery (optional scan mode, from the M2a review). The M2
@@ -1059,7 +1068,12 @@ scenario's final balance and short life (EXP-002 §6.5).
   - commercial (UFS Explorer/R-Studio) if licensed.
 - Metrics: recovery rate, SHA-256 exact-match accuracy, metadata recovery
   rate (name/times/mode), runtime; per scenario, with repetition count and
-  spread (§7).
+  spread (§7). Per tool, report three counts, as ExtSFR does: files produced,
+  hash-exact, name recovered (a carver can produce more files than were
+  deleted). For timelines, also report the share of all file *states* in the
+  ground truth that are recovered, as Plum & Dewald 2018 do; this needs the
+  scenario log to record every state, not only the final one (research.md
+  §10.13).
 - Publish corpus (Zenodo DOI) — contribution C7.
 - **DoD:** one command regenerates corpus + all baseline numbers + our
   numbers into the paper's tables.

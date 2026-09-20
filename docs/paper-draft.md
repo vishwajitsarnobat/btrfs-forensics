@@ -324,7 +324,8 @@ Sources: research.md §2, §4, §6, §10.1, §10.2; plan.md §1 and §8.
 - **Hilgert et al. (2017, 2018, 2024); Hilgert PhD (2025).** Pooled and multi-device analysis
   model; routes to deleted files via snapshots and the four backup roots.
 - **Toolan & Humphries (2026, FSI:DI 58:302198).** Six Btrfs hiding techniques (the C5 target
-  list; full text not obtained, §12.2). **Schwietert & Hilgert (2025, 2026).** Hiding corpus and
+  list), none detected by TSK 4.14, `btrfs check` or `dmesg`; they name a detection toolkit as
+  future work. Their superblock reserved range is a pre-5.0 layout (research.md §10.13). **Schwietert & Hilgert (2025, 2026).** Hiding corpus and
   ghost slack on CoW filesystems.
 - **CoW analogs.** ReFS: Prade et al. (2020), Bonnet (2026) `forefst` with node-slack scanning
   and recoverability verdicts. F2FS: Oh & Hwang (2025) address-table rebuild. APFS: Plum & Dewald
@@ -1062,7 +1063,7 @@ from plan.md §5.
 | G11 | Corpus release (C7) and artifact | DFRWS values reproducibility; no public Btrfs image corpus with per-file ground truth across these axes was found, but Wani & Bhat (2018) and Schwietert & Hilgert (2025) published datasets that must be cited (research.md §5.1) | M7 | Zenodo DOI, manifest with per-file SHA-256 and operation logs, one command to regenerate the tables |
 | G12 | Hiding detection (C5) and FST (C2) | Out of scope for paper 1 per plan.md §8 | M6 | Keep for paper 2; mention only as future work |
 | G13 | Paper-readiness of existing numbers | plan.md §7 rule | now | Promote LZO harness, per-image scan/roots tables and oracle results to EXP records; commit the hostile-walk and memory scripts; re-run EXP-003 §6.1 on a clean commit with more density points; commit a dissect.btrfs validation script if N1's comparison is used |
-| G14 | Blocked related work | Toolan & Humphries 2026 is the C5 target list; Plum & Dewald and Oh & Hwang are CoW analogs | now | Obtain the three PDFs via a browser session (§12.2); re-run the prior-art watch before submission (plan.md §8) |
+| G14 | Blocked related work | Toolan & Humphries 2026 is the C5 target list; Plum & Dewald and Oh & Hwang are CoW analogs | done 2026-09-21, except the prior-art watch | The three papers and ExtSFR are read (research.md §10.13). Two project claims were corrected: ExtSFR is not database-backed and does verify by hash; the published superblock reserved range is a pre-5.0 layout. Remaining: re-run the prior-art watch before submission (plan.md §8) |
 
 **Near-term experiment E-findroot (before M3; not M7).** A per-generation head-to-head of
 `btrfs-find-root -a` against `btrfska roots --json --full-sweep` on the images that already exist:
@@ -1311,7 +1312,7 @@ version or date research.md records.
   pages   = {302198},
   year    = {2026},
   doi     = {10.1016/j.fsidi.2026.302198},
-  note    = {Crossref verified. Full text not obtained. Supersedes SSRN preprint 10.2139/ssrn.7138910}
+  note    = {Crossref verified. Open access, CC BY 4.0. Read in full 2026-09-21 (research.md 10.13). Supersedes SSRN preprint 10.2139/ssrn.7138910}
 }
 
 @article{toolan2025symlink,
@@ -1398,7 +1399,7 @@ version or date research.md records.
   publisher = {ACM},
   year      = {2018},
   doi       = {10.1145/3230833.3232808},
-  note      = {Tool afro, https://github.com/cugu/afro. Full text not obtained}
+  note      = {Tool AFRO, https://github.com/cugu/afro. Read in full 2026-09-21 (research.md 10.13)}
 }
 
 @article{prade2020refs,
@@ -1419,7 +1420,7 @@ version or date research.md records.
   pages   = {301976},
   year    = {2025},
   doi     = {10.1016/j.fsidi.2025.301976},
-  note    = {DFRWS APAC 2025. Full text not obtained (abstract only)}
+  note    = {DFRWS APAC 2025. Open access, CC BY-NC-ND. Read in full 2026-09-21 (research.md 10.13)}
 }
 
 @mastersthesis{bonnet2026refs,
@@ -1480,7 +1481,7 @@ version or date research.md records.
   pages   = {16093--16111},
   year    = {2020},
   doi     = {10.1007/s11042-019-7199-y},
-  note    = {Crossref: issue of June 2020, online 2019-01-29. Full text not obtained}
+  note    = {Crossref: issue of June 2020, online 2019-01-29. Read in full 2026-09-21 (research.md 10.13): no database; verifies by MD5}
 }
 
 @book{carrier2005fsfa,
@@ -1564,20 +1565,15 @@ Also cited in research.md, to add if used: Schneider et al. 2022 "Ambiguous file
 Wani 2020 "Can computer forensic tools be trusted…" (all fields `TODO`); Leigh 2014 ZFS timelines
 (thesis, `TODO`); Hraiz 2016 "Btrfs Forensic Analysis" (thesis, content UNVERIFIED).
 
-### 12.2 Papers blocked from download
+### 12.2 Papers still missing
 
-Named in research.md §10.6 open question (d) as the three OA papers to obtain via a browser session:
-1. **Toolan & Humphries 2026**, "Hiding data in Btrfs file systems", FSI:DI 58:302198, DOI
-   10.1016/j.fsidi.2026.302198 (ScienceDirect/SSRN/ResearchGate 403). The §8.3 offsets in research.md
-   are reconstructed from Schwietert & Hilgert 2025; differences from the published version are
-   UNVERIFIED.
-2. **Plum & Dewald 2018**, "Forensic APFS File Recovery", ARES 2018, DOI 10.1145/3230833.3232808
-   (listed gold OA; dl.acm.org 403).
-3. **Oh & Hwang 2025**, "Advanced forensic recovery of deleted file data in F2FS", FSI:DI 54:301976,
-   DOI 10.1016/j.fsidi.2025.301976 (abstract only).
+The three open-access papers of research.md §10.6 (d) (Toolan & Humphries 2026, Plum & Dewald 2018,
+Oh & Hwang 2025) and ExtSFR (Lee et al., 2020) were obtained and read in full on 2026-09-21; their
+digests and the corrections they forced are in research.md §10.13.
 
-Also not obtained (research.md §4.8, §10.1): ExtSFR (Lee et al., 2020), Vaheed Ali et al. (ICPCSN
-2025), Hilgert PhD (2025), Toolan & Humphries 2025 (symlink slack, closed).
+Still missing (research.md §4.8): Hilgert's PhD thesis (2025; open access, host unreachable from the
+development network), Vaheed Ali et al. (ICPCSN 2025, closed), Hraiz (2016 thesis, ProQuest), Toolan
+& Humphries 2025 (symlink slack, closed). None carries a claim of this draft.
 
 ---
 
