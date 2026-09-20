@@ -55,6 +55,28 @@ Maintenance rules:
   was skipped for a missing image. plan.md §6.1 said vm tests were local only; it is revised, and
   §6.2 gains the reproducibility target every later scenario and baseline tool must keep.
 
+**Finding: the first build on a second host class changed the numbers, as plan.md §7 predicts.**
+- On the GitHub-hosted runner (nested KVM, Ubuntu's QEMU 8.2.2) the whole corpus built and 729 of
+  734 tests passed. The five failures were all in `tests/test_discard_trio.py`: the guest made one
+  more transaction commit than on either development host, so the s01 images ended at generation
+  39, not 38, and the no-discard and async images held 363/351/16/824 blocks
+  (`probe_stale_metadata.py` columns), not 367/355/18/832. The sync image's class counts were
+  unchanged (43/38/22/0/16), only its backup generations moved up by one. EXP-000 had already
+  seen 365/353/18/828 once in 15 runs on the first host.
+- Those tests asserted EXP-002's numbers as constants, which was sound while three kept images
+  were the test subjects, and is not once everyone rebuilds them. They now assert the claims
+  themselves, relative to each image's own superblock generation G and its own probe output:
+  btrfska's full sweep covers exactly the blocks the probe counts; the classes partition the valid
+  candidates; without trims the four backup states G…G−3 are complete and at least 20 older states
+  survive (EXP-002 measured 31), all complete except the mkfs-era generation-3 leaf; under
+  `discard=sync` fewer than 20 % of the stale blocks survive, nothing is reached from an older
+  backup only, and exactly the root, extent, chunk and dev roots of backups G−3…G−1 read as zeros
+  (12 walks). The measured numbers stay in EXP-000 and EXP-002, where N and the spread are stated.
+- Consequence for the paper: a count from one guest run is host-dependent. EXP-000's medians held
+  on two x86-64 hosts with different QEMU versions (8.2.2, 10.2.2) and did not hold on a slower,
+  nested-virtualisation runner. Any table built from guest runs should name the host class, and a
+  cross-host repetition belongs in the M7 experiment set.
+
 **Verification** (Fedora 44, QEMU 10.2.2, NVMe; single runs, timings indicative).
 - Corpus from an empty `images/` folder, 190 MB download included: 14 images in 92 s; each
   guest-driven image takes 1.0–1.2 s and each derived image about 2.1 s.
