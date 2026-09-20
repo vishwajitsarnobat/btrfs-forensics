@@ -454,6 +454,12 @@ against `tests/fixtures/SHA256SUMS`. `corpus` runs `./setup.sh` on a clean
 runner with KVM: it builds every image of `corpus/manifest.tsv` and runs the
 whole suite, the `vm` tests included.
 
+CI costs nothing: GitHub Actions is free for public repositories on the
+standard hosted runners both jobs use. A pull request takes about four runner
+minutes in total. The workflow still keeps usage small: it does not run for
+changes under `docs/` only, a newer push cancels the run it supersedes, and
+the jobs stop after 10 and 15 minutes (GitHub's default limit is six hours).
+
 ### Test policy
 
 - `sandbox.img` at the repo root is the primary regression image (sha256
