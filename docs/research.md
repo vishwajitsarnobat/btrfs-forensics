@@ -2437,3 +2437,24 @@ place with a pointer here.
 5. M7 should report file *states* recovered (Plum & Dewald) next to deleted files recovered, and
    three counts per tool (ExtSFR).
 6. M3 cites no database precedent.
+
+### 10.14 What `btrfs-find-root` scans, read from its source (2026-09-21)
+
+Read for EXP-004 from `btrfs-find-root.c` (btrfs-progs v6.6.3 and v7.1; the two files differ in one
+usage string). It replaces the guesses in §2 and §10.11–§10.12.
+- It opens the filesystem with the current chunk tree only (`OPEN_CTREE_CHUNK_ROOT_ONLY |
+  OPEN_CTREE_IGNORE_CHUNK_TREE_ERROR`). An image whose primary superblock is unreadable is not
+  opened at all ("No valid Btrfs found"): it does not fall back to a superblock mirror.
+- `btrfs_find_root_search` walks the **metadata block groups of the current chunk map**
+  (`btrfs_next_bg_metadata`; the SYSTEM block groups when the chunk tree is asked for) and calls
+  `read_tree_block` on every address `chunk_offset + k × nodesize`, through the current map, with an
+  empty parent check. A block in a removed chunk, in a DATA chunk or off the nodesize grid of its
+  chunk is never read.
+- `add_eb_to_result` keeps blocks whose owner is the wanted tree (default 1, `-o` changes it), at or
+  above `-l` and `-g`, and **per generation only those at the highest level seen**. `-a` continues
+  after the superblock's root is found and prints every kept block.
+- It prints an address, a generation and a level. It does not walk the trees a root names, check
+  completeness or look at other mirrors (`read_tree_block` returns the first good copy).
+- Measured in EXP-004: on 13 images it printed exactly the root-tree blocks btrfska indexes inside
+  the current chunk map, and none of the 133 states outside it. It left its input unchanged on 15
+  of 15 images.
