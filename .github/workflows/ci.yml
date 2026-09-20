@@ -1,9 +1,20 @@
 name: CI
 
+# Cost: this repository is public, and GitHub Actions is free for public repositories on the
+# standard GitHub-hosted runners used here, so these jobs consume no paid minutes. The guards
+# below keep usage small anyway, and would matter if the repository were ever made private
+# (2,000 free minutes a month): nothing runs for documentation-only changes, a newer push cancels
+# the run it supersedes, and every job has a hard time limit (GitHub's default is 6 hours).
 on:
   push:
     branches: [main]
+    paths-ignore: ["docs/**"]
   pull_request:
+    paths-ignore: ["docs/**"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -11,6 +22,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -49,6 +61,7 @@ jobs:
   # builds every test image in a KVM guest and runs the whole suite, vm tests included.
   corpus:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 

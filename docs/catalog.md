@@ -20,6 +20,25 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — CI guards: time limits, cancelled superseded runs, no run for docs-only changes
+
+- **Branch:** `chore/ci-guards` (from `main` at `57fd6ea`). `.github/workflows/ci.yml`, a note in
+  `README.md`. No code or test change.
+- **Why:** the project uses only GitHub's free allowance. The `corpus` job added in the previous
+  entry boots QEMU guests, and a GitHub job that hangs runs for six hours by default.
+- **Cost, as checked on 2026-09-21** (GitHub Docs, "GitHub Actions billing"): Actions is free for
+  public repositories on standard GitHub-hosted runners, which is what both jobs use
+  (`ubuntu-24.04`), so the 34 runs so far consumed no paid minutes. A private repository on the
+  Free plan would get 2,000 minutes and 500 MB of artifact storage a month, and 10 GB of cache per
+  repository; without a payment method, usage is blocked when the quota is used up, never billed.
+  The repository's caches (uv and the pinned guest packages) hold 466 MiB.
+- **Guards.** `timeout-minutes` 10 for `test` (it takes about 1 minute) and 15 for `corpus` (about
+  2.5); a `concurrency` group per ref with `cancel-in-progress`, so pushing again to a pull request
+  stops the run it supersedes; `paths-ignore: docs/**` on both triggers, so a change that touches
+  only `docs/` (research notes, the paper draft, the papers) starts no run. No test or script reads
+  anything under `docs/`; `README.md` is read by `tests/test_cli.py` and is not ignored.
+- **Verification:** the workflow parses and both jobs pass on the pull request.
+
 ## 2026-09-21 — One-command setup: recipe manifest, corpus/build.py, setup.sh, corpus CI job
 
 - **Branch:** `feature/one-command-corpus` (from `main` at `063fb88`). New: `setup.sh`,
