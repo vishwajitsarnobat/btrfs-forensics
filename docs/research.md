@@ -1269,6 +1269,13 @@ defect #7):
 
 ### 10.4 Rootless test-image generation (measured on the development host)
 
+> **Superseded in part (2026-09-21, catalog.md).** The measurements below stand, but the recipe's
+> `apt-get download` + `dpkg -x` steps, the unpacked QEMU 8.2.2 and the host `mkfs.btrfs` tied the
+> generator to an Ubuntu host. `corpus/vm/` now pins the guest kernel, busybox, btrfs-progs 6.6.3
+> and their libraries by SHA-256 (`corpus/vm/guest.lock`), formats with that pinned mkfs
+> (`corpus/vm/pinned.sh`) and uses the host's QEMU, on any distribution. Host QEMU 10.2.2 on
+> Fedora 44 reproduced the discard table below exactly. Current usage: `corpus/vm/README.md`.
+
 Host: Linux Mint 22.3 (Ubuntu 24.04 base), kernel 7.0.0-31-generic,
 btrfs-progs 6.6.3, user `vishwajit` (in `sudo` group, but sudo needs a
 password, so no root). Each method was actually tried:
