@@ -1,6 +1,6 @@
 # Paper draft starter — Btrfs filesystem-state archaeology
 
-> **Working draft at checkpoint M2 (2026-09-15), `main` at `26242a6`; revised after the fact-check
+> **Working draft at checkpoint M2 (2026-09-15), `main` at `8034a75`; revised after the fact-check
 > review of the same day (catalog.md checkpoint entry).** This file helps the authors
 > start writing. It is not a submission. Every number in it is copied from a committed record and
 > carries a pointer. `TODO` marks text or evidence that does not exist yet. `CHECK:` marks places
@@ -396,7 +396,7 @@ tool reports blocks whose level contradicts the blocks their pointers name.
 
 Only layers 1 and 2 of plan.md §2 exist, plus the CLI's JSON records. Do not describe the SQLite
 catalog, recovery engines, tiers or GUI as built. Code: 5 826 lines of Python under `src/btrfska/`
-at `26242a6` (`find src/btrfska -name '*.py' | xargs wc -l`); 724 tests passing at the M2b review
+at `8034a75` (`find src/btrfska -name '*.py' | xargs wc -l`); 724 tests passing at the M2b review
 verification (catalog.md M2b "Review fixes", `uv run pytest -q`). The 724 include the 37 tests of
 the frozen prototype under `legacy/tests`, which `pyproject.toml` `testpaths` collects (`uv run
 pytest --collect-only -q legacy`: 37), so 687 test btrfska.
@@ -608,7 +608,7 @@ including caveats. Regenerate from the repo root. Raw outputs go to the gitignor
 | btrfs-progs (host mkfs / guest) | v6.6.3 / 6.6.3-1.1build2 | same | same |
 | Python / uv | 3.14.6 / 0.11.28 | same | same; numpy 2.5.3 |
 | `uv.lock` sha256 | `08dc30c6…f097` | `803bc2de…d0a1` | `08dc30c6…f097` |
-| Git commit (dirty tracked files) | `97ffc1f` (0); EXP-002 review re-measurement at `b83aedd` (0) | `f7368fa` (0) | `7571f89` (0); **§6.1 density sweep at `d4c2c59` with 16 tracked files modified** (uncommitted review fixes; EXP-003 §6.1 states the measured path was unchanged except one `if expect.log` branch) |
+| Git commit (dirty tracked files) | `1c13b22` (0); EXP-002 review re-measurement at `8daf05f` (0) | `2deef18` (0) | `013d597` (0); **§6.1 density sweep at `1640fea` with 16 tracked files modified** (uncommitted review fixes; EXP-003 §6.1 states the measured path was unchanged except one `if expect.log` branch) |
 | Oracles | — | dissect.btrfs 1.10, dissect.util 3.24, lzallright 0.2.6 | — |
 
 ### 6.1 EXP-000 — Discard survival of stale metadata
@@ -743,7 +743,7 @@ re-measurement of the three kept images: 14 of 14 distinct blocks indexed and ca
 none and async, **6 of 14 under sync**. Under sync the lost blocks are the root, extent, chunk and
 dev tree roots of backups 35, 36 and 37: 12 of the 26 slot references but 8 distinct blocks.
 
-**6.6 Review re-measurement (2026-09-15), three kept images at `b83aedd`.**
+**6.6 Review re-measurement (2026-09-15), three kept images at `8daf05f`.**
 
 | Image | Probe = compatibility count | Root-tree candidates | Slot references indexed / candidates (of 26) | Distinct blocks indexed / candidates (of 14) | States beyond the backups | … complete | Generation-3 state missing |
 |---|---|---|---|---|---|---|---|
@@ -1014,7 +1014,7 @@ command, no EXP record yet: promote), **Not ready** (numbers from scratch script
 ## 9. Figures and tables plan
 
 The prototype's diagrams (`arch.png`, `cow.png`, `extract.png`, `future.png`, `leaf_layout.png`,
-committed in `1b850c2` under `diagrams/`) were removed from the repository on 2026-09-21; they remain
+committed in `160233e` under `diagrams/`) were removed from the repository on 2026-09-21; they remain
 in the git history. `arch.png` showed the legacy brute-force pipeline (stages 1–5), not the
 architecture built in M1–M2, and `cow.png` was a generic two-box copy-on-write sketch. Every figure
 below is drawn new; the copy-on-write figure needs the superblock, backup ring and chunk map.

@@ -452,7 +452,7 @@ share grew because validation, extent reads and decompression are now ours
 - `feature/m1-backup-roots` — leave unmerged. Its useful content is carried
   as spec/tests in M1 (research.md §10.5). **Done 2026-09-15:** annotated
   tag `m1-prototype` created and pushed to origin, pointing at the branch
-  tip `1e9984e`; the branch is kept.
+  tip `26715ba`; the branch is kept.
 
 ### 4.3 Migration-done gate (end of M4)
 
