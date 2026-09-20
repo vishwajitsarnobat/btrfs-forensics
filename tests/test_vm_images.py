@@ -49,6 +49,24 @@ def manifest_rows() -> dict[str, dict]:
         return {row["name"]: row for row in csv.DictReader(f, delimiter="\t")}
 
 
+def build_record() -> dict[str, str]:
+    """images/scenarios/SHA256SUMS, written by corpus/build.py: file name -> sha256 as built."""
+    path = SCENARIOS / "SHA256SUMS"
+    if not path.exists():
+        return {}
+    lines = (line.split(maxsplit=1) for line in path.read_text().splitlines() if line.strip())
+    return {name.strip().removeprefix("*"): digest for digest, name in lines}
+
+
+def assert_unchanged_since_built(path) -> None:
+    """The image still has the hash recorded when it was built; skip when it has no record."""
+    recorded = build_record().get(path.name)
+    if recorded is None:
+        pytest.skip(f"{path.name} has no build record: build it with corpus/build.py")
+    with open_image(path) as img:
+        assert img.sha256() == recorded, f"{path.name} was modified after it was built"
+
+
 DERIVED = [
     "m1_unknown_incompat",
     "m1_mirror_damage",
@@ -65,15 +83,15 @@ def test_manifest_lists_every_m1_and_m2_image():
     rows = manifest_rows()
     for name in [*HEALTHY, *DERIVED, *M2]:
         assert name in rows
-        assert re.fullmatch(r"[0-9a-f]{64}", rows[name]["sha256"])
         assert rows[name]["command"]
+        # The manifest is a recipe: an image's bytes differ on every build (new filesystem UUID),
+        # so it records no hash. corpus/build.py records the hashes of what was built locally.
+        assert "sha256" not in rows[name]
 
 
 @pytest.mark.parametrize("name", [*HEALTHY, *DERIVED, *M2])
-def test_local_image_matches_manifest_sha256(name):
-    path = image(name)
-    with open_image(path) as img:
-        assert img.sha256() == manifest_rows()[name]["sha256"]
+def test_local_image_is_unchanged_since_it_was_built(name):
+    assert_unchanged_since_built(image(name))
 
 
 @pytest.mark.parametrize("name", HEALTHY)
