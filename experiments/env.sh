@@ -25,20 +25,24 @@ else
 fi
 echo "host_kernel: $(uname -r)"
 
-qemu=$VM/qemu/usr/bin/qemu-system-x86_64
-if [ -x "$qemu" ]; then
-    echo "qemu: $(LD_LIBRARY_PATH=$VM/qemu/usr/lib/x86_64-linux-gnu "$qemu" --version | head -n 1)"
+qemu=${QEMU:-qemu-system-x86_64}
+if command -v "$qemu" >/dev/null; then
+    echo "qemu: $("$qemu" --version | head -n 1) (host)"
 else
-    echo "qemu: not installed under images/vm"
+    echo "qemu: not installed"
 fi
 echo "guest_kernel: $(ls "$VM/kernel/boot" 2>/dev/null | sed -n 's/^vmlinuz-//p' | head -n 1)"
-echo "host_btrfs_progs: $(mkfs.btrfs --version 2>&1 | head -n 1)"
-guest_deb=$(ls "$VM"/tooldebs/btrfs-progs_*.deb 2>/dev/null | head -n 1)
-if [ -n "$guest_deb" ]; then
-    echo "guest_btrfs_progs: $(dpkg-deb -f "$guest_deb" Package Version | tr '\n' ' ')"
+# Images are formatted by the pinned mkfs (corpus/vm/pinned.sh), not by the host's btrfs-progs.
+pinned=$REPO/corpus/vm/pinned.sh
+if "$pinned" mkfs.btrfs --version >/dev/null 2>&1; then
+    echo "mkfs_btrfs_progs: $("$pinned" mkfs.btrfs --version | head -n 1) (pinned)"
+    echo "guest_btrfs_progs: $("$pinned" btrfs --version | head -n 1) (pinned)"
 else
-    echo "guest_btrfs_progs: not installed under images/vm"
+    echo "mkfs_btrfs_progs: pinned bundle not fetched (corpus/vm/fetch_vm.sh)"
+    echo "guest_btrfs_progs: pinned bundle not fetched (corpus/vm/fetch_vm.sh)"
 fi
+echo "host_btrfs_progs: $(btrfs --version 2>/dev/null | head -n 1 || true) (dump-tree oracle only)"
+echo "guest_lock_sha256: $(sha256sum "$REPO/corpus/vm/guest.lock" | cut -d ' ' -f 1)"
 
 echo "python: $(cd "$REPO" && uv run python -c 'import sys; print(sys.version.split()[0])')"
 echo "uv: $(uv --version)"
