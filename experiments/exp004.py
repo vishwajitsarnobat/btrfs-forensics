@@ -85,7 +85,8 @@ def run_find_root(path: Path) -> dict:
         "opened": "open ctree failed" not in done.stderr and "open ctree failed" not in done.stdout,
         "blocks": sorted(blocks),
         "copy_unchanged": before == after,
-        "stderr_tail": done.stderr.strip().splitlines()[-3:],
+        # paths relative to the repository, so a record never carries a local directory
+        "stderr_tail": done.stderr.replace(f"{REPO}/", "").strip().splitlines()[-3:],
     }
 
 
@@ -233,8 +234,7 @@ def table(results: Path) -> None:
         cmp_ = record.get("comparison")
         if not cmp_:
             reason = record["btrfska"].get("refused") or (
-                f"find-root: exit {record['find_root']['exit']}, "
-                + "; ".join(record["find_root"]["stderr_tail"])[:80]
+                f"find-root could not open it (exit {record['find_root']['exit']})"
             )
             print(f"| `{name}` | – | – | – | not compared: {reason} | – | – | – |")
             continue
