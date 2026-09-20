@@ -861,7 +861,7 @@ AGPL-3.0 consequence accepted (see plan.md §3.3 for the license analysis).
    TREE_BLOCK_REF (0xB0), BLOCK_GROUP_ITEM (0xC0), DEV_EXTENT (0xCC),
    FREE_SPACE_* (0xC6–0xC8), DIR_LOG_* (0x3C/0x48), STRING_ITEM (0xFD).
 8. **EXTENT_ITEM address taken from the wrong key field** (added
-   2026-09-15, found on `feature/m1-backup-roots` commit `1d48203`, §10.5).
+   2026-09-15, found on `feature/m1-backup-roots` commit `44225e1`, §10.5).
    An EXTENT_ITEM key is `(logical address, EXTENT_ITEM 168, length in
    bytes)`: the *objectid* is the extent's logical start and the *offset*
    its length (METADATA_ITEM 169 stores the tree level in the offset
@@ -1434,12 +1434,12 @@ block-group tree (objectid 11).
 
 ### 10.5 Git archaeology: `feature/m1-backup-roots`
 
-- **State:** 3 commits on top of `c51fe91` (the M2 merge), all 2026-08-14:
-  `d870a98` "M1: superblock backup roots + anchored historical walking",
-  `1d48203` "fix: review findings — backref address, full-sweep check,
-  anchored CRC", `1e9984e` "docs: record review fixes, add hardening backlog".
-  Local and `origin` branches exist. Merge base = `c51fe91`, so the branch
-  forked **before** the 2026-08-17 reset commit `e0d3c7d` and was never
+- **State:** 3 commits on top of `9b9cfd3` (the M2 merge), all 2026-08-14:
+  `5cee53f` "M1: superblock backup roots + anchored historical walking",
+  `44225e1` "fix: review findings — backref address, full-sweep check,
+  anchored CRC", `26715ba` "docs: record review fixes, add hardening backlog".
+  Local and `origin` branches exist. Merge base = `9b9cfd3`, so the branch
+  forked **before** the 2026-08-17 reset commit `d7228ab` and was never
   reintegrated. 10 files, +660/−19.
 - **Contents:** `utils/backup_roots.py` (145 lines): parses the 4
   `btrfs_root_backup` slots at SB+0xB2B/0xBD3/0xC7B/0xD23 (stride 0xA8 —
@@ -1482,7 +1482,7 @@ block-group tree (objectid 11).
   already cover. Recommend a `catalog.md` note and leaving the branch
   unmerged (optionally tag it `m1-prototype` for reference). **Done
   2026-09-15:** annotated tag `m1-prototype` pushed to origin, pointing at
-  `1e9984e`; the branch is kept.
+  `26715ba`; the branch is kept.
 
 ### 10.6 Impact on plan (recommended changes to plan.md, ranked)
 

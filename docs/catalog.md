@@ -20,9 +20,40 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — History rewrite: two commit messages corrected, cited hashes remapped
+
+- **Branch:** `docs/remap-commit-hashes` (from `main` at `d70ff99`). Docs and experiment records
+  only; new `docs/commit-hash-map-2026-09-21.tsv`.
+- **What happened.** Two commits of 2026-08-14 ("M2: structure-directed targeted orphan scan" and
+  "docs: add development catalog and link it from plan/readme") ended with two tool-attribution
+  trailer lines that credited a third party as co-author, and GitHub listed that account as a
+  contributor. The lines were removed from both messages with `git filter-branch --msg-filter`, and
+  `main`, `feature/m1-backup-roots` and the tag `m1-prototype` were force-pushed. Ten branches that
+  were already merged into `main` were deleted, because they still held the old commits.
+- **Nothing but those two messages changed.** Checked before the push, on a fresh clone: for all
+  158 commits of `main` and all 22 of `feature/m1-backup-roots`, the tree, author, committer, both
+  dates and the subject are identical before and after; exactly two message bodies differ; the tip
+  tree of the rewritten `main` equals the tree GitHub had. No file content, at any commit, changed.
+- **Consequence: commit hashes.** A commit's hash covers its message and its parents, so the two
+  edited commits and every commit after the first of them have new hashes: 146 in total. The 15
+  commits before it keep theirs. `main` went from `0ae9978` to `d70ff99`, and `m1-prototype` now
+  points at `26715ba` (was `1e9984e`).
+- **Remap.** 160 citations of those commits in this catalog (134), `paper-draft.md`, `research.md`,
+  `plan.md` and the EXP-000 to EXP-003 records were replaced by the new hash at the same length.
+  That includes the `git_commit:` lines of the experiments' environment records: each now names
+  the commit with the same tree and the same subject as the one that was measured. The full
+  old-to-new map is tracked in `docs/commit-hash-map-2026-09-21.tsv`. The old hashes still appear
+  on the pages of pull requests #1 to #18, which GitHub does not rewrite.
+- **Verification.** Apart from this entry and the map file, which name old hashes on purpose, no
+  token in `docs/`, `experiments/`, `corpus/`, `tests/`, `src/` or `README.md` is a prefix of a
+  rewritten commit's old hash; all 118 commit hashes cited before the remap resolve to a commit. `uv run pytest` and ruff are unaffected (no
+  code change).
+- **For anyone with an older clone:** re-clone, or `git fetch && git reset --hard origin/main` on a
+  clean working tree. A branch made before 2026-09-21 must be rebased onto the new `main`.
+
 ## 2026-09-21 — CI guards: time limits, cancelled superseded runs, no run for docs-only changes
 
-- **Branch:** `chore/ci-guards` (from `main` at `57fd6ea`). `.github/workflows/ci.yml`, a note in
+- **Branch:** `chore/ci-guards` (from `main` at `8bae6f9`). `.github/workflows/ci.yml`, a note in
   `README.md`. No code or test change.
 - **Why:** the project uses only GitHub's free allowance. The `corpus` job added in the previous
   entry boots QEMU guests, and a GitHub job that hangs runs for six hours by default.
@@ -41,7 +72,7 @@ Maintenance rules:
 
 ## 2026-09-21 — One-command setup: recipe manifest, corpus/build.py, setup.sh, corpus CI job
 
-- **Branch:** `feature/one-command-corpus` (from `main` at `063fb88`). New: `setup.sh`,
+- **Branch:** `feature/one-command-corpus` (from `main` at `27820cf`). New: `setup.sh`,
   `corpus/build.py`, `tests/test_corpus_build.py`. Changed: `corpus/manifest.tsv`,
   `tests/test_vm_images.py`, `tests/test_discard_trio.py`, `.github/workflows/ci.yml`, `README.md`,
   `corpus/vm/README.md`, plan.md §6.1–§6.2. No change under `src/`.
@@ -113,7 +144,7 @@ Maintenance rules:
 
 ## 2026-09-21 — corpus/vm runs on any Linux distribution
 
-- **Branch:** `feature/portable-corpus-vm` (from `main` at `d3f499b`). Changes under `corpus/vm/`
+- **Branch:** `feature/portable-corpus-vm` (from `main` at `713abfc`). Changes under `corpus/vm/`
   and `experiments/env.sh`, a note in research.md §10.4. No change under `src/` or `tests/`.
 - **Why:** development moved to a new machine (Fedora 44, kernel 7.2.5, QEMU 10.2.2, btrfs-progs
   7.1) and none of the first host's images survive. `corpus/vm/fetch_vm.sh` needed `apt-get` and
@@ -162,7 +193,7 @@ Maintenance rules:
 
 ## 2026-09-21 — Repository layout and paper library
 
-- **Branch:** `chore/repo-structure` (from `main` at `e86fd34`). No change under `src/`, `tests/`,
+- **Branch:** `chore/repo-structure` (from `main` at `0cadef8`). No change under `src/`, `tests/`,
   `corpus/` or `experiments/`.
 - **Why:** the repository root held four large documents next to the code, `docs/` held PDFs under
   publisher download names, and four requested papers had arrived. Anyone opening the repository
@@ -173,11 +204,11 @@ Maintenance rules:
   basenames are unchanged, so prose citations such as "plan.md §5" still hold. `README.md` stays at
   the root: GitHub shows it there and `tests/test_cli.py` reads it.
 - `recovery_output/` (8 files of legacy prototype output) removed from the index. The M0 entry
-  records this as done, but no commit ever did it: the files were still tracked at `e86fd34`. They
+  records this as done, but no commit ever did it: the files were still tracked at `0cadef8`. They
   are regenerable with `legacy/main.py` and stay gitignored.
 - `diagrams/` (five prototype-era PNGs) deleted. `paper-draft.md` §9 already ruled out reusing them:
   `arch.png` and `future.png` show the abandoned brute-force pipeline and `leaf_layout.png` draws a
-  leaf as a flowchart. They remain in the history (`1b850c2`).
+  leaf as a flowchart. They remain in the history (`160233e`).
 - `major-project.jpg` (the signed project proposal) stays at the root.
 
 **Paper library.** All PDFs moved to `docs/papers/` and named
@@ -215,7 +246,7 @@ link in `README.md` and `docs/*.md` resolves; `uv run pytest` passes with `sandb
 
 ## 2026-09-15 — Checkpoint: paper draft starter
 
-- **Branch:** `docs/paper-draft` (from `main` at `26242a6`). Docs only: `paper-draft.md` (new), this
+- **Branch:** `docs/paper-draft` (from `main` at `8034a75`). Docs only: `paper-draft.md` (new), this
   entry, a pointer in `README.md`. No code, experiment record or research note changed. Not pushed.
 - **Why:** the project stops at M2 to start the research paper. The draft starter lets the authors
   write from the evidence that exists without over-claiming.
@@ -328,19 +359,19 @@ applied on `docs/paper-draft` (PR #14). Docs only; no code changed.
 
 ## 2026-09-15 — M2b: old-root discovery, discard experiments (EXP-000, EXP-002), M2 closeout
 
-- **Branch:** `feature/m2b-old-roots-discard` (from `main` at `35d6916`). This is the second of
+- **Branch:** `feature/m2b-old-roots-discard` (from `main` at `0e27f52`). This is the second of
   two M2 PRs. It covers old-root discovery, the EXP-000 backfill (plan.md §7), the discard trio
   (EXP-002) and the M2 closeout. Not pushed.
 - **Commits:**
-  - `7c25481` Add old-root discovery: candidate roots per owner and generation, root-tree states with completeness, reuse told apart from damage
-  - `cb71422` Add btrfska roots with a documented JSON schema and report walk failures by class in the scan summary
-  - `97ffc1f` Name repeated discard-table runs and add the EXP-000 and EXP-002 scripts
-  - `4f8647d` Add the representative discard-trio images to the manifest, with vm tests for probe agreement and discovery per discard mode
-  - `bb9274a` Record EXP-000 (discard table, N = 15) and EXP-002 (probe agreement on 48 images, surviving history per discard mode)
-  - `5ea4853` Record M2b discovery and discard findings in research notes and close M2 in the plan and README
-  - this catalog entry (the commit after `5ea4853`)
-  - review fixes (see "Review fixes" at the end of this entry): `86a7a75`, `98b4218`, `bd0af4b`,
-    `b83aedd`, `b699329`, `de21e1f` and the commit that adds that subsection
+  - `03475b2` Add old-root discovery: candidate roots per owner and generation, root-tree states with completeness, reuse told apart from damage
+  - `c095b8f` Add btrfska roots with a documented JSON schema and report walk failures by class in the scan summary
+  - `1c13b22` Name repeated discard-table runs and add the EXP-000 and EXP-002 scripts
+  - `ef88e4d` Add the representative discard-trio images to the manifest, with vm tests for probe agreement and discovery per discard mode
+  - `ffd4672` Record EXP-000 (discard table, N = 15) and EXP-002 (probe agreement on 48 images, surviving history per discard mode)
+  - `4a66ad8` Record M2b discovery and discard findings in research notes and close M2 in the plan and README
+  - this catalog entry (the commit after `4a66ad8`)
+  - review fixes (see "Review fixes" at the end of this entry): `58e21c4`, `3c9219b`, `91f355f`,
+    `8daf05f`, `06db7de`, `434811c` and the commit that adds that subsection
 
 **What was done.**
 - **Tests first.**
@@ -595,7 +626,7 @@ review fixes, `unmapped` before. Survival of the 31 states is partly a balance a
 | (task) old-root discovery, owner-13 and owner-12 blocks recorded | met (M2b) | `scan/roots.py`, `btrfska roots`; raw owner-12/13 records (none on the corpus: the stock kernel cannot create them) |
 | (task) discard axis first use (EXP-002) | met (M2b) | `experiments/EXP-002.md` |
 
-**Verification** (local, branch `feature/m2b-old-roots-discard` at `5ea4853`; logs in
+**Verification** (local, branch `feature/m2b-old-roots-discard` at `4a66ad8`; logs in
 `images/scratch/m2b/verify/`):
 
 | Check | Command | Result |
@@ -618,7 +649,7 @@ review fixes, `unmapped` before. Survival of the 31 states is partly a balance a
 | `sandbox.img` after | `sha256sum sandbox.img; stat -c '%y' sandbox.img` | unchanged hash and mtime |
 
 **`btrfska roots` samples** (`images/scratch/m2b/verify/roots_*.txt`; long problem lines cut). These
-are the outputs at `5ea4853`; since the review fixes the `rediscovered:` line also counts distinct
+are the outputs at `4a66ad8`; since the review fixes the `rediscovered:` line also counts distinct
 blocks, and the generation-3 state's missing block reads `corrupt` (samples in "Review fixes"):
 ```
 $ uv run btrfska roots sandbox.img
@@ -695,13 +726,13 @@ The PR review approved M2b with seven fixes. All are applied, test-first where c
 new test was run and seen to fail before the fix).
 
 **Commits.**
-- `86a7a75` Memoise discovery walks per subtree with a cap on classified missing blocks, and report every unreferenced block as a candidate root
-- `98b4218` Classify missing blocks through the state's own chunk items and invalid scanned copies
-- `bd0af4b` Report superblock and backup rediscovery per slot reference and per distinct block in the roots summary
-- `b83aedd` Record distinct-block rediscovery and the new state fields in EXP-002 measurements, with a results path per run
-- `b699329` Correct the reserved-range citation and define completeness and candidate root-tree blocks in the code docs
-- `de21e1f` Reword M2b findings after review: coverage agreement, slot references against distinct blocks, candidate root-tree blocks, completeness scope and the balance artefact
-- this subsection (the commit after `de21e1f`)
+- `58e21c4` Memoise discovery walks per subtree with a cap on classified missing blocks, and report every unreferenced block as a candidate root
+- `3c9219b` Classify missing blocks through the state's own chunk items and invalid scanned copies
+- `91f355f` Report superblock and backup rediscovery per slot reference and per distinct block in the roots summary
+- `8daf05f` Record distinct-block rediscovery and the new state fields in EXP-002 measurements, with a results path per run
+- `06db7de` Correct the reserved-range citation and define completeness and candidate root-tree blocks in the code docs
+- `434811c` Reword M2b findings after review: coverage agreement, slot references against distinct blocks, candidate root-tree blocks, completeness scope and the balance artefact
+- this subsection (the commit after `434811c`)
 
 **1. Hostile walk cost** (`scan/roots.py`).
 - **Problem.** Walks were memoised per tree root. Each dangling pointer cost a full
@@ -816,7 +847,7 @@ research.md §10.11 and this entry), completeness excludes the chunk tree, the l
 ROOT_ITEMs naming tree 1. With nothing missing it equals every block of the root tree and of every
 ROOT_ITEM-named tree.
 
-**EXP-002 re-measurement.** Three kept images at `b83aedd`:
+**EXP-002 re-measurement.** Three kept images at `8daf05f`:
 - **Commands.** `exp002.py run --results images/scratch/exp/EXP-002/review/results.jsonl …_r1.img`,
   then `table`.
 - **Results.** Every count equals the original measurement: SHA-256, probe columns, compatibility
@@ -824,7 +855,7 @@ ROOT_ITEM-named tree.
   change is the generation-3 class. Distinct blocks: 14/14 (none, async) and 6/14 (sync). The 42
   deleted images cannot be re-measured.
 
-**Verification** (branch at `de21e1f`; logs in `images/scratch/m2b-review/verify/`):
+**Verification** (branch at `434811c`; logs in `images/scratch/m2b-review/verify/`):
 
 | Check | Command | Result |
 |---|---|---|
@@ -875,7 +906,7 @@ walk failures: current 0; backup roots 0
 
 ## 2026-09-15 — M2a: scan kernel, targeted regions, orphan classification
 
-- **Branch:** `feature/m2a-scan-kernel` (from `main` at `92ab034`). This is
+- **Branch:** `feature/m2a-scan-kernel` (from `main` at `f3cb71b`). This is
   the first of two M2 PRs. It covers plan.md §5 M2:
   - the scan kernel;
   - targeted regions with the MIXED_GROUPS fix, tree-11 input and
@@ -887,14 +918,14 @@ walk failures: current 0; backup roots 0
   Old-root discovery, the discard trio (EXP-002) and the EXP-000 backfill
   are M2b.
 - **Commits:**
-  - `c12d89f` Plan scan regions from typed chunk stripes and unmapped gaps, skipping DATA only when block groups agree
-  - `efa74f2` Add the numpy scan kernel: strided fsid prefilter, every candidate validated and kept
-  - `9778650` Classify scanned nodes as live, backup-reachable or unreferenced, with sandbox legacy parity
-  - `2e6aeb3` Add btrfska scan with a per-node JSON schema documented in the README
-  - `7571f89` Add the EXP-003 scan benchmark: a deterministic sparse 10 GiB image, cold and warm runs
-  - `3fbf3f3` Record EXP-003: the numpy scan kernel at 3.2-8.4 GB/s on a synthetic 10 GiB image
-  - `db3a56e` Record M2a scan findings in research notes and the M2 status
-  - this catalog entry (the commit after `db3a56e`)
+  - `93521ff` Plan scan regions from typed chunk stripes and unmapped gaps, skipping DATA only when block groups agree
+  - `7696aa5` Add the numpy scan kernel: strided fsid prefilter, every candidate validated and kept
+  - `15b3bf0` Classify scanned nodes as live, backup-reachable or unreferenced, with sandbox legacy parity
+  - `a725d88` Add btrfska scan with a per-node JSON schema documented in the README
+  - `013d597` Add the EXP-003 scan benchmark: a deterministic sparse 10 GiB image, cold and warm runs
+  - `6588ebb` Record EXP-003: the numpy scan kernel at 3.2-8.4 GB/s on a synthetic 10 GiB image
+  - `5397405` Record M2a scan findings in research notes and the M2 status
+  - this catalog entry (the commit after `5397405`)
 
 **What was done.**
 - **Tests first.** Every module was written after its tests and seen
@@ -1169,7 +1200,7 @@ table and analysis):
   - The 10 GiB image was deleted after the runs (`bench_scan.py clean`); it
     is regenerable and hash-verified.
 
-**Verification** (local, branch `feature/m2a-scan-kernel` at `db3a56e`;
+**Verification** (local, branch `feature/m2a-scan-kernel` at `5397405`;
 logs in `images/scratch/m2a/verify/`):
 
 | Check | Command | Result |
@@ -1272,14 +1303,14 @@ extent tree: 12 tree blocks; reached only by walks: 0; listed only by the extent
 
 PR #11 was approved with fixes (three medium, three low). Each code fix was
 written test-first and the tests were seen failing. All commits are local on
-`feature/m2a-scan-kernel`, on top of `d4c2c59`, and are not pushed:
-- `03b832c` Validate log-tree blocks in a log context: owner TREE_LOG, generation superblock + 1
-- `f9add08` Add the m2_logtree corpus image: fsynced log trees left by a power-off without commit
-- `3fa93e1` Stream worker scan results in order through a bounded window of 4 MiB pieces
-- `974ee5c` Stream scan classification, classify log-tree copies live and report bytes skipped as DATA
-- `80ac63b` Add the EXP-003 density sweep and per-allocated-byte throughput to the scan benchmark
-- `acf058b` Document log trees, scan limitations, bounded memory and the EXP-003 density sweep
-- this subsection (the commit after `acf058b`)
+`feature/m2a-scan-kernel`, on top of `1640fea`, and are not pushed:
+- `d173604` Validate log-tree blocks in a log context: owner TREE_LOG, generation superblock + 1
+- `9d6c278` Add the m2_logtree corpus image: fsynced log trees left by a power-off without commit
+- `216bc93` Stream worker scan results in order through a bounded window of 4 MiB pieces
+- `97210d8` Stream scan classification, classify log-tree copies live and report bytes skipped as DATA
+- `7c1f535` Add the EXP-003 density sweep and per-allocated-byte throughput to the scan benchmark
+- `84dea39` Document log trees, scan limitations, bounded memory and the EXP-003 density sweep
+- this subsection (the commit after `84dea39`)
 
 **Sources.** Kernel tag v7.0 files fetched into
 `images/scratch/m2a-fixes/kernel/`: `disk-io.c`, `tree-log.c`,
@@ -1381,8 +1412,8 @@ logs are in `images/scratch/m2a-fixes/{logtree,memory,verify}/` and
 
      | Version | Workers | tracemalloc peak | Wall s median (range) | Max RSS |
      |---|---|---|---|---|
-     | before (`d4c2c59`) | 1 | 89.3 MB | 1.39 (1.37–1.42) | 384 MB |
-     | before (`d4c2c59`) | 4 | 267.6 MB | 2.93 (2.64–3.24) | 308 MB (parent) |
+     | before (`1640fea`) | 1 | 89.3 MB | 1.39 (1.37–1.42) | 384 MB |
+     | before (`1640fea`) | 4 | 267.6 MB | 2.93 (2.64–3.24) | 308 MB (parent) |
      | after | 1 | 2.3 MB | 1.40 (1.37–1.53) | 296 MB |
      | after | 4 | 16.6 MB | 1.31 (1.24–1.35) | 53 MB (parent) |
 
@@ -1447,7 +1478,7 @@ logs are in `images/scratch/m2a-fixes/{logtree,memory,verify}/` and
 **Deviation.** The review asked for owner −7. The kernel's value is −6, and
 btrfska already used −6 (`ondisk.TREE_LOG_OBJECTID = _U64 - 6`).
 
-**Verification** (local, at `acf058b`; logs in
+**Verification** (local, at `84dea39`; logs in
 `images/scratch/m2a-fixes/verify/`):
 
 | Check | Command | Result |
@@ -1475,24 +1506,24 @@ btrfska already used −6 (`ondisk.TREE_LOG_OBJECTID = _U64 - 6`).
 
 ## 2026-09-15 — M1c: extent reads, decompression, oracles, EXP-001
 
-- **Branch:** `feature/m1c-extent-reads` (from `main` at `16e7c77`). This is
+- **Branch:** `feature/m1c-extent-reads` (from `main` at `2af52df`). This is
   the last of three M1 PRs. It covers plan.md §5 M1 task 8 (extent reads,
   decompression, `cat`, oracles) and task 11 (EXP-001), and closes the M1
   DoD.
 - **Commits:**
-  - `c245e79` Add a bounds-checked LZO1X decoder with the dissect.util vectors and hostile-stream tests
-  - `13ef276` Split chunk-map ranges at chunk ends and 64 KiB stripe boundaries
-  - `33eea78` Decompress zlib, zstd and btrfs-framed LZO extents within the kernel's bounds
-  - `4295ef0` Read extents and assemble file content with a provenance record per extent
-  - `68f0c7d` Add btrfska cat: file bytes to stdout, extent records to stderr
-  - `d20b138` Add the dissect.btrfs and lzallright oracles and the LZO hostile-input harness
-  - `327fa72` Add EXP-001: checksum-type coverage of the legacy prototype and btrfska, with an environment record script
-  - `a1ac866` Cite the LZO harness counts and the 4 421-byte worst case in the plan, and mark M1 done
-  - `f7368fa` Record M1c extent-read, oracle and legacy findings
-  - `7365cfd` Report i_size clipping only when an extent reaches past the sector holding EOF
-  - `75ee852` Update the README status for M1 and document the cat records
-  - `c4c9790` Record EXP-001: legacy accepts no tree block on non-crc32c images
-  - this catalog entry (the commit after `c4c9790`)
+  - `f2d57c6` Add a bounds-checked LZO1X decoder with the dissect.util vectors and hostile-stream tests
+  - `51279c9` Split chunk-map ranges at chunk ends and 64 KiB stripe boundaries
+  - `d807770` Decompress zlib, zstd and btrfs-framed LZO extents within the kernel's bounds
+  - `3081445` Read extents and assemble file content with a provenance record per extent
+  - `6fe1bd2` Add btrfska cat: file bytes to stdout, extent records to stderr
+  - `36e7141` Add the dissect.btrfs and lzallright oracles and the LZO hostile-input harness
+  - `6604a99` Add EXP-001: checksum-type coverage of the legacy prototype and btrfska, with an environment record script
+  - `242b3f7` Cite the LZO harness counts and the 4 421-byte worst case in the plan, and mark M1 done
+  - `2deef18` Record M1c extent-read, oracle and legacy findings
+  - `461209d` Report i_size clipping only when an extent reaches past the sector holding EOF
+  - `3a7e957` Update the README status for M1 and document the cat records
+  - `02e192e` Record EXP-001: legacy accepts no tree block on non-crc32c images
+  - this catalog entry (the commit after `02e192e`)
 
 **What was done.**
 - **Tests first.** Each unit test module was written and seen failing before
@@ -1683,7 +1714,7 @@ sector. Entries are median (range) over the 5 seeds.
 
 **EXP-001 summary** (`experiments/EXP-001.md`; `uv run python
 experiments/exp001.py --runs 2`; the two runs were identical; recorded at
-`f7368fa` with a clean tree):
+`2deef18` with a clean tree):
 
 | Image | csum | Tool | Tree blocks accepted | Tree blocks rejected | Files listed per generation | Distinct files byte-identical / listed |
 |---|---|---|---|---|---|---|
@@ -1704,7 +1735,7 @@ experiments/exp001.py --runs 2`; the two runs were identical; recorded at
   every time" rule counted legacy's `(duplicate)` markers as mismatches (1/2
   on the sandbox). Root cause: legacy de-duplicates extents and writes no
   output for later entries (legacy/utils/btree.py:659-666). Fixed in
-  `327fa72` (amended) before the recorded run.
+  `6604a99` (amended) before the recorded run.
 
 **M1 DoD, bullet by bullet** (all met):
 
@@ -1757,10 +1788,10 @@ The plan has no per-milestone status markers, so M1 gained a single line:
   (`Btrfs._root_tree`), in tests and the EXP-001 script only.
 - **`experiments/env.sh` arrives with EXP-001**, not EXP-000 as plan §7
   says, because EXP-001 is the first record to need it.
-- **A clipping-report change came after EXP-001 ran** (`7365cfd`). It changes
+- **A clipping-report change came after EXP-001 ran** (`461209d`). It changes
   only `problems` strings, none of EXP-001's metrics.
 
-**Verification** (local, branch `feature/m1c-extent-reads` at `c4c9790`, all
+**Verification** (local, branch `feature/m1c-extent-reads` at `02e192e`, all
 M1 images present; logs in `images/scratch/m1c/verify/`):
 
 | Check | Command | Result |
@@ -1782,7 +1813,7 @@ M1 images present; logs in `images/scratch/m1c/verify/`):
 | `sandbox.img` after | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime unchanged |
 
 **`btrfska cat` samples** (`images/scratch/m1c/verify/cat_samples.txt`; long
-lines trimmed with `…`; taken before `7365cfd`, whose clip message would now
+lines trimmed with `…`; taken before `461209d`, whose clip message would now
 be absent for the partial last sector):
 ```
 $ uv run btrfska cat sandbox.img --root backup:13 --inode 257 | sha256sum
@@ -1850,13 +1881,13 @@ btrfska cat: error: no INODE_ITEM for inode 257 in the tree at 30703616
 
 PR #10 was approved with fixes. Each code fix was written test-first and
 the tests were seen failing. All commits are local on
-`feature/m1c-extent-reads`, on top of `350a217`:
-- `dac57ec` Reject LZO end markers whose copy length is not 3
-- `8a19d34` Extend the LZO harness with truncation, insertion, deletion and random-stream corpora
-- `45c72cc` Bound uncompressed extent lengths by the image size and map read pieces lazily
-- `12a39ae` Note in-memory file reads and qualify the EXP-001 block counts
-- `47387bc` Cite the extended LZO harness results
-- this subsection (the commit after `47387bc`)
+`feature/m1c-extent-reads`, on top of `5a4c6cc`:
+- `4182b80` Reject LZO end markers whose copy length is not 3
+- `b89c812` Extend the LZO harness with truncation, insertion, deletion and random-stream corpora
+- `db9b595` Bound uncompressed extent lengths by the image size and map read pieces lazily
+- `9ea0bc5` Note in-memory file reads and qualify the EXP-001 block counts
+- `c532192` Cite the extended LZO harness results
+- this subsection (the commit after `c532192`)
 
 1. **LZO end marker with any length code (medium).**
    - **Defect.** `lzo.py` treated every `0001HLLL` instruction at distance
@@ -1898,7 +1929,7 @@ the tests were seen failing. All commits are local on
      uniform positions, and a second with tail positions and the
      `random_bytes` corpus, both agreed 300/300 in every corpus and seed
      against the pre-fix decoder (`images/scratch/m1c/review/run_prefix.py`
-     loads `350a217`'s `lzo.py`). No single-byte edit of `11 00 00` yields
+     loads `5a4c6cc`'s `lzo.py`). No single-byte edit of `11 00 00` yields
      another length code with distance 16384. Only `random_instructions`
      exposed it.
    - `test_every_hostile_corpus_agrees_with_lzallright` (seeds 11 and 12,
@@ -1998,7 +2029,7 @@ the tests were seen failing. All commits are local on
    copies not merged. btrfska counts distinct logical blocks reached by
    anchored walks. The two numbers are therefore not directly comparable.
 
-**Verification** (local, at `47387bc`; logs in
+**Verification** (local, at `c532192`; logs in
 `images/scratch/m1c/review/verify/`):
 
 | Check | Command | Result |
@@ -2015,20 +2046,20 @@ the tests were seen failing. All commits are local on
 
 ## 2026-09-15 — M1b: validated node reader, chunk maps, anchored tree walking
 
-- **Branch:** `feature/m1b-validated-tree-walking` (from `main` at `a3c0e31`).
+- **Branch:** `feature/m1b-validated-tree-walking` (from `main` at `dd90a1b`).
   This is the second of three M1 PRs. It covers plan.md §5 M1 tasks 5–7, the
   `walk` half of task 10 and the `m1_badnode` image of task 9.
 - **Commits:**
-  - `a41f583` Add chunk maps with stripe math for every profile and chunk item checks
-  - `566d249` Add the node reader: every copy validated, each check recorded
-  - `32fad0e` Add item payload parsers with never-raising JSON summaries
-  - `c22432c` Walk trees from any root with per-hop checks; resolve backup roots and subvolumes
-  - `d086270` Add btrfska walk: JSON lines per item with root and copy provenance
-  - `c5561f7` Explain why superblock selection passes a wiped primary that btrfs-progs stops at
-  - `de42668` Add a flip-byte operation to corpus/mutate.py for corrupt tree-block copies
-  - `f3edc42` Add the m1_badnode images and vm tests for chunk maps, full walks and sv1 history
-  - `3939c74` Record M1b tree-walking notes, the mirror policy and the README status
-  - this catalog entry (the commit after `3939c74`)
+  - `0a1313c` Add chunk maps with stripe math for every profile and chunk item checks
+  - `c0dc969` Add the node reader: every copy validated, each check recorded
+  - `9296801` Add item payload parsers with never-raising JSON summaries
+  - `64ad3b0` Walk trees from any root with per-hop checks; resolve backup roots and subvolumes
+  - `c43617e` Add btrfska walk: JSON lines per item with root and copy provenance
+  - `09512df` Explain why superblock selection passes a wiped primary that btrfs-progs stops at
+  - `c5ea61d` Add a flip-byte operation to corpus/mutate.py for corrupt tree-block copies
+  - `f38f309` Add the m1_badnode images and vm tests for chunk maps, full walks and sv1 history
+  - `cf1f6e6` Record M1b tree-walking notes, the mirror policy and the README status
+  - this catalog entry (the commit after `cf1f6e6`)
 
 **What was done.** Unit, synthetic and sandbox tests were written first and
 seen failing (ImportError, or `invalid choice: 'walk'` for the CLI and
@@ -2488,20 +2519,20 @@ btrfska walk: 1 nodes (1 invalid), 0 items, 0 walk problems
 
 ## 2026-09-15 — M1a: on-disk tables, checksums, superblock trust gate
 
-- **Branch:** `feature/m1a-trust-foundations` (from `main` at `85cbc07`).
+- **Branch:** `feature/m1a-trust-foundations` (from `main` at `b1b845f`).
   This is the first of three M1 PRs. It covers plan.md §5 M1 tasks 1–4, the
   task-9 images these need (plus `m1_lzo` and `m1_zlib`), and the `info`
   half of task 10.
 - **Commits:**
-  - `d393c1e` Record defect #8 and the sandbox.img ground truth
-  - `5efc964` Add on-disk struct tables checked against kernel v7.0 headers
-  - `4a1317a` Add checksum dispatch for crc32c, xxhash64, sha256 and blake2b-256
-  - `e34ae6e` Add superblock mirrors, best-copy selection and the incompat gate
-  - `fda8316` Show superblock copies, gate verdict and backup roots in btrfska info
-  - `00c93ea` Add the M1a corpus images, corpus/mutate.py and the image manifest
-  - `d8140fa` Add an import-boundary test keeping test oracles out of src/
-  - `5d61695` Record M1a format notes and update the README status
-  - this catalog entry (the commit after `5d61695`)
+  - `45e32ca` Record defect #8 and the sandbox.img ground truth
+  - `89ed86b` Add on-disk struct tables checked against kernel v7.0 headers
+  - `e407a44` Add checksum dispatch for crc32c, xxhash64, sha256 and blake2b-256
+  - `074b7fe` Add superblock mirrors, best-copy selection and the incompat gate
+  - `b2dab62` Show superblock copies, gate verdict and backup roots in btrfska info
+  - `5e4784e` Add the M1a corpus images, corpus/mutate.py and the image manifest
+  - `6a85779` Add an import-boundary test keeping test oracles out of src/
+  - `835589f` Record M1a format notes and update the README status
+  - this catalog entry (the commit after `835589f`)
 
 **What was done.** Each module's tests were written and seen failing
 (ImportError or assertion) before the implementation.
@@ -2809,11 +2840,11 @@ refer to the v7.0 files in `images/scratch/m1a/kernel/`. btrfs-progs line
 numbers refer to tag `v7.1` (identical in the checked-out `v7.1-56-g4d02bee`).
 
 - **Commits:**
-  - `a018b41` Check superblock geometry against the kernel's validate_super rules
-  - `52d11a9` Anchor superblock selection on the first valid copy's fsid
-  - `527e976` Validate mutate.py patches before creating the output
-  - `3cd7199` Tighten the ground-truth xfails to ImportError and zip copies strictly
-  - `ef94dd2` Add the m1_foreign_mirror image and note foreign superblock residue
+  - `25fac0a` Check superblock geometry against the kernel's validate_super rules
+  - `aff550a` Anchor superblock selection on the first valid copy's fsid
+  - `140b914` Validate mutate.py patches before creating the output
+  - `c9a0351` Tighten the ground-truth xfails to ImportError and zip copies strictly
+  - `be2addc` Add the m1_foreign_mirror image and note foreign superblock residue
   - this catalog update
 
 1. **HIGH: a foreign mirror could win selection.**
@@ -2965,7 +2996,7 @@ generation 1000 and `m1_sha256_bgt`'s fsid and roots.
 | Format | `uv run ruff format --check .` | `26 files already formatted` |
 | Legacy runner | `uv run python -m unittest discover -s legacy/tests` | `Ran 37 tests`, `OK` |
 | Lockfile | `uv lock --check` | `Resolved 10 packages` |
-| Scope | `git diff --stat 8632164..HEAD` | 14 files, +712/−64: `src/btrfska/{cli.py,substrate/{ondisk,superblock}.py}`, `corpus/{mutate.py,manifest.tsv,vm/README.md}`, `research.md`, `tests/…` (+ this catalog) |
+| Scope | `git diff --stat c46f240..HEAD` | 14 files, +712/−64: `src/btrfska/{cli.py,substrate/{ondisk,superblock}.py}`, `corpus/{mutate.py,manifest.tsv,vm/README.md}`, `research.md`, `tests/…` (+ this catalog) |
 | `sandbox.img` after | `sha256sum sandbox.img` | `07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418`, mtime unchanged |
 
 **For M1b (node reader, chunk maps, tree walker).**
@@ -2989,19 +3020,19 @@ generation 1000 and `m1_sha256_bgt`'s fsid and roots.
 
 ## 2026-09-15 — M0: reset and scaffolding
 
-- **Branch:** `feature/m0-scaffolding` (from `main` at `b55dae2`). Implements
+- **Branch:** `feature/m0-scaffolding` (from `main` at `0d7e435`). Implements
   plan.md §5 M0 tasks 1–11. No forensic logic.
 - **Commits:**
-  - `a5023b8` Freeze the prototype under legacy/
-  - `e4d12ee` Untrack prototype output and ignore test caches
-  - `a2a95f0` Add btrfska package skeleton and project config
-  - `908f065` Apply ruff formatting to corpus scripts (no functional change)
-  - `8be7fed` Add Apache License 2.0
-  - `c51cc74` Rewrite README for btrfska and drop commands.txt
-  - `67da6ea` Add read-only and CLI tests with a sandbox hash guard
-  - `7f66173` Track a zstd-compressed sandbox.img fixture for CI
-  - `1fe1a56` Add GitHub Actions CI
-  - this catalog entry (the commit after `1fe1a56`)
+  - `3a88a50` Freeze the prototype under legacy/
+  - `c536ce7` Untrack prototype output and ignore test caches
+  - `c822a39` Add btrfska package skeleton and project config
+  - `a103e22` Apply ruff formatting to corpus scripts (no functional change)
+  - `ba5f19f` Add Apache License 2.0
+  - `9f26797` Rewrite README for btrfska and drop commands.txt
+  - `bc60d4c` Add read-only and CLI tests with a sandbox hash guard
+  - `964cc42` Track a zstd-compressed sandbox.img fixture for CI
+  - `38057bb` Add GitHub Actions CI
+  - this catalog entry (the commit after `38057bb`)
 
 **What was done.**
 1. **Legacy frozen.** `main.py`, `utils/`, `tests/` moved with `git mv` to
@@ -3088,7 +3119,7 @@ generation 1000 and `m1_sha256_bgt`'s fsid and roots.
   (`checkout@v7`, `setup-uv@v10`) were taken from the plan. On the first PR run, CI failed at job setup because `astral-sh/setup-uv` has no floating `v10` tag; the workflow now pins `setup-uv@v10.1.0` and CI passes (run 34904950286, 17 s). These pins were not otherwise
   re-checked here.
 
-**Review fixes** (commits `1d402c2`, `e275410`, `631f904`; each test
+**Review fixes** (commits `f2ce4d4`, `0bfaa12`, `0da22ba`; each test
 written and seen failing before the fix):
 - **Import mode:** pytest `addopts` gains `--import-mode=importlib`, plus
   `pythonpath = ["."]`. A throwaway `tests/test_crc32c.py` failed collection
@@ -3247,7 +3278,7 @@ written and seen failing before the fix):
 - (a) ~~approve tracking `tests/fixtures/sandbox.img.zst`~~ — resolved:
   tracked in M0 (task 9);
 - (b) ~~tag `feature/m1-backup-roots` as `m1-prototype`~~ — done: annotated
-  tag pushed to origin, pointing at the branch tip `1e9984e`; the branch is
+  tag pushed to origin, pointing at the branch tip `26715ba`; the branch is
   kept;
 - (c) gen-12 contents of `sandbox.img` are not yet recorded anywhere
   (M1 task 1 captures them) — still open.
@@ -3345,7 +3376,7 @@ entry.
   `lzo1x_decompress_safe`.
 - All `corpus/vm` shell scripts pass `sh -n`.
 - `git ls-remote` shows `refs/tags/m1-prototype`, which dereferences to
-  `1e9984e`.
+  `26715ba`.
 
 ## 2026-09-15 — Research refresh (post-reset prior-art watch)
 
@@ -3449,7 +3480,7 @@ tracked in git, not ignored).
   orphan explanation rests on `sandbox.img` alone.
 
 **M1 branch archaeology (`research.md` §10.5).** `feature/m1-backup-roots`
-(commits `d870a98`, `1d48203`, `1e9984e`, 2026-08-14; forked from `c51fe91`,
+(commits `5cee53f`, `44225e1`, `26715ba`, 2026-08-14; forked from `9b9cfd3`,
 never reintegrated after the reset) adds backup-root parsing + anchored
 walking + 12 tests. Verified via `git archive` extract: **49/49 tests pass**.
 Confirmed that `sandbox.img` backup slots hold **gens 13, 14, 11, 12**
@@ -3521,8 +3552,8 @@ left untouched.
 
 ## 2026-08-14 — Second research pass ("we may be reimplementing prior art")
 
-- **Branch:** `main` — **Commits:** `1b850c2` "added more research",
-  `62d1660` "added docs and recovery output"
+- **Branch:** `main` — **Commits:** `160233e` "added more research",
+  `d2177e3` "added docs and recovery output"
 - First external prior-art audit (`docs/research_report.md`, then expanded
   `research.md`). Discovered the 2026 "Beyond Carving" IEEE Access paper,
   MetaRecoverX, the Toolan & Humphries hiding-techniques preprint, and the
@@ -3540,8 +3571,8 @@ left untouched.
 
 ## 2026-08-14 — M2: structure-directed targeted orphan scan
 
-- **Branch:** `feature/m2-targeted-orphan-scan` — **Commits:** `c7ce1bc`
-  (feature), `891215e`/`c51fe91` (PR merges), `452286a` (catalog doc)
+- **Branch:** `feature/m2-targeted-orphan-scan` — **Commits:** `0addd8d`
+  (feature), `48f8b0a`/`9b9cfd3` (PR merges), `9955b53` (catalog doc)
 - Replaced the blind full-image sweep with a structure-directed scan:
   - Chunk map now records chunk **type** (`btrfs_chunk.type` at offset 24 of
     the CHUNK_ITEM payload; DATA=0x1, SYSTEM=0x2, METADATA=0x4).
