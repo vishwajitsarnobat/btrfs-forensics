@@ -41,12 +41,31 @@ frozen, still runnable, under `legacy/`.
 
 **Licence:** Apache-2.0 (see `LICENSE`).
 
+## Quick start
+
+From a fresh clone to a working checkout with every test image, in one
+command and a few minutes (about 190 MB is downloaded once):
+
+```sh
+./setup.sh                  # environment, sandbox.img, test-image corpus, lint, all tests
+./setup.sh --no-corpus      # without the generated images: no KVM or QEMU needed
+```
+
+It needs [uv](https://docs.astral.sh/uv/) (which provisions Python 3.14) and
+`zstd`. Building the corpus also needs read/write access to `/dev/kvm`,
+`qemu-system-x86_64`, `curl`, `ar`, `tar`, `cpio` and `gzip`, on any Linux
+distribution; `uv run python corpus/build.py --check` says what is missing and
+which package provides it. No root is used and nothing is written outside the
+repository folder. [`corpus/vm/README.md`](corpus/vm/README.md) explains how
+the images are made and what is pinned.
+
 ## Install and run
 
-Requires [uv](https://docs.astral.sh/uv/); uv provisions Python 3.14.
+By hand, without `setup.sh`:
 
 ```sh
 uv sync                     # create .venv from uv.lock
+zstd -dc tests/fixtures/sandbox.img.zst > sandbox.img    # the primary regression image
 uv run btrfska --help
 uv run btrfska info sandbox.img
 uv run btrfska walk sandbox.img --root backup:11 --tree fs
@@ -428,10 +447,12 @@ uv run python -m unittest discover -s legacy/tests     # legacy suite, original 
 uvx --from . btrfska --version
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same lint and tests, plus a `sh -n`
-syntax check of the `corpus/vm` scripts. It restores `sandbox.img` from the
-tracked `tests/fixtures/sandbox.img.zst` and checks it against
-`tests/fixtures/SHA256SUMS`.
+CI (`.github/workflows/ci.yml`) has two jobs. `test` runs the same lint and
+tests, plus a `sh -n` syntax check of the shell scripts; it restores
+`sandbox.img` from the tracked `tests/fixtures/sandbox.img.zst` and checks it
+against `tests/fixtures/SHA256SUMS`. `corpus` runs `./setup.sh` on a clean
+runner with KVM: it builds every image of `corpus/manifest.tsv` and runs the
+whole suite, the `vm` tests included.
 
 ### Test policy
 
@@ -441,8 +462,14 @@ tracked `tests/fixtures/sandbox.img.zst` and checks it against
   `src/btrfska/substrate/image.py` (`O_RDONLY`, read-only mmap), and the test
   session asserts the image's sha256 before and after every run.
 - Markers: `sandbox` (needs `sandbox.img`, skipped when absent) and `vm`
-  (needs the `corpus/vm` images listed in `corpus/manifest.tsv`, skipped when
-  absent; run them with `uv run pytest -m vm`).
+  (needs the images of `corpus/manifest.tsv`, skipped when absent; build them
+  with `uv run python corpus/build.py`, run them with `uv run pytest -m vm`).
+- `corpus/manifest.tsv` is a recipe: one row per image with the command that
+  builds it, the mkfs version and the guest kernel. It holds no image hash,
+  because every mkfs draws a new filesystem UUID and two builds never have the
+  same bytes. `corpus/build.py` records the hashes of what was built locally
+  in `images/scenarios/SHA256SUMS`, and the `vm` tests fail when an image no
+  longer matches that record, so a corpus image is never modified in place.
 - Full policy: `plan.md` §6.1.
 
 ### Image rule
@@ -452,8 +479,7 @@ under the gitignored `images/` folder (`images/scenarios/`, `images/vm/`,
 `images/tools/`, `images/scratch/`, `images/mnt/`). Nothing is created
 outside the repo.
 
-The `corpus/vm` smoke test is local only (needs `/dev/kvm`) and is not run in
-CI; its output goes under `images/`:
+One image by hand (the corpus build does this for every manifest row):
 
 ```sh
 corpus/vm/fetch_vm.sh && corpus/vm/build_initramfs.sh && corpus/vm/make_image.sh smoke_s01
