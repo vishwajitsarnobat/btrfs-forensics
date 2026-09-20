@@ -16,9 +16,12 @@ from btrfska.substrate.image import open_image
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 IMAGE_MODULE = SRC / "btrfska" / "substrate" / "image.py"
-# The only modules allowed to open, create or writably map files. The M4 `recover`
-# output writers will join this allowlist explicitly; nothing else should.
-WRITE_ALLOWLIST = frozenset({IMAGE_MODULE})
+CATALOG_DB_MODULE = SRC / "btrfska" / "catalog" / "db.py"
+# The only modules allowed to open, create or writably map files: the one that opens images
+# (read-only) and the one that creates evidence databases (never an image; it refuses a path that
+# exists). The M4 `recover` output writers will join this allowlist explicitly; nothing else
+# should.
+WRITE_ALLOWLIST = frozenset({IMAGE_MODULE, CATALOG_DB_MODULE})
 SCRATCH = REPO_ROOT / "images" / "scratch"
 
 
@@ -150,6 +153,9 @@ WRITE_CALLS = frozenset(
         "tempfile.TemporaryFile",
         "tempfile.SpooledTemporaryFile",
         "tempfile.mkstemp",
+        # SQLite creates the file it is asked to connect to.
+        "sqlite3.connect",
+        "sqlite3.Connection",
     }
 )
 # Write-only method names, flagged on any receiver (`Path(p).write_bytes()`, `x.fdopen()`).
@@ -256,6 +262,9 @@ def write_violations(source: str) -> list[int]:
         ("from mmap import mmap\nmmap(fd, 0)", True),
         ("mmap.mmap(fd, 0, access=mode)", True),
         ("tempfile.NamedTemporaryFile()", True),
+        ("sqlite3.connect(p)", True),
+        ("from sqlite3 import connect\nconnect(p)", True),
+        ("import sqlite3 as sq\nsq.connect(p)", True),
         # Legitimate patterns stay allowed.
         ("mmap.mmap(fd, size, access=mmap.ACCESS_READ)", False),
         ("from mmap import ACCESS_READ, mmap\nmmap(fd, 0, access=ACCESS_READ)", False),
@@ -273,6 +282,29 @@ def test_image_module_needs_the_allowlist_only_for_os_open():
     flagged = [source.splitlines()[n - 1] for n in write_violations(source)]
     assert len(flagged) == 1
     assert "os.open(" in flagged[0]
+
+
+def test_catalog_db_module_needs_the_allowlist_only_for_sqlite_connect():
+    """Every flagged call in the database module is a sqlite3.connect; it opens no other file."""
+    source = CATALOG_DB_MODULE.read_text()
+    flagged = [source.splitlines()[n - 1] for n in write_violations(source)]
+    assert flagged
+    assert all("sqlite3.connect(" in line for line in flagged)
+
+
+def test_the_database_module_never_touches_an_image():
+    """catalog/db.py creates databases and nothing else: it must not import the image layer."""
+    tree = ast.parse(CATALOG_DB_MODULE.read_text())
+    imported = {
+        name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for name in (
+            [node.module] if isinstance(node, ast.ImportFrom) else [a.name for a in node.names]
+        )
+    }
+    assert not {name for name in imported if name and "substrate" in name}
+    assert "mmap" not in imported
 
 
 def test_only_allowlisted_modules_write():
