@@ -679,7 +679,8 @@ TSK + UFS Explorer + R-Studio, metrics = **recovery rate + exact-recovery
 accuracy via cryptographic hash match** (the field's correctness criterion;
 they criticise earlier studies for omitting it. Corrected 2026-09-21, §10.13:
 that criticism is not aimed at ExtSFR, which compares MD5 values; their
-objection to ExtSFR is that it predates Ext4 journal checksum v3). See §5.2 for the full protocol distilled from this paper.
+objection to ExtSFR is that it predates Ext4 journal checksum v3). See §5.2
+for the full protocol distilled from this paper.
 
 ### 4.8 Papers identified as relevant but not yet obtained
 

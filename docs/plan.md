@@ -979,9 +979,10 @@ scenario's final balance and short life (EXP-002 §6.5).
   not taken as constants** (research.md §10.13): the published superblock
   range, 0xF0 bytes at 0x23B, is a pre-5.0 layout; at v7.0 only 0x264–0x32A is
   reserved, and `metadata_uuid`, `nr_global_roots` and the `remap_root` fields
-  are anomalies only when non-zero without their feature flag, plus backup-root divergence (cite SecurityRonin). Target
-  list per Toolan & Humphries FSI:DI 58:302198. Validate against images
-  generated with **fishy**'s btrfs module.
+  are anomalies only when non-zero without their feature flag. Also detect
+  backup-root divergence (cite SecurityRonin). Target list per Toolan &
+  Humphries FSI:DI 58:302198. Validate against images generated with
+  **fishy**'s btrfs module.
 - Foreign-FSID discovery (optional scan mode, from the M2a review). The M2
   prefilter matches only the current fsid or metadata_uuid, so tree blocks of
   a previous filesystem on the device, or written before `btrfstune -m`/`-u`,
