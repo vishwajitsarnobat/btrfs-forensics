@@ -20,6 +20,39 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — Four blocked papers read in full: two corrections and one finding
+
+- **Branch:** `docs/four-paper-digests` (from `main` at `63793f9`). Docs only: research.md (new
+  §10.13, corrections in §4.4, §4.7, §4.8, §8.3, §10.1, §10.6), paper-draft.md (§5.3, G14, §12.1
+  notes, §12.2), plan.md (M4, M6, M7). No CI run: the change is under `docs/` only.
+- **What was read, cover to cover:** Toolan & Humphries 2026 (hiding data in Btrfs), Plum & Dewald
+  2018 (APFS recovery), Oh & Hwang 2025 (F2FS recovery), Lee et al. 2020 (ExtSFR). Until now the
+  project cited all four from abstracts and second-hand descriptions.
+- **Correction 1: ExtSFR is not database-backed.** research.md called it a "DB-backed
+  scan-once-query-many precedent for our SQLite catalog". The paper has no database; "scalable"
+  means 64-bit offsets for 1 TB images. No database-backed recovery catalog has been found in the
+  literature read so far, so M3 cites no precedent and stays an engineering choice.
+- **Correction 2: ExtSFR verifies by hash.** research.md said Kim et al. 2021 criticised it for
+  omitting hash verification. ExtSFR counts MD5-exact files; Kim et al.'s objection (their p. 3)
+  is that it predates Ext4 journal checksum v3.
+- **Finding: the published superblock "reserved area" is a pre-5.0 layout.** Toolan & Humphries
+  give 0xF0 bytes at 0x23B. Against our v7.0 tables (`substrate/ondisk.py`, asserted by
+  `tests/test_ondisk.py`), 0x23B–0x263 hold `metadata_uuid`, `nr_global_roots`, `remap_root`,
+  `remap_root_generation` and `remap_root_level`; only the 199 bytes at 0x264–0x32A are reserved.
+  Every other offset in the paper agrees with our tables. For the M6 detector, reserved ranges
+  must be derived from the feature flags.
+- **What else the papers change:** Toolan & Humphries tested TSK 4.14, `btrfs check` and `dmesg`
+  against six techniques and none detected any; they name a detection toolkit as future work
+  (supports C5). They report that internal-node slack does not survive copy-on-write, which is
+  UNVERIFIED against the kernel and is now an M4 task before slack is claimed as a recovery source
+  (C1). Plum & Dewald measure recovery over every file *state*, not only deleted files, which is the
+  right metric for timelines and is added to M7 with ExtSFR's three counts per tool. Oh & Hwang
+  rebuild an address table from carved metadata, the analog of C6; they keep only the newest
+  version of a block and evaluate the best case (unmounted right after deletion).
+- **Verification:** every number quoted in §10.13 was read from the paper's text or tables; the
+  offset comparison was run against `ondisk.SUPERBLOCK` and `ondisk.INODE_ITEM`; links resolve.
+- **Still missing:** Hilgert's PhD thesis, Vaheed Ali et al. 2025, Hraiz 2016 (research.md §4.8).
+
 ## 2026-09-21 — CONTRIBUTING.md: the working rules in one place
 
 - **Branch:** `docs/contributing-rules` (from `main` at `b569d4c`). New `CONTRIBUTING.md`; a link
