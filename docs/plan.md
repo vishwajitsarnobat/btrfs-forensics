@@ -876,24 +876,58 @@ scenario's final balance and short life (EXP-002 §6.5).
   is planned under M6.
 
 ### M3 — Evidence catalog (~1 week)
-- SQLite schema (versioned, documented in-repo):
-  - `nodes(bytenr, phys, dev, gen, owner, level, nritems, csum_type,
-    csum_ok, header_checks, discovery, …)`
-  - `tree_edges(parent, slot, child, key…)`
-  - `items(node, slot, key, raw, parsed_kind, beyond_nritems)`
-  - `roots`
-  - `chunks(map_id, source=current|historical|remap, …)`
-  - `extent_backrefs` (incl. EXTENT_OWNER_REF 172)
-  - `inodes`, `dir_entries`, `file_extents`
-  - `artifacts(path, sha256, source, confidence…)`
-  - `provenance(subject, evidence, method)`
-  - `scan_runs` (image sha256, tool version, params, gate verdict — chain
-    of custody)
-- Reverse queries: parents-of(bytenr), owners-of(extent), trees-covering
-  (key), items-in-generation(g).
-- The schema is the contract M9's GUI reads; changes bump `schema_version`.
-- **DoD:** one scan of sandbox populates `evidence.db`; all M1/M2 outputs
-  flow through it; reverse queries answered without re-reading the image.
+
+**Goal.** One pass over an image fills `evidence.db`; everything after it (M4 recovery, M5
+timelines, M6 tiers, M9 GUI) queries the database, not the image. Design fixed on 2026-09-21,
+before implementation.
+
+**Decisions.**
+1. **One database per image, written once.** `btrfska catalog build IMAGE --db PATH` refuses an
+   existing `PATH`, refuses a path that is the image, and removes a partial file on failure. There
+   is no in-place update: a rebuild is a new file. The single `scan_runs` row is the chain of
+   custody: image path, size, SHA-256 before and after the pass, tool version, parameters, gate
+   verdict, `schema_version`.
+2. **One write site.** Databases are created only in `src/btrfska/catalog/db.py`. The read-only test
+   bans `sqlite3.connect` everywhere else in `src/` and allowlists that module, next to
+   `substrate/image.py`. Readers open with a `mode=ro` URI. No evidence image is ever written.
+3. **The physical copy is the unit of evidence.** `nodes` has one row per scan candidate, valid or
+   not, at its physical offset, with its classification; `node_checks` has one row per check, so a
+   failed candidate stays queryable ("validate before trusting", §2). A logical block is the view
+   `blocks` over valid nodes with equal (bytenr, generation, level, owner).
+4. **Parsed content is stored once per distinct block content.** DUP and RAID1 copies are
+   byte-identical, so `items` and `key_ptrs` hang off `contents` (SHA-256 of the block), and `nodes`
+   point to it. A copy that differs gets its own content row, which keeps divergent mirrors visible.
+5. **Integers.** SQLite integers are signed 64-bit. Every on-disk u64 is stored as its
+   two's-complement signed value: objectids of 2^63 and above appear negative, which is how btrfs
+   names them (−6 is the log tree). The schema document says so for every such column.
+6. **Scan once.** The builder consumes one candidate stream and feeds classification, the block
+   index for old-root discovery and the database from it. `scan` and `roots` each rescan today
+   (catalog.md M2b, "Repeated work"); the catalog does not.
+7. **No empty speculative tables.** `artifacts` and `provenance` are created by the milestone that
+   first writes them (M4, M6), with a `schema_version` bump, not now.
+
+**M3a: schema, build, custody** (first pull request).
+- `catalog/schema.py` (DDL, `SCHEMA_VERSION = 1`), `catalog/db.py` (create, open read-only),
+  `catalog/build.py`, CLI `btrfska catalog build` and `btrfska catalog info`.
+- Tables: `scan_runs`, `superblocks`, `chunks`, `stripes`, `regions` (scanned and skipped ranges),
+  `nodes`, `node_checks`, `known_roots` (superblock and backup slots, with rediscovery),
+  `states`, `state_trees` (old-root discovery), `walk_failures`; view `blocks`.
+- Schema documented in `docs/evidence-db.md`; a test fails when a table or column is undocumented.
+- **DoD:** `catalog build sandbox.img` fills the database in one pass; its counts equal
+  `scan_image(...).summary` and the `roots` discovery on the sandbox and on every corpus image; the
+  image hash is unchanged; a second build to the same path is refused.
+
+**M3b: content and reverse queries** (second pull request).
+- `contents`, `items` (key, raw bytes, per-type decode where `substrate/items.py` has one),
+  `key_ptrs`; view `tree_edges` (parent block to child block); parsed tables `inodes`,
+  `dir_entries`, `file_extents`, `extent_backrefs` (including EXTENT_OWNER_REF 172).
+- Reverse queries as SQL views or functions with a CLI (`btrfska catalog query …`): parents-of
+  (bytenr), owners-of (extent), trees-covering (key), items-in-generation (g).
+- **DoD:** the four reverse queries are answered from the database alone, with the image file
+  absent; results agree with `btrfska walk` on the current and backup roots of the sandbox.
+
+The schema is the contract M9's GUI reads; a change bumps `schema_version` and is described in
+`docs/evidence-db.md`.
 
 ### M4 — Recovery engines (~1–2 weeks)
 - Anchored recovery: extract files from any cataloged root via
