@@ -20,6 +20,78 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — One-command setup: recipe manifest, corpus/build.py, setup.sh, corpus CI job
+
+- **Branch:** `feature/one-command-corpus` (from `main` at `063fb88`). New: `setup.sh`,
+  `corpus/build.py`, `tests/test_corpus_build.py`. Changed: `corpus/manifest.tsv`,
+  `tests/test_vm_images.py`, `tests/test_discard_trio.py`, `.github/workflows/ci.yml`, `README.md`,
+  `corpus/vm/README.md`, plan.md §6.1–§6.2. No change under `src/`.
+- **Why:** the goal is that anyone can clone the repository and reach a complete, tested checkout
+  in a few minutes by running the scripts provided. Two things stood in the way. Building the
+  corpus meant copying fourteen commands out of the manifest by hand, in the right order. And the
+  manifest recorded the sha256 of one particular build of each image, which no one can reproduce:
+  every mkfs draws a new filesystem UUID, so twelve tests failed on any rebuilt corpus (previous
+  entry). The first host's images no longer exist, so those hashes described nothing obtainable.
+
+**What changed.**
+- `corpus/manifest.tsv` is now a recipe: `name`, `command`, `mkfs`, `guest_kernel`, `note`. The
+  `sha256` column is gone, `host_mkfs` became `mkfs` (the pinned 6.6.3), and every `command` is
+  purely executable (the prose that followed the three discard commands moved to `note`). Rows are
+  in build order.
+- `corpus/build.py` checks the host (each missing tool is named with the package that provides it
+  on Debian/Ubuntu, Fedora, Arch and openSUSE; `/dev/kvm` access is checked), fetches the pinned
+  bundle, builds the initramfs and runs every row's command. It skips images that exist
+  (`--force` rebuilds, names select rows, `--check` only checks the host) and records the sha256 of
+  what it built in the gitignored `images/scenarios/SHA256SUMS` (`sha256sum -c` format).
+- The two hash tests now compare each local image with that local record
+  (`test_local_image_is_unchanged_since_it_was_built`, `test_trio_image_is_unchanged_since_it_was_built`)
+  and skip when an image has no record. Their purpose is kept: an image modified after it was built
+  fails. The EXP-000/001/002 records still cite the hashes of the instances they measured; those
+  are evidence of what was measured, not something to rebuild.
+- `setup.sh`: `uv sync --locked`, restore and verify `sandbox.img`, `corpus/build.py`, ruff, the
+  whole test suite. `--no-corpus` skips the images for hosts without KVM.
+- CI gets a second job, `corpus`, that runs `./setup.sh` on a clean `ubuntu-24.04` runner with KVM
+  enabled (the pinned `.deb` files are cached by the hash of `guest.lock`) and fails if any vm test
+  was skipped for a missing image. plan.md §6.1 said vm tests were local only; it is revised, and
+  §6.2 gains the reproducibility target every later scenario and baseline tool must keep.
+
+**Finding: the first build on a second host class changed the numbers, as plan.md §7 predicts.**
+- On the GitHub-hosted runner (nested KVM, Ubuntu's QEMU 8.2.2) the whole corpus built and 729 of
+  734 tests passed. The five failures were all in `tests/test_discard_trio.py`: the guest made one
+  more transaction commit than on either development host, so the s01 images ended at generation
+  39, not 38, and the no-discard and async images held 363/351/16/824 blocks
+  (`probe_stale_metadata.py` columns), not 367/355/18/832. The sync image's class counts were
+  unchanged (43/38/22/0/16), only its backup generations moved up by one. EXP-000 had already
+  seen 365/353/18/828 once in 15 runs on the first host.
+- Those tests asserted EXP-002's numbers as constants, which was sound while three kept images
+  were the test subjects, and is not once everyone rebuilds them. They now assert the claims
+  themselves, relative to each image's own superblock generation G and its own probe output:
+  btrfska's full sweep covers exactly the blocks the probe counts; the classes partition the valid
+  candidates; without trims the four backup states G…G−3 are complete and at least 20 older states
+  survive (EXP-002 measured 31), all complete except the mkfs-era generation-3 leaf; under
+  `discard=sync` fewer than 20 % of the stale blocks survive, nothing is reached from an older
+  backup only, and exactly the root, extent, chunk and dev roots of backups G−3…G−1 read as zeros
+  (12 walks). The measured numbers stay in EXP-000 and EXP-002, where N and the spread are stated.
+- Consequence for the paper: a count from one guest run is host-dependent. EXP-000's medians held
+  on two x86-64 hosts with different QEMU versions (8.2.2, 10.2.2) and did not hold on a slower,
+  nested-virtualisation runner. Any table built from guest runs should name the host class, and a
+  cross-host repetition belongs in the M7 experiment set.
+
+**Verification** (Fedora 44, QEMU 10.2.2, NVMe; single runs, timings indicative).
+- Corpus from an empty `images/` folder, 190 MB download included: 14 images in 92 s; each
+  guest-driven image takes 1.0–1.2 s and each derived image about 2.1 s.
+- **Fresh clone of the branch into an empty folder, then `./setup.sh`: 14 images built, 734 passed,
+  0 skipped, 143 s in total.**
+- A second `corpus/build.py` run builds nothing (14 already present). Flipping one byte of
+  `m1_zlib.img` makes its unchanged-since-built test fail; restoring the image makes
+  `sha256sum -c SHA256SUMS` pass for all 14.
+- `tests/test_corpus_build.py` (7 tests, no image or VM needed): the manifest has exactly the five
+  columns and no 64-hex string, every command runs a tracked script and names its own image, a
+  derived image comes after its source, the build record round-trips in `sha256sum` format, the
+  host check names the missing tool, and an unknown image name is refused before anything runs.
+- Ruff and format clean; `sh -n` clean on `setup.sh` and every corpus script; `sandbox.img` sha256
+  unchanged.
+
 ## 2026-09-21 — corpus/vm runs on any Linux distribution
 
 - **Branch:** `feature/portable-corpus-vm` (from `main` at `d3f499b`). Changes under `corpus/vm/`
