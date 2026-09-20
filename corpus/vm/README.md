@@ -81,10 +81,18 @@ python3 corpus/vm/probe_stale_metadata.py images/scenarios/x.img
 | `probe_stale_metadata.py` | Prints `fsid_blocks stale_blocks needle_copies nonzero_blocks` (definitions in its docstring) |
 
 Derived images and the manifest (one level up, in `corpus/`):
-- `corpus/manifest.tsv` has one row per generated image: name, generator
-  command, mkfs version (column `host_mkfs`), guest kernel, sha256. The sha256 is that of
-  one generated instance: a regenerated image has a new filesystem UUID and so a new hash. Tests reference images by
-  name and skip when absent.
+- `corpus/manifest.tsv` is the recipe: one row per image with its name, the
+  command that builds it, the mkfs version, the guest kernel and a note. Rows
+  are in build order, so an image derived from another comes after it. It
+  holds no image hash: every mkfs draws a new filesystem UUID, so two builds
+  of one row never have the same bytes. Tests reference images by name and
+  skip when absent.
+- `corpus/build.py` builds the whole manifest in one command (`uv run python
+  corpus/build.py`; `--check`, `--force` and image names are accepted). It
+  checks the host, runs `fetch_vm.sh` and `build_initramfs.sh`, runs each
+  row's command and records the SHA-256 of every image it built in
+  `images/scenarios/SHA256SUMS`. The `vm` tests compare the local images with
+  that record, which catches an image modified after it was built.
 - `corpus/mutate.py SRC DST OP` writes a damaged copy of a generated image
   (`set-incompat-bit BIT`, `zero-primary-sb`, `transplant-sb DONOR MIRROR
   GENERATION`, `flip-byte OFFSET...`). It only reads `SRC` (and `DONOR`) and

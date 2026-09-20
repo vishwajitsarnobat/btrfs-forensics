@@ -30,8 +30,8 @@ jobs:
       - name: Format check
         run: uv run ruff format --check .
 
-      - name: corpus/vm shell syntax
-        run: for f in corpus/vm/*.sh corpus/vm/scenarios/*.sh corpus/vm/init; do sh -n "$f"; done
+      - name: Shell script syntax
+        run: for f in setup.sh experiments/env.sh corpus/vm/*.sh corpus/vm/scenarios/*.sh corpus/vm/init; do sh -n "$f"; done
 
       - name: Restore sandbox.img fixture
         run: zstd -dc tests/fixtures/sandbox.img.zst > sandbox.img && sha256sum -c tests/fixtures/SHA256SUMS
@@ -44,3 +44,38 @@ jobs:
 
       - name: CLI smoke
         run: uv run btrfska --help
+
+  # A fresh clone on a clean machine: ./setup.sh builds the environment, restores sandbox.img,
+  # builds every test image in a KVM guest and runs the whole suite, vm tests included.
+  corpus:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Allow the runner user to use KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # btrfs-progs is only the dump-tree oracle of a few vm tests; images are made by the pinned mkfs
+      - name: Install QEMU and the dump-tree oracle
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86 btrfs-progs
+
+      - name: Cache the pinned guest packages
+        uses: actions/cache@v6
+        with:
+          path: images/vm/debs
+          key: guest-debs-${{ hashFiles('corpus/vm/guest.lock') }}
+
+      - name: Set up from a fresh clone
+        run: ./setup.sh
+
+      - name: No vm test was skipped for a missing image
+        run: uv run pytest -q -m vm -rs | tee vm.log && ! grep -E -q 'absent|no build record' vm.log
+

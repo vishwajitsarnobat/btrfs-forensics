@@ -1158,8 +1158,10 @@ Views:
 - CI may reconstruct `sandbox.img` at the repo-root path from the tracked
   `tests/fixtures/sandbox.img.zst` (hash-checked); that is a restored copy
   of the primary image, not an extra image.
-- Markers: `sandbox` (needs `sandbox.img`), `vm` (needs `corpus/vm` output;
-  skipped in default CI, run locally and in the scheduled M7 job).
+- Markers: `sandbox` (needs `sandbox.img`), `vm` (needs the images of
+  `corpus/manifest.tsv`, built by `corpus/build.py`). Since 2026-09-21 the CI
+  job `corpus` builds them with `./setup.sh` on a clean runner and runs the
+  `vm` tests; the full M7 matrix stays a scheduled job.
 - **Local pre-merge gate** (every PR, recorded in the catalog): `uv run
   pytest` with `sandbox.img` present and the `vm` images of the milestone
   regenerated, + `sha256sum sandbox.img`.
@@ -1173,8 +1175,19 @@ Views:
   corrupted and mirror-damage images; M2 uses the discard trio; M4 the beyond-4-generations
   image; M5 the balance image; M7 scales it to the full matrix.
 - Every generated image gets a `corpus/manifest.tsv` row (name, command,
-  host mkfs version, guest kernel, sha256); tests reference images by name
-  and skip when absent.
+  mkfs version, guest kernel, note); tests reference images by name and skip
+  when absent. The manifest is a recipe and holds no image hash (revised
+  2026-09-21): every mkfs draws a new filesystem UUID, so no build of a row
+  can be repeated byte for byte. `corpus/build.py` builds every row in one
+  command and records the hashes of what it built in the gitignored
+  `images/scenarios/SHA256SUMS`; the `vm` tests compare the local images with
+  that record. An EXP record still cites the sha256 of the instances it
+  measured, as evidence of what was measured, not as something to rebuild.
+- **Reproducibility target:** a fresh clone reaches a complete, tested
+  checkout with `./setup.sh` in a few minutes, on any Linux distribution
+  with KVM and QEMU. Every new scenario, baseline tool or guest package must
+  keep that true: pinned by hash, fetched by URL, no root, nothing outside
+  `images/`.
 - **Discard axis** (none/async/sync) and **block-group-tree axis** (off/on)
   are in the matrix from their first use (M2 and M1 respectively), not only
   in M7.
