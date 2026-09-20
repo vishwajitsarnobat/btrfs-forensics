@@ -471,10 +471,14 @@ uv run --python 3.14 python -m unittest discover -s legacy/tests -v
 
 ## Documentation
 
-- [`plan.md`](plan.md): build plan (architecture, stack, migration,
+- [`plan.md`](docs/plan.md): build plan (architecture, stack, migration,
   milestones, test policy, experiment protocol).
-- [`research.md`](research.md): verified prior-art and gap analysis.
-- [`catalog.md`](catalog.md): chronological development record.
-- [`paper-draft.md`](paper-draft.md): research paper draft starter at checkpoint M2 (what the
+- [`research.md`](docs/research.md): verified prior-art and gap analysis.
+- [`catalog.md`](docs/catalog.md): chronological development record.
+- [`paper-draft.md`](docs/paper-draft.md): research paper draft starter at checkpoint M2 (what the
   evidence supports now, evaluation tables, claim-to-evidence traceability, gaps to submission).
+- [`docs/papers/`](docs/papers/README.md): the paper library, with an index of
+  every PDF (citation, DOI, BibTeX key).
+- [`experiments/`](experiments/): one `EXP-NNN.md` record and regeneration
+  script per measured result (`plan.md` §7).
 - [`corpus/vm/README.md`](corpus/vm/README.md): rootless QEMU scenario images.

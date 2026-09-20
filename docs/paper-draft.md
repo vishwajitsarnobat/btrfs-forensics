@@ -61,7 +61,7 @@ Investigation* (FSI:DI).** Fallback: **IEEE Access**. Both come from plan.md §8
 | Next deadline | **check** (DFRWS USA 2027, DFRWS EU 2027 and DFRWS APAC 2027 calls) | Rolling submission |
 | Page or word limit | **check** the current call for papers (whether references and appendices count) | **check** the author guide; there is an article processing charge (**check** amount) |
 | Review model | **check** whether the call is double-blind. If it is, the tool name, repo URL and corpus DOI must be anonymised | **check** |
-| Template | Elsevier FSI:DI two-column template; author–year citations, as in the DFRWS papers in `docs/` (for example `docs/hilgert_mind_the_slack_2026.pdf`, "Carrier (2005)") | IEEE Access template, numbered citations |
+| Template | Elsevier FSI:DI two-column template; author–year citations, as in the DFRWS papers in `docs/papers/` (for example `docs/papers/schwietert_hilgert_mind_the_slack_2026.pdf`, "Carrier (2005)") | IEEE Access template, numbered citations |
 | Artifact | **check** whether DFRWS runs artifact evaluation this cycle; plan.md §8 plans a `uvx`-installable tool, a Zenodo corpus and EXP scripts regardless | Code and data availability statement |
 
 **Working budget (an assumption for planning, not a venue rule; replace once checked).** About
@@ -80,7 +80,7 @@ Investigation* (FSI:DI).** Fallback: **IEEE Access**. Both come from plan.md §8
 | 8 Limitations and threats to validity | 400 |
 | 9 Future work and 10 Conclusion | 300 |
 
-**Structure conventions for DFRWS papers**, taken from the DFRWS papers in `docs/`
+**Structure conventions for DFRWS papers**, taken from the DFRWS papers in `docs/papers/`
 (`hilgert_stacked_filesystems_2024.pdf`, `schwietert_hilgert_datahiding_corpus_2025.pdf`):
 - an explicit, numbered contribution list at the end of the introduction;
 - a background section sized to what the method needs, not a filesystem tutorial;
@@ -179,7 +179,7 @@ covers, from research.md §6 and §10.1–§10.2.
 | N2 | **DUP-mirror provenance** and the kernel's read/repair policy | **Partially supported** | btrfska reads and validates every copy and reports divergent valid copies (`m1_badnode`, catalog.md M1b). Kernel policy read from v7.0 source: DUP reads mirror 1 and falls back only on failure; RAID1/1C3/1C4/10 pick a stripe by PID under the default `pid` policy; a fallback read on a read-write mount rewrites the failed mirror (research.md §10.8) | The kernel behaviour is read from source, not measured. On the corpus all 144 DUP pairs were identical (research.md §10.8), so no natural divergence was observed. The hiding-place hypothesis is untested (M6) |
 | N3 | **Foreign superblock copies** as evidence of a previous filesystem | **Partially supported** | Selection anchors the fsid on the first valid copy, following btrfs-progs recover mode, and reports foreign copies (`m1_foreign_mirror`, catalog.md M1a review fixes; research.md §10.7) | btrfs-progs already skips foreign copies; the new part is reporting them as evidence. One synthetic image; no real reformatted device. Tree blocks of a foreign fsid are not scanned at all (README "Limitations"; planned M6) |
 | N4 | **LZO decode success is not evidence of correct content** (measured) | **Supported now**, small | Committed harness `tests/oracle/lzo_hostile.py`, seeds 1–5: 227 (218–231) of 300 bit-flipped 4 KiB streams decode to wrong bytes within the bound in btrfska, lzallright and dissect.util native; dissect.util's native decoder raises a non-`Exception` panic on 37 (31–46) (catalog.md M1c review fixes table) | LZO has no integrity check by design, so the qualitative point is known; the contribution is the measurement and the design rule that follows (decode success never raises confidence). There is no EXP record yet: promote the harness to one. `TODO:` consider reporting the dissect.util panic upstream before publication |
-| N5 | **Old-root discovery beyond the backup roots, including states outside the current chunk map** | **Partially supported** | 31 candidate root-tree blocks (states) beyond the 4 backup states on every s01 image without trims, 30 complete; generations 3–16 have no block the current chunk map places (EXP-002 §6.3, §6.5; research.md §10.11) | Discovering roots beyond the backups is **not new**: `btrfs-find-root` does it, and Beyond Carving's Algorithm 3 scans the chunk-mapped tree regions for root-tree blocks (`docs/Beyond_Carving_…pdf` §VI.E.1). What is ours: scanning unmapped gaps (and DATA with `--full-sweep`), per-copy validation, the candidate definition (N8), completeness and failure classes. Survival is a balance and short-life artefact (EXP-002 §6.5). A head-to-head count against find-root and a Beyond Carving-style scan is M7 |
+| N5 | **Old-root discovery beyond the backup roots, including states outside the current chunk map** | **Partially supported** | 31 candidate root-tree blocks (states) beyond the 4 backup states on every s01 image without trims, 30 complete; generations 3–16 have no block the current chunk map places (EXP-002 §6.3, §6.5; research.md §10.11) | Discovering roots beyond the backups is **not new**: `btrfs-find-root` does it, and Beyond Carving's Algorithm 3 scans the chunk-mapped tree regions for root-tree blocks (`docs/papers/pandey_beyond_carving_2026.pdf` §VI.E.1). What is ours: scanning unmapped gaps (and DATA with `--full-sweep`), per-copy validation, the candidate definition (N8), completeness and failure classes. Survival is a balance and short-life artefact (EXP-002 §6.5). A head-to-head count against find-root and a Beyond Carving-style scan is M7 |
 | N6 | **Discard's effect on surviving metadata history** | **Supported now, as an observation** | EXP-000 (N = 15): sync keeps 8.7 % of stale blocks; async with a quick unmount equals no discard. EXP-002: under sync, 2 of 35 candidate root-tree blocks, 0 backup-reachable blocks, 6 of 14 distinct slot blocks survive; no block freed by the kernel during the scenario survives | Virtio TRIM on a sparse raw file, not an SSD; one scenario; quick unmount only; mechanism read from source. `TODO:` survey prior work on TRIM and SSD forensics (research.md has none) before claiming novelty |
 | N7 | **Tools that assume crc32c silently find nothing on other checksum types** | **Supported for the legacy prototype only** | EXP-001: legacy accepts 0 blocks and lists 0 files on xxhash64, sha256 and blake2b images (rejects 368, 402, 368) | Framed as a regression proof of our own prototype, it is weak. Generalising needs baseline runs (M7). research.md §10.2 notes SecurityRonin's README mentions crc32c only, and §10.6 item 9 reads crc32c-only verification in the `btrfs-core` 0.1.5 crate source: neither was run, so do not claim they fail |
 | N8 | **A candidate-root definition hardened against a planted higher-level block** | **Partially supported** | Candidates are unreferenced blocks at any level; a planted checksum-valid owner-1 level-7 block no longer hides the real roots of its generation, and is flagged `level_consistent: false` (catalog.md M2b review fix 4; `test_a_planted_higher_level_block_does_not_hide_the_root_tree_leaves_of_its_generation`) | One attack class, synthetic tests only. A residual vector is documented: a forged newer parent can still mark an older block as referenced (catalog.md M2b review fix 4). The "highest level per generation" rule it replaces is the one find-root and Beyond Carving use. Do **not** call it "forgery-resistant" (§13) |
@@ -288,7 +288,7 @@ Sources: research.md §2, §4, §6, §10.1, §10.2; plan.md §1 and §8.
 
 - **Beyond Carving** (Pandey et al., 2026, IEEE Access). Deterministic deleted-file listing and
   extent-accurate recovery. **Its discovery is not bounded by the backup roots**
-  (`docs/Beyond_Carving_…pdf`; correction recorded in research.md §10.12). Algorithm 3 runs "for
+  (`docs/papers/pandey_beyond_carving_2026.pdf`; correction recorded in research.md §10.12). Algorithm 3 runs "for
   each candidate tree block b in mapped tree regions", keeps owner-1 blocks with a generation below
   the current one and, per generation, the highest-level block; §VI.E.1: the method "scans
   filesystem regions mapped to Btrfs tree blocks using the chunk tree". §X.G: discovery "does not
@@ -1000,7 +1000,7 @@ command, no EXP record yet: promote), **Not ready** (numbers from scratch script
 | 20 | 512.2 MB/s cold at 100 % density; ≈ 27 µs per candidate | Abstract A; §5.6 | EXP-003 §6.1 | `bench_scan.py sweep-generate; sweep-run --runs 5` | Ready, but measured on a dirty tree: re-run on a clean commit before submission |
 | 21 | Planted level-7 block no longer hides roots | §5.5.3; N8 | catalog.md M2b review fix 4 | `uv run pytest -q tests/test_scan_roots.py -k planted` | Ready-det (synthetic) |
 | 22 | Hostile walk 422.22 s → 2.82 s; memory 89.3 MB → 2.3 MB | not used | catalog.md M2b / M2a review fixes | scripts under `images/scratch/` (not committed) | Not ready |
-| 23 | Beyond Carving scans chunk-mapped tree regions for historical roots (not backup-root-bounded), reads the first stripe only and describes no tree-block checksum validation | §5.3 | `docs/Beyond_Carving_…pdf` Alg. 3, §VI.E.1, §X.G, §X.H.7; research.md §10.12 | — | Ready as a citation (Appendix A item 1 resolved 2026-09-15) |
+| 23 | Beyond Carving scans chunk-mapped tree regions for historical roots (not backup-root-bounded), reads the first stripe only and describes no tree-block checksum validation | §5.3 | `docs/papers/pandey_beyond_carving_2026.pdf` Alg. 3, §VI.E.1, §X.G, §X.H.7; research.md §10.12 | — | Ready as a citation (Appendix A item 1 resolved 2026-09-15) |
 | 24 | 21/71 orphans outside the chunk map | C6 | plan.md §1 C6; catalog.md 2026-08-14 vs M2a | `uv run btrfska scan sandbox.img` | **CHECK** (Appendix A item 6) |
 | 25 | File-level deleted-file recovery rate | Abstract B | none | — | Blocked (M4, M7) |
 | 26 | Beyond-4-generations file recovered only from orphan nodes/items | Abstract B | none | — | Blocked (M4, M7); **CHECK** test design (Appendix A item 2) |
@@ -1013,11 +1013,11 @@ command, no EXP record yet: promote), **Not ready** (numbers from scratch script
 
 ## 9. Figures and tables plan
 
-The files in `diagrams/` (`arch.png`, `cow.png`, `extract.png`, `future.png`, `leaf_layout.png`,
-committed in `1b850c2`) date from the prototype. `arch.png` shows the legacy brute-force pipeline
-(stages 1–5), not the architecture built in M1–M2, so it must not be reused as the method figure.
-`cow.png` is a generic two-box copy-on-write sketch; redraw it with the superblock, backup ring and
-chunk map.
+The prototype's diagrams (`arch.png`, `cow.png`, `extract.png`, `future.png`, `leaf_layout.png`,
+committed in `1b850c2` under `diagrams/`) were removed from the repository on 2026-09-21; they remain
+in the git history. `arch.png` showed the legacy brute-force pipeline (stages 1–5), not the
+architecture built in M1–M2, and `cow.png` was a generic two-box copy-on-write sketch. Every figure
+below is drawn new; the copy-on-write figure needs the superblock, backup ring and chunk map.
 
 | # | Figure or table | What it shows | Data source | Producible now? |
 |---|---|---|---|---|
@@ -1170,7 +1170,7 @@ catalog review subsections.
 ### 12.1 BibTeX
 
 Fields come from research.md (§2, §4, §10.1, §10.2) and, where noted, from the first pages of the
-PDFs in `docs/`. Entries whose note says "Crossref" were checked against `api.crossref.org` (and
+PDFs in `docs/papers/`. Entries whose note says "Crossref" were checked against `api.crossref.org` (and
 doi.org) on 2026-09-15. `TODO` marks a missing field; never fill it from memory. Software entries give the
 version or date research.md records.
 
@@ -1183,7 +1183,7 @@ version or date research.md records.
   pages   = {120632--120660},
   year    = {2026},
   doi     = {10.1109/ACCESS.2026.3713173},
-  note    = {Open access, CC BY 4.0. Authors' version in docs/}
+  note    = {Open access, CC BY 4.0. Authors' version in docs/papers/}
 }
 
 @article{bhat2018forensic,
@@ -1226,7 +1226,7 @@ version or date research.md records.
   pages   = {Article 9},
   year    = {2013},
   doi     = {10.1145/2501620.2501623},
-  note    = {Crossref: vol. 9, issue 3, 32 pp. Article number from the ACM PDF in docs/btrfs-journal.pdf, p. 1}
+  note    = {Crossref: vol. 9, issue 3, 32 pp. Article number from the ACM PDF in docs/papers/rodeh_btrfs_linux_btree_filesystem_2013.pdf, p. 1}
 }
 
 @article{rodeh2008btrees,
@@ -1249,7 +1249,7 @@ version or date research.md records.
   pages   = {S76--S85},
   year    = {2017},
   doi     = {10.1016/j.diin.2017.06.003},
-  note    = {DFRWS USA 2017. Crossref verified. docs/ holds the slide deck, not the article}
+  note    = {DFRWS USA 2017. Crossref verified. docs/papers/ holds the slide deck, not the article}
 }
 
 @article{hilgert2018multidevice,
@@ -1260,7 +1260,7 @@ version or date research.md records.
   pages   = {S21--S29},
   year    = {2018},
   doi     = {10.1016/j.diin.2018.04.020},
-  note    = {DFRWS USA 2018. DOI read from the PDF in docs/, not recorded in research.md: verify}
+  note    = {DFRWS USA 2018. DOI read from the PDF in docs/papers/, not recorded in research.md: verify}
 }
 
 @article{hilgert2024stacked,
@@ -1271,7 +1271,7 @@ version or date research.md records.
   pages   = {301678},
   year    = {2024},
   doi     = {10.1016/j.fsidi.2023.301678},
-  note    = {DFRWS EU 2024. DOI read from the PDF in docs/, not recorded in research.md: verify}
+  note    = {DFRWS EU 2024. DOI read from the PDF in docs/papers/, not recorded in research.md: verify}
 }
 
 @phdthesis{hilgert2025phd,
@@ -1661,7 +1661,7 @@ Resolved items stay in the list, marked, so that their numbers remain valid poin
      "A tool bounded by the four backup roots (plan.md §1) sees generations 35–38 only".
    - Against: research.md §4.1 (Algorithm 3 "scan the image regions the chunk tree maps to tree
      blocks … per generation, retain the block with the highest level"), and the paper itself,
-     `docs/Beyond_Carving_Deterministic_Deleted_File_Recovery.pdf` §VI.E.1 and Algorithm 3 ("scans
+     `docs/papers/pandey_beyond_carving_2026.pdf` §VI.E.1 and Algorithm 3 ("scans
      filesystem regions mapped to Btrfs tree blocks using the chunk tree"; "for each candidate tree
      block b in mapped tree regions").
    - Draft position: SecurityRonin `recover_deleted` and `btrfs restore` without find-root are
@@ -1702,15 +1702,14 @@ Resolved items stay in the list, marked, so that their numbers remain valid poin
    orphaned nodes (21 outside the chunk map)"; research.md §10.5 corrects it to four backup states
    (gens 11–14), and catalog.md M2a reconciles the 71.
 9. **Bhat & Wani size bands.** research.md §4.6 and plan.md §5 M7: files "< 1 KiB and > 4 KiB recover
-   best, 2–4 KiB worst". The paper's abstract (`docs/Forensic analysis of B-tree file system (Btrfs)
-   - 1-s2.0-S1742287618302135-main.pdf`, p. 1): "files with size 3–4 KB have least chances of
+   best, 2–4 KiB worst". The paper's abstract (`docs/papers/bhat_wani_forensic_analysis_btrfs_2018.pdf`, p. 1): "files with size 3–4 KB have least chances of
    recovery". Read the body before citing either band.
 10. **Toolan & Humphries citation.** research.md §4.4 and §4.8 cite the SSRN preprint (DOI
     10.2139/ssrn.7138910); research.md §10.1 and plan.md §1/§8 say to use FSI:DI 58:302198. Use the
     journal version.
 11. **Resolved 2026-09-15 in research.md §4.4 (Schwietert & Hilgert, FSI:DI 57:302123).**
     **Author order of "Mind the slack?".** research.md §4.4 table: "Hilgert & Schwietert 2026";
-    research.md §4.7 and the PDF (`docs/hilgert_mind_the_slack_2026.pdf`): Schwietert, Hilgert.
+    research.md §4.7 and the PDF (`docs/papers/schwietert_hilgert_mind_the_slack_2026.pdf`): Schwietert, Hilgert.
 12. **dissect.btrfs as foundation.** research.md §1 item 3, §2.2 and §3 still present dissect.btrfs as
     the substrate to import; plan.md §3.5 makes it a test oracle only (annotated in research.md, but
     the §3 table is not).

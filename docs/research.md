@@ -5,7 +5,7 @@
 > Companion docs: [`plan.md`](plan.md) (build plan), [`catalog.md`](catalog.md)
 > (development history).
 >
-> **Paper library:** 18 papers are downloaded and read in `docs/`. Per-paper
+> **Paper library:** 18 papers are downloaded and read in `docs/papers/`. Per-paper
 > digests: §4.1 (Beyond Carving), §4.6 (the 5 foundational originals), §4.7
 > (the 13 newly downloaded, grouped by theme). §4.8 lists 6 relevant papers
 > that could not be downloaded from this environment (paywall/Cloudflare),
@@ -231,7 +231,7 @@ foundation.
 **Pandey, Jain & Shetty, "Beyond Carving: Deterministic Deleted File
 Recovery in Btrfs", IEEE Access 14:120632–120660, DOI
 10.1109/ACCESS.2026.3713173** — received 2026-06-13, published 2026-07-14,
-**open access (CC BY 4.0)**. PDF in `docs/`. Read cover to cover 2026-08-17.
+**open access (CC BY 4.0)**. PDF in `docs/papers/`. Read cover to cover 2026-08-17.
 
 **Who:** Manipal Institute of Technology, India — an **undergraduate**
 CTF/security team (lead author Krish Pandey, B.Tech expected 2027; project
@@ -381,7 +381,7 @@ literature after 2018 is essentially the Hilgert line plus btrfs papers.
 
 ### 4.6 Foundational-paper technical digests (load-bearing facts)
 
-Distilled from full-text reads of the PDFs in `docs/`. These are the facts
+Distilled from full-text reads of the PDFs in `docs/papers/`. These are the facts
 the implementation and paper actually lean on.
 
 **Rodeh, Bacik & Mason 2013 — the design (why orphans exist).**
@@ -482,13 +482,13 @@ destroy evidence when opened naively.
 
 ### 4.7 Local paper library — digests of newly downloaded papers (2026-08-17)
 
-All PDFs below live in `docs/` and were read in full. Grouped by theme.
+All PDFs below live in `docs/papers/` and were read in full. Grouped by theme.
 The five originals (Beyond Carving, Bhat & Wani 2018, Wani 2020, Rodeh 2013,
-Hilgert 2018) are digested in §4.1 and §4.6. **18 papers total in `docs/`.**
+Hilgert 2018) are digested in §4.1 and §4.6. **18 papers total in `docs/papers/`.**
 
 #### A. Btrfs recovery tools & methods (the competitors and the antecedent)
 
-**`metarecoverx_2026.pdf`** — Chaudhary, Panchal, Tak & Kumar, "MetaRecoverX:
+**`chaudhary_metarecoverx_2026.pdf`** — Chaudhary, Panchal, Tak & Kumar, "MetaRecoverX:
 Recovery of Deleted Data and Associated Metadata from XFS and Btrfs
 Filesystems", IJISRT 11(4):997–1003, 2026 (OA). A Python tool (argparse CLI +
 PyQt6 GUI) unifying signature carving (16+ types), metadata extraction
@@ -505,7 +505,7 @@ carving, and its btrfs metadata number (79%) drops further across
 snapshot/inode-reassignment boundaries. Reuse its scenario design + metric
 definitions for comparability; **85/79% is the bar to beat**.
 
-**`dmpedia_xfs_btrfs_recovery_2026.pdf`** — Pratyashrit, Sharma &
+**`pratyashrit_dmpedia_xfs_btrfs_recovery_2026.pdf`** — Pratyashrit, Sharma &
 Sathiyasuntharam, DMPedia LNMR (IMPACT-26) 1:347–353, 2026 (OA). Allied
 group / precursor to MetaRecoverX. Sequential workflow: read-only mount →
 FS detection (`testdisk`) → FS-specific parsing (btrfs: B-trees, chunks,
@@ -518,7 +518,7 @@ motivation ("btrfs metadata recovery across snapshots is unsolved");
 differentiate on depth (they have no principled orphan-node algorithm).
 Adopt their read-only-mount discipline + corruption scenario.
 
-**`wani_bhat_dib_2018.pdf`** ⭐ — Wani & Bhat, "Dataset for forensic analysis
+**`wani_bhat_btrfs_dataset_2018.pdf`** ⭐ — Wani & Bhat, "Dataset for forensic analysis
 of B-tree file system", Data in Brief 18:2013–2018, 2018 (OA, the companion
 to Bhat & Wani 2018). The direct antecedent of our approach: a **6-step
 recovery procedure** extracting **Orphan_Items** (records persisting beyond a
@@ -570,7 +570,7 @@ files/old versions survive as unreferenced-but-intact subtrees; per-root
 generation gives chronological ordering; refcount semantics define exactly
 when a block becomes overwrite-eligible (our recoverability reasoning).
 
-**`hilgert_dfrws_2017_pooled_storage.pdf`** — Hilgert, Lambertz & Plohmann,
+**`hilgert_pooled_storage_tsk_slides_2017.pdf`** — Hilgert, Lambertz & Plohmann,
 "Extending The Sleuth Kit … for pooled storage file system forensic
 analysis", Digital Investigation 22:S76–S85, DOI 10.1016/j.diin.2017.06.003 (DFRWS USA 2017,
 Best Paper).
@@ -654,7 +654,7 @@ a "detectable-by-fsck?" baseline. Originally ext4/FAT/NTFS. **Relevance:**
 defines the C/D/S rating vocabulary + fsck-detectability baseline we should
 reproduce; use its repo as a hidden-data generator.
 
-**`hilgert_mind_the_slack_2026.pdf`** — Schwietert & Hilgert, "Mind the slack?
+**`schwietert_hilgert_mind_the_slack_2026.pdf`** — Schwietert & Hilgert, "Mind the slack?
 Reassessing the relevance of file slack in modern forensic investigations",
 FSI:DI 57:302123, DOI 10.1016/j.fsidi.2026.302123 (DFRWS USA 2026, OA camera-ready; framework at
 `anonymous.4open.science/r/mind-the-slack`). Cross-platform slack study over
@@ -693,7 +693,7 @@ session before finalizing the related-work section:
 | **Kim et al. — verified obtained** (see §4.7 D) | — | (resolved) |
 | **Lee et al., "ExtSFR", MTAP 79 (2020)** (DOI 10.1007/s11042-019-7199-y) | DB-backed scan-once-query-many precedent for our SQLite catalog | Springer paywall; no OA; sci-hub unreachable |
 | **Vaheed Ali et al., IEEE ICPCSN 2025** (DOI 10.1109/ICPCSN65854.2025.11035132) | Companion to MetaRecoverX/DMPedia (XFS+Btrfs recovery) | IEEE paywall; no OA/sci-hub copy |
-| **Hilgert, PhD "Contemporary File System Forensic Analysis", Bonn 2025** (handle 20.500.11811/13313) | Authority on multi-device btrfs pool reconstruction + CoW-tree traversal | Host `bonndoc.ulb.uni-bonn.de` unreachable (TCP timeout); companion works `hilgert_*` already in `docs/` cover much of it |
+| **Hilgert, PhD "Contemporary File System Forensic Analysis", Bonn 2025** (handle 20.500.11811/13313) | Authority on multi-device btrfs pool reconstruction + CoW-tree traversal | Host `bonndoc.ulb.uni-bonn.de` unreachable (TCP timeout); companion works `hilgert_*` already in `docs/papers/` cover much of it |
 
 ---
 
@@ -1032,8 +1032,8 @@ marked):**
 
 **No PDFs were downloaded in this refresh.** Every relevant OA candidate
 (Toolan & Humphries 2026, Plum & Dewald 2018, Oh & Hwang 2025) was blocked by
-publisher bot protection; `docs/` still holds the 18 papers of 2026-08-17.
-Note: the `docs/*.pdf` files are **tracked in git**, not ignored.
+publisher bot protection; `docs/papers/` still holds the 18 papers of 2026-08-17.
+Note: the `docs/papers/*.pdf` files are **tracked in git**, not ignored.
 
 **Claim-by-claim status (literature + tools combined):**
 
@@ -1593,7 +1593,7 @@ block-group tree (objectid 11).
   `m1-prototype` (pushed to origin) and the branch kept.
 - (d) Obtain the three blocked OA papers (Toolan & Humphries 2026, Plum &
   Dewald 2018, Oh & Hwang 2025) via a browser session.
-- (e) Should the `docs/*.pdf` files stay tracked in git (they are, contrary
+- (e) Should the `docs/papers/*.pdf` files stay tracked in git (they are, contrary
   to earlier notes)?
 
 ### 10.7 Format notes from M1a (2026-09-15)
@@ -2228,7 +2228,7 @@ text in plan.md §1, §5 M7 and §8 and in §10.1, §10.6, §10.7, §10.10 and �
 Carving backup-root-bounded (≤ 4 generations). That was wrong; §4.1 already described its discovery
 correctly. Those places are corrected, each pointing here.
 
-- **What the paper says** (`docs/Beyond_Carving_Deterministic_Deleted_File_Recovery.pdf`):
+- **What the paper says** (`docs/papers/pandey_beyond_carving_2026.pdf`):
   - Algorithm 3: "for each candidate tree block b in mapped tree regions"; a block is kept when its
     owner is 1 and its generation is below the current one, and per generation the highest level
     wins;
