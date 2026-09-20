@@ -20,6 +20,40 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — EXP-004: old-root discovery against btrfs-find-root
+
+- **Branch:** `feature/exp004-findroot` (from `main` at `1da2165`). New `experiments/EXP-004.md`,
+  `experiments/exp004.py`, `tests/test_exp004.py`; results applied in paper-draft.md (N5, §5.3,
+  Table T-1, traceability row 29, G5, G9), plan.md §8 and research.md §10.14. No change under `src/`.
+- **Why:** the paper draft ranks this as cheap and blocking (G5, G9). `btrfs-find-root` has found
+  old roots since 2011, so old-root discovery can be claimed only where find-root cannot do it.
+- **Registered first.** find-root's scan range was read from its source: the metadata block groups
+  of the *current* chunk map, read through that map, keeping per generation the owner-1 blocks at
+  the highest level seen. Three predictions were committed in `7201bfe` before anything ran: P1,
+  find-root prints exactly btrfska's root-tree blocks inside the current map; P2, nothing outside
+  it; P3, every btrfska state inside the map is also in find-root's output.
+- **Method.** 14 corpus images and `sandbox.img`. find-root (pinned btrfs-progs 6.6.3) ran on a
+  sparse copy that was hashed before and after; btrfska ran `discover_image(full_sweep=True)` on
+  the original. The script was committed (`9923af6`) and the measurement repeated on a clean tree.
+- **Result: all three predictions held on 13 of 13 comparable images.** find-root printed 229 of
+  229 states inside the current chunk map and 0 of 133 outside it; it printed no block btrfska had
+  not indexed. On the s01-type images find-root reaches generations 17–38 (18 generations beyond
+  the four backups) and btrfska adds generations 3–16, written before the final balance.
+- **Consequence for the paper.** "Finds roots older than the backup roots" is not new and is not
+  claimed. What is claimed is discovery **outside the current chunk map**, plus what btrfska records
+  about any root (per-copy validation, completeness, failure classes), whose value this experiment
+  does not measure.
+- **Side results.** `m1_mirror_damage` (primary superblock zeroed): find-root cannot open it;
+  btrfska reads a mirror and reports the same 35 states as on the undamaged image (one image).
+  `m1_unknown_incompat`: both tools refuse. find-root left its copy unchanged on 15 of 15 images.
+  The host's find-root 7.1 printed the same lines as the pinned 6.6.3 on the two images tried.
+- **Not shown:** whether outside-map states yield recoverable files (E-rec); how often such states
+  exist without a final balance (M7, G3); multi-level root trees, where find-root's
+  highest-level rule and btrfska's no-parent rule could select different blocks inside the map.
+- **Verification:** ruff and format clean; `uv run pytest` 742 passed, 0 skipped (7 new tests for
+  the output parser and the P1 rule, none needing an image); `sandbox.img` and all 14 corpus
+  images unchanged (`sha256sum -c`).
+
 ## 2026-09-21 — Four blocked papers read in full: two corrections and one finding
 
 - **Branch:** `docs/four-paper-digests` (from `main` at `63793f9`). Docs only: research.md (new
