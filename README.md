@@ -10,7 +10,9 @@ hidden.
 
 **Status:** M1 (substrate trust layer) and M2 (scan kernel, orphan
 classification, old-root discovery, discard experiments EXP-000 and EXP-002)
-are done. The evidence catalog (M3) comes next. The earlier prototype is
+are done. The evidence catalog (M3) is half done: `catalog build` writes the
+scan, the chunk map, the superblocks and the historical states; leaf items and
+reverse queries follow (M3b). The earlier prototype is
 frozen, still runnable, under `legacy/`.
 - `btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` finds tree
   blocks of the filesystem anywhere on the image, including chunks that have
@@ -22,6 +24,11 @@ frozen, still runnable, under `legacy/`.
   trees excluded), checks that every
   superblock and backup root is rediscovered, and tells blocks reused by
   newer trees apart from damaged ones.
+- `btrfska catalog build IMAGE --db PATH` reads the image once and writes an
+  SQLite evidence database: every candidate tree block with its validation
+  record, the chunk map, the superblock copies, the historical states and the
+  chain of custody. `btrfska catalog info DB` prints a database's scan run.
+  Schema: [`docs/evidence-db.md`](docs/evidence-db.md).
 - `btrfska info IMAGE` validates every superblock copy (all four checksum
   types), selects the best one, and reports disagreements and the backup
   roots by generation. It refuses unsupported or unknown incompat features
@@ -437,6 +444,39 @@ the class earliest in the list above wins:
   generation, checked against what the referrer expects. A present but
   invalid block is therefore `corrupt` or `mismatch`, not `unmapped`.
 
+### `btrfska catalog`
+
+`btrfska catalog build IMAGE --db PATH [--full-sweep] [--workers N] [--no-rehash]`
+scans the image once, read-only, and writes everything `scan` and `roots`
+compute, plus the superblock copies, the chunk map and the scanned regions, to
+one SQLite file. Later analysis queries that file instead of reading the image
+again. [`docs/evidence-db.md`](docs/evidence-db.md) documents every table and
+column, with example queries.
+
+- `PATH` must not exist. A database is never overwritten or updated, so the
+  command can never write over an image or an earlier result; a build that
+  fails leaves no file.
+- The image's SHA-256 is recorded before and after the pass (`scan_runs`), with
+  the tool version, the options and the feature-gate verdict. `--no-rehash`
+  skips the second hash, which is then recorded as unknown. Exit status 1 if
+  the image changed during the pass.
+- A refused format (exit 2) or an image without a valid superblock (exit 2)
+  creates no database. `--allow-unsupported` continues and marks the whole
+  run with `unsupported_format`.
+- btrfs u64 values are stored as signed 64-bit integers, so the high objectids
+  read as btrfs names them: owner `-6` is the log tree.
+
+`btrfska catalog info DB [--json]` opens a database read-only and prints its
+scan run, its row counts, the nodes per class and the number of distinct valid
+blocks. It refuses a file of another schema version or of an unfinished build.
+
+```sh
+uv run btrfska catalog build sandbox.img --db images/scratch/sandbox.db
+uv run btrfska catalog info images/scratch/sandbox.db
+sqlite3 -readonly images/scratch/sandbox.db \
+  "SELECT status, outside_map, COUNT(*) FROM nodes WHERE orphan GROUP BY 1, 2"
+```
+
 ## Tests and lint
 
 ```sh
@@ -512,6 +552,8 @@ uv run --python 3.14 python -m unittest discover -s legacy/tests -v
 - [`catalog.md`](docs/catalog.md): chronological development record.
 - [`paper-draft.md`](docs/paper-draft.md): research paper draft starter at checkpoint M2 (what the
   evidence supports now, evaluation tables, claim-to-evidence traceability, gaps to submission).
+- [`docs/evidence-db.md`](docs/evidence-db.md): the evidence database schema, every table and
+  column, with example queries.
 - [`docs/papers/`](docs/papers/README.md): the paper library, with an index of
   every PDF (citation, DOI, BibTeX key).
 - [`experiments/`](experiments/): one `EXP-NNN.md` record and regeneration

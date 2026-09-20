@@ -7,6 +7,7 @@ import uuid
 from dataclasses import asdict
 
 from btrfska import __version__
+from btrfska.catalog import cli as catalog_cli
 from btrfska.scan.classify import Classified, failure_counts, scan_image
 from btrfska.scan.kernel_numpy import MAX_WORKERS
 from btrfska.scan.roots import State, discover_image
@@ -704,6 +705,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue past unsupported or unknown incompat features (records are flagged)",
     )
     roots_cmd.set_defaults(func=cmd_roots)
+
+    catalog_cli.add_parser(sub)
     return parser
 
 

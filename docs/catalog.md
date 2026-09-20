@@ -20,6 +20,51 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — M3a: the evidence database, built in one pass
+
+- **Branch:** `feature/m3a-evidence-catalog` (from `main` at `c13b098`). New package
+  `src/btrfska/catalog/` (`schema.py`, `db.py`, `build.py`, `cli.py`), `docs/evidence-db.md`,
+  `tests/test_catalog.py`; changed `cli.py` (registers the subcommand), `tests/test_readonly.py`,
+  `README.md`, plan.md M3.
+- **Planned first.** The design went into plan.md M3 in its own commit (`6573af5`) before any code:
+  one database per image, written once; one write site; the physical copy as the unit of
+  evidence; parsed content stored once per distinct block; u64 stored signed; scan once; no empty
+  speculative tables; the split into M3a (this entry) and M3b (items, edges, reverse queries).
+- **What it does.** `btrfska catalog build IMAGE --db PATH` opens the image read-only, scans it
+  once and writes: `scan_runs` (chain of custody: path, size, SHA-256 before and after, tool and
+  schema version, options, gate verdict, superblock geometry, the scan summary), `superblocks`,
+  `chunks` and `stripes`, `regions` (scanned and skipped, covering the image exactly once),
+  `nodes` and `node_checks` (every candidate, valid or not, with all twelve checks), `known_roots`,
+  `states`, `state_copies`, `state_trees`, `walk_failures`, `problems`, and the view `blocks`.
+  `btrfska catalog info DB` prints a database's scan run and counts.
+- **One stream.** The builder wraps the classified scan stream in a generator that writes each
+  candidate and hands its record to `index_records`, so classification, old-root discovery and the
+  database come from a single pass. `scan` and `roots` each rescan (M2b, "Repeated work").
+- **Forensic soundness.** `catalog/db.py` is the only module that creates or opens a database. It
+  refuses any path that exists (a file, a symlink, a directory), so it cannot overwrite an image or
+  an earlier result, and it imports nothing from the image layer (a test asserts both). The
+  read-only test now also bans `sqlite3.connect` everywhere else in `src/`; until now SQLite was a
+  write path the test did not know about. Readers get `mode=ro`. A failed build removes its file; a
+  database without a finished scan run is refused on opening.
+- **u64.** Stored as two's-complement signed integers; `-6` is the log tree and `-9` the data
+  relocation tree, as btrfs names them. `schema.s64` refuses anything that is not a u64.
+- **Numbers** (Fedora 44, single runs, indicative). `sandbox.img`: 0.33 s, 135 KB, 85 nodes, 1 020
+  checks, 26 known roots, 5 states, 38 state trees. The project's golden numbers are now one query
+  each: 71 legacy orphans of which 21 outside the map; 20 live, 34 backup-reachable, 30
+  unreferenced, 1 invalid; 52 distinct valid blocks.
+- **Verification.** For `sandbox.img` and 13 corpus images (all four checksum types, the log tree,
+  damaged nodes, a zeroed primary superblock, the discard trio) the database equals independent
+  `scan_image` and `discover_image` runs row for row: nodes, every check, classes, states, state
+  trees, known roots, walk failures and the distinct-block count. Also tested: a second build to
+  the same path is refused and leaves the file byte-identical; a build that fails midway leaves
+  no file; an image without a valid superblock and a refused format create no database;
+  `--allow-unsupported` records `OVERRIDDEN`; every table and column of the DDL is documented in
+  `docs/evidence-db.md`. `uv run pytest`: 782 passed, 0 skipped (35 new in `test_catalog.py`, 5 in
+  `test_readonly.py`). Ruff and format clean. `sandbox.img` and all 14 corpus images unchanged.
+- **Not done yet (M3b).** No leaf items, key pointers or tree edges, so the four reverse queries of
+  the milestone's definition of done are not answerable yet. The builder holds the block index in
+  memory, as `roots` does; on a very large image that is the limit, not the database.
+
 ## 2026-09-21 — EXP-004: old-root discovery against btrfs-find-root
 
 - **Branch:** `feature/exp004-findroot` (from `main` at `1da2165`). New `experiments/EXP-004.md`,
