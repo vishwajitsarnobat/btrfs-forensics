@@ -4,8 +4,6 @@ btrfska's scan plan and prefilter, so it is not an independent re-implementation
 discovery per discard mode. Each image is the
 representative run of its mode (corpus/manifest.tsv); tests skip when it is absent."""
 
-import re
-
 import pytest
 
 from btrfska.cli import main
@@ -15,7 +13,7 @@ from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
 from experiments.exp002 import probe_columns, probe_compat
 from tests.helpers import SCENARIOS
-from tests.test_vm_images import manifest_rows
+from tests.test_vm_images import assert_unchanged_since_built, manifest_rows
 
 pytestmark = pytest.mark.vm
 
@@ -38,12 +36,12 @@ def image(mode: str):
 def test_manifest_lists_the_discard_trio():
     rows = manifest_rows()
     for mode, name in TRIO.items():
-        assert re.fullmatch(r"[0-9a-f]{64}", rows[name]["sha256"])
         assert f"discard_{mode}.sh" in rows[name]["command"]
-        path = SCENARIOS / f"{name}.img"
-        if path.exists():
-            with open_image(path) as img:
-                assert img.sha256() == rows[name]["sha256"]
+
+
+@pytest.mark.parametrize("mode", TRIO)
+def test_trio_image_is_unchanged_since_it_was_built(mode):
+    assert_unchanged_since_built(image(mode))
 
 
 @pytest.mark.parametrize("mode", TRIO)
