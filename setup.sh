@@ -31,7 +31,7 @@ echo "== 1/4 Python environment"
 uv sync --locked
 
 echo "== 2/4 sandbox.img"
-if ! sha256sum -c --quiet tests/fixtures/SHA256SUMS 2>/dev/null; then
+if ! { [ -f sandbox.img ] && sha256sum -c --quiet tests/fixtures/SHA256SUMS >/dev/null 2>&1; }; then
     zstd -dc tests/fixtures/sandbox.img.zst > sandbox.img
     sha256sum -c tests/fixtures/SHA256SUMS
 fi
