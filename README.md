@@ -503,6 +503,9 @@ uv run --python 3.14 python -m unittest discover -s legacy/tests -v
 
 ## Documentation
 
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): the rules for working on this
+  repository (branch and pull-request workflow, definition of done,
+  reproducibility, evidence and numbers, cost). Read it first.
 - [`plan.md`](docs/plan.md): build plan (architecture, stack, migration,
   milestones, test policy, experiment protocol).
 - [`research.md`](docs/research.md): verified prior-art and gap analysis.
