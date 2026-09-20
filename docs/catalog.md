@@ -20,6 +20,56 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — One-command setup: recipe manifest, corpus/build.py, setup.sh, corpus CI job
+
+- **Branch:** `feature/one-command-corpus` (from `main` at `063fb88`). New: `setup.sh`,
+  `corpus/build.py`, `tests/test_corpus_build.py`. Changed: `corpus/manifest.tsv`,
+  `tests/test_vm_images.py`, `tests/test_discard_trio.py`, `.github/workflows/ci.yml`, `README.md`,
+  `corpus/vm/README.md`, plan.md §6.1–§6.2. No change under `src/`.
+- **Why:** the goal is that anyone can clone the repository and reach a complete, tested checkout
+  in a few minutes by running the scripts provided. Two things stood in the way. Building the
+  corpus meant copying fourteen commands out of the manifest by hand, in the right order. And the
+  manifest recorded the sha256 of one particular build of each image, which no one can reproduce:
+  every mkfs draws a new filesystem UUID, so twelve tests failed on any rebuilt corpus (previous
+  entry). The first host's images no longer exist, so those hashes described nothing obtainable.
+
+**What changed.**
+- `corpus/manifest.tsv` is now a recipe: `name`, `command`, `mkfs`, `guest_kernel`, `note`. The
+  `sha256` column is gone, `host_mkfs` became `mkfs` (the pinned 6.6.3), and every `command` is
+  purely executable (the prose that followed the three discard commands moved to `note`). Rows are
+  in build order.
+- `corpus/build.py` checks the host (each missing tool is named with the package that provides it
+  on Debian/Ubuntu, Fedora, Arch and openSUSE; `/dev/kvm` access is checked), fetches the pinned
+  bundle, builds the initramfs and runs every row's command. It skips images that exist
+  (`--force` rebuilds, names select rows, `--check` only checks the host) and records the sha256 of
+  what it built in the gitignored `images/scenarios/SHA256SUMS` (`sha256sum -c` format).
+- The two hash tests now compare each local image with that local record
+  (`test_local_image_is_unchanged_since_it_was_built`, `test_trio_image_is_unchanged_since_it_was_built`)
+  and skip when an image has no record. Their purpose is kept: an image modified after it was built
+  fails. The EXP-000/001/002 records still cite the hashes of the instances they measured; those
+  are evidence of what was measured, not something to rebuild.
+- `setup.sh`: `uv sync --locked`, restore and verify `sandbox.img`, `corpus/build.py`, ruff, the
+  whole test suite. `--no-corpus` skips the images for hosts without KVM.
+- CI gets a second job, `corpus`, that runs `./setup.sh` on a clean `ubuntu-24.04` runner with KVM
+  enabled (the pinned `.deb` files are cached by the hash of `guest.lock`) and fails if any vm test
+  was skipped for a missing image. plan.md §6.1 said vm tests were local only; it is revised, and
+  §6.2 gains the reproducibility target every later scenario and baseline tool must keep.
+
+**Verification** (Fedora 44, QEMU 10.2.2, NVMe; single runs, timings indicative).
+- Corpus from an empty `images/` folder, 190 MB download included: 14 images in 92 s; each
+  guest-driven image takes 1.0–1.2 s and each derived image about 2.1 s.
+- **Fresh clone of the branch into an empty folder, then `./setup.sh`: 14 images built, 734 passed,
+  0 skipped, 143 s in total.**
+- A second `corpus/build.py` run builds nothing (14 already present). Flipping one byte of
+  `m1_zlib.img` makes its unchanged-since-built test fail; restoring the image makes
+  `sha256sum -c SHA256SUMS` pass for all 14.
+- `tests/test_corpus_build.py` (7 tests, no image or VM needed): the manifest has exactly the five
+  columns and no 64-hex string, every command runs a tracked script and names its own image, a
+  derived image comes after its source, the build record round-trips in `sha256sum` format, the
+  host check names the missing tool, and an unknown image name is refused before anything runs.
+- Ruff and format clean; `sh -n` clean on `setup.sh` and every corpus script; `sandbox.img` sha256
+  unchanged.
+
 ## 2026-09-21 — corpus/vm runs on any Linux distribution
 
 - **Branch:** `feature/portable-corpus-vm` (from `main` at `d3f499b`). Changes under `corpus/vm/`
