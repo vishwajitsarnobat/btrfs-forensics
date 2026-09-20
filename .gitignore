@@ -12,8 +12,8 @@ wheels/
 # User added
 sandbox.img
 
-# Reference paper PDFs in docs/ are tracked; catalog.md, plan.md and
-# research.md live at the repo root.
+# Reference paper PDFs live in docs/papers/; catalog.md, plan.md,
+# research.md and paper-draft.md live in docs/.
 
 # Generated test images, mount points, VM tooling and scratch files (never outside the repo)
 images/

@@ -20,6 +20,59 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — Repository layout and paper library
+
+- **Branch:** `chore/repo-structure` (from `main` at `e86fd34`). No change under `src/`, `tests/`,
+  `corpus/` or `experiments/`.
+- **Why:** the repository root held four large documents next to the code, `docs/` held PDFs under
+  publisher download names, and four requested papers had arrived. Anyone opening the repository
+  should find the code at the root and everything to read in one place.
+
+**Layout.** Entries below this one keep the old paths, as written at the time.
+- `plan.md`, `research.md`, `catalog.md` and `paper-draft.md` moved from the root to `docs/`. The
+  basenames are unchanged, so prose citations such as "plan.md §5" still hold. `README.md` stays at
+  the root: GitHub shows it there and `tests/test_cli.py` reads it.
+- `recovery_output/` (8 files of legacy prototype output) removed from the index. The M0 entry
+  records this as done, but no commit ever did it: the files were still tracked at `e86fd34`. They
+  are regenerable with `legacy/main.py` and stay gitignored.
+- `diagrams/` (five prototype-era PNGs) deleted. `paper-draft.md` §9 already ruled out reusing them:
+  `arch.png` and `future.png` show the abandoned brute-force pipeline and `leaf_layout.png` draws a
+  leaf as a flowchart. They remain in the history (`1b850c2`).
+- `major-project.jpg` (the signed project proposal) stays at the root.
+
+**Paper library.** All PDFs moved to `docs/papers/` and named
+`firstauthor[_secondauthor]_short_topic_year.pdf`. A new index, `docs/papers/README.md`, lists every
+file with its citation, DOI, BibTeX key and open-access status, grouped by theme. Renames:
+
+  | Old name (in `docs/`) | New name (in `docs/papers/`) |
+  |---|---|
+  | `00-An analysis of anti-forensic capabilities of B-tree file system _Btrfs_.pdf` | `wani_antiforensic_btrfs_2020.pdf` |
+  | `Beyond_Carving_Deterministic_Deleted_File_Recovery.pdf` | `pandey_beyond_carving_2026.pdf` |
+  | `btrfs-journal.pdf` | `rodeh_btrfs_linux_btree_filesystem_2013.pdf` |
+  | `dmpedia_xfs_btrfs_recovery_2026.pdf` | `pratyashrit_dmpedia_xfs_btrfs_recovery_2026.pdf` |
+  | `Forensic analysis of B-tree file system (Btrfs) - 1-s2.0-S1742287618302135-main.pdf` | `bhat_wani_forensic_analysis_btrfs_2018.pdf` |
+  | `hilgert_dfrws_2017_pooled_storage.pdf` | `hilgert_pooled_storage_tsk_slides_2017.pdf` |
+  | `hilgert_mind_the_slack_2026.pdf` (first author is Schwietert) | `schwietert_hilgert_mind_the_slack_2026.pdf` |
+  | `metarecoverx_2026.pdf` | `chaudhary_metarecoverx_2026.pdf` |
+  | `paper_forensic_analysis_of_multiple_device_btrfs_configurations_using_the_sleuth_kit.pdf` | `hilgert_multidevice_btrfs_tsk_2018.pdf` |
+  | `wani_bhat_dib_2018.pdf` | `wani_bhat_btrfs_dataset_2018.pdf` |
+
+
+  The other eight PDFs kept their names. References in `research.md` and `paper-draft.md` follow the
+  new names.
+- **Four papers added** (the blocked list of research.md §4.8 and paper-draft.md G14):
+  `toolan_humphries_hiding_data_btrfs_2026.pdf`, `plum_dewald_apfs_recovery_2018.pdf`,
+  `oh_hwang_f2fs_recovery_2025.pdf` and `lee_extsfr_2020.pdf`. **They are filed, not yet read:** the
+  UNVERIFIED notes on the research.md §8.3 offsets and the "Full text not obtained" BibTeX notes
+  still stand until each paper is digested into research.md §4.
+- **Still missing:** Hilgert's PhD thesis (open access, but `bonndoc.ulb.uni-bonn.de` timed out again
+  on 2026-09-20), Vaheed Ali et al. 2025 (closed access, no repository copy per OpenAlex) and Hraiz
+  2016 (ProQuest). None blocks a milestone.
+
+**Verification.** `uv run ruff check .` and `uv run ruff format --check .` clean; every relative
+link in `README.md` and `docs/*.md` resolves; `uv run pytest` passes with `sandbox.img` present
+(vm-marked tests skip where no image has been generated); `sandbox.img` sha256 unchanged.
+
 ## 2026-09-15 — Checkpoint: paper draft starter
 
 - **Branch:** `docs/paper-draft` (from `main` at `26242a6`). Docs only: `paper-draft.md` (new), this
