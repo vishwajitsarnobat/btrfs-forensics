@@ -5,11 +5,11 @@
 > Companion docs: [`plan.md`](plan.md) (build plan), [`catalog.md`](catalog.md)
 > (development history).
 >
-> **Paper library:** 18 papers are downloaded and read in `docs/papers/`. Per-paper
+> **Paper library:** 22 papers are downloaded and read in `docs/papers/` (18 on 2026-08-17, four
+> more on 2026-09-21, §10.13). Per-paper
 > digests: §4.1 (Beyond Carving), §4.6 (the 5 foundational originals), §4.7
-> (the 13 newly downloaded, grouped by theme). §4.8 lists 6 relevant papers
-> that could not be downloaded from this environment (paywall/Cloudflare),
-> with verified citations + abstracts.
+> (the 13 newly downloaded, grouped by theme), §10.13 (the four read on
+> 2026-09-21). §4.8 lists the 3 relevant works still missing.
 >
 > **Refresh 2026-09-15:** see **§10** (new prior art incl. the
 > `SecurityRonin/btrfs-forensic` Rust library; dissect.btrfs validates
@@ -374,7 +374,7 @@ literature after 2018 is essentially the Hilgert line plus btrfs papers.
 | Work | Citation | Role |
 |---|---|---|
 | Kim, Kim, Shin, Jo, Lee & Shon 2021 | Electronics 10(18):2310, DOI 10.3390/electronics10182310 (OA) | **The evaluation template** (§5.2): before/after images, TSK + UFS Explorer + R-Studio baselines, recovery rate + hash-match accuracy |
-| Lee, Jo, Eo & Shon, "ExtSFR: scalable file recovery framework based on an Ext file system" | Multimedia Tools & Appl. 79(23–24):16093–16111 (2020; online 2019), DOI 10.1007/s11042-019-7199-y (paywalled) | DB-backed scalable ext recovery; 1 TB eval; criticized by Kim et al. for no hash verification |
+| Lee, Jo, Eo & Shon, "ExtSFR: scalable file recovery framework based on an Ext file system" | Multimedia Tools & Appl. 79(23–24):16093–16111 (2020; online 2019), DOI 10.1007/s11042-019-7199-y (paywalled) | Three-phase Ext2/3/4 recovery in C (identify, find deleted, recover); 1 GB and 1 TB evaluation, MD5-exact counts against two tools. **Corrected 2026-09-21 after the full read (§10.13):** it has no database, and it does verify by hash |
 | ForTrace framework | Göbel et al., FSI:DI 40:301344 (DFRWS EU 2022); github.com/dasec/ForTrace; ForTrace++ fork on GitLab | Synthetic user-trace dataset generation (btrfs arrived only via the 2025 IFIP chapter by Göbel, Baier & Türr) |
 | Carrier 2005, *File System Forensic Analysis* | book | Layer model (our scan regions = Carrier's layers) |
 | Hargreaves & Patterson 2012 (timelines); Fairbanks 2012 (ext4); Buchholz & Spafford 2004 (metadata roles) | Digital Investigation | Cite for timeline/confidence framing |
@@ -676,24 +676,22 @@ XFS File System Forensic Framework Based on TSK", Electronics 10(18):2310,
 2021 (OA; downloaded from the `mdpi-res.com` CDN mirror). Our **evaluation
 template**: self-built before/after disk-image pairs, baselines = original
 TSK + UFS Explorer + R-Studio, metrics = **recovery rate + exact-recovery
-accuracy via cryptographic hash match** (the field's correctness criterion,
-which they introduced by criticizing prior work — incl. ExtSFR — for omitting
-it). See §5.2 for the full protocol distilled from this paper.
+accuracy via cryptographic hash match** (the field's correctness criterion;
+they criticise earlier studies for omitting it. Corrected 2026-09-21, §10.13:
+that criticism is not aimed at ExtSFR, which compares MD5 values; their
+objection to ExtSFR is that it predates Ext4 journal checksum v3). See §5.2 for the full protocol distilled from this paper.
 
-### 4.8 Papers identified as relevant but NOT obtainable here
+### 4.8 Papers identified as relevant but not yet obtained
 
-Blocked by paywalls or Cloudflare/host issues from this environment; verified
-citations + abstracts are recorded. Fetch via an institutional/browser
-session before finalizing the related-work section:
+Four papers listed here until 2026-09-21 have since been obtained and read in full: Toolan &
+Humphries 2026, Plum & Dewald 2018, Oh & Hwang 2025 (added in §10.1) and Lee et al. 2020. Their
+digests, and two corrections they forced, are in §10.13. Still missing:
 
-| Paper | Why it matters | Why it failed |
+| Paper | Why it matters | Why it is missing |
 |---|---|---|
-| **Toolan & Humphries, "Hiding Data in Btrfs File Systems", SSRN 2026** (DOI 10.2139/ssrn.7138910) | The definitive six-technique btrfs hiding list w/ exact byte counts | SSRN Cloudflare JS challenge; offsets reconstructed from Schwietert & Hilgert 2025 (§4.7 C, §8.3) |
-| **Plum & Dewald, "Forensic APFS File Recovery", ARES 2018** (DOI 10.1145/3230833.3232808) | Closest CoW analog — recovers deleted files from old APFS checkpoint/object-map versions (tool `afro`) | ACM Cloudflare; no author OA copy found |
-| **Kim et al. — verified obtained** (see §4.7 D) | — | (resolved) |
-| **Lee et al., "ExtSFR", MTAP 79 (2020)** (DOI 10.1007/s11042-019-7199-y) | DB-backed scan-once-query-many precedent for our SQLite catalog | Springer paywall; no OA; sci-hub unreachable |
-| **Vaheed Ali et al., IEEE ICPCSN 2025** (DOI 10.1109/ICPCSN65854.2025.11035132) | Companion to MetaRecoverX/DMPedia (XFS+Btrfs recovery) | IEEE paywall; no OA/sci-hub copy |
-| **Hilgert, PhD "Contemporary File System Forensic Analysis", Bonn 2025** (handle 20.500.11811/13313) | Authority on multi-device btrfs pool reconstruction + CoW-tree traversal | Host `bonndoc.ulb.uni-bonn.de` unreachable (TCP timeout); companion works `hilgert_*` already in `docs/papers/` cover much of it |
+| **Hilgert, PhD "Contemporary File System Forensic Analysis", Bonn 2025** (handle 20.500.11811/13313) | Authority on multi-device btrfs pool reconstruction + CoW-tree traversal | Open access, but `bonndoc.ulb.uni-bonn.de` times out from the development network (2026-08-17, 2026-09-20); the companion works `hilgert_*` in `docs/papers/` cover much of it |
+| **Vaheed Ali et al., IEEE ICPCSN 2025** (DOI 10.1109/ICPCSN65854.2025.11035132) | Companion to MetaRecoverX/DMPedia (XFS+Btrfs recovery) | Closed access; no repository copy (OpenAlex, 2026-09-20). Low priority |
+| Hraiz, "Btrfs Forensic Analysis", thesis, Princess Sumaya Univ. for Technology, 2016 | Possibly foundational (§10.1) | ProQuest login needed; content UNVERIFIED |
 
 ---
 
@@ -885,10 +883,17 @@ sandbox empirical results (catalog.md, 2026-08-14 entry) — especially the
 
 ### 8.3 Hiding-technique target list (Toolan & Humphries offsets → G5 detector)
 
+> **Verified 2026-09-21 against the published paper (§10.13).** Every offset below is the paper's,
+> and every one agrees with our v7.0 tables **except the superblock reserved range**: in kernel
+> v7.0 bytes 0x23B–0x263 hold `metadata_uuid`, `nr_global_roots` and the `remap_root` fields, and
+> only the 199 bytes at 0x264–0x32A are reserved. The detector must derive the reserved ranges
+> from the feature flags. The last two rows are from Göbel et al. 2024 and Schwietert & Hilgert
+> 2025, not from Toolan & Humphries.
+
 | Technique | Location |
 |---|---|
 | Pre-superblock | 0x0–0x10000 |
-| Superblock reserved | 0xF0 bytes at SB+0x23B |
+| Superblock reserved | paper: 0xF0 bytes at SB+0x23B (pre-5.0 layout); v7.0: 0xC7 bytes at SB+0x264, plus feature-gated fields at 0x23B–0x263 |
 | Superblock slack | 0x235 bytes at SB+0xDCB |
 | Chunk-array slack | up to ~0x77F free bytes at SB+0x32B+used |
 | INODE_ITEM reserved | 0x20 bytes at +0x50 |
@@ -1015,7 +1020,9 @@ marked):**
 - **No follow-up** implementing their future work (deep leaf scanning,
   historical chunk tree, deleted subvolumes, csum validation) was found.
 
-**§4.8 retries.**
+**§4.8 retries.** *(State on 2026-09-15. Since then Toolan & Humphries 2026, Plum & Dewald 2018,
+Oh & Hwang 2025 and ExtSFR were obtained and read in full: §10.13, 2026-09-21. `docs/papers/`
+holds 22 papers.)*
 - **Toolan & Humphries:** now FSI:DI (above), but still blocked
   (ScienceDirect/SSRN/ResearchGate 403).
 - **Plum & Dewald ARES 2018:** now listed **gold OA, CC BY** (OpenAlex
@@ -1598,8 +1605,9 @@ block-group tree (objectid 11).
   RST/remap-tree images (in or out of scope for paper 1)?
 - (c) ~~Tag or delete `feature/m1-backup-roots`?~~ Resolved: tagged
   `m1-prototype` (pushed to origin) and the branch kept.
-- (d) Obtain the three blocked OA papers (Toolan & Humphries 2026, Plum &
-  Dewald 2018, Oh & Hwang 2025) via a browser session.
+- (d) ~~Obtain the three blocked OA papers (Toolan & Humphries 2026, Plum &
+  Dewald 2018, Oh & Hwang 2025) via a browser session.~~ Resolved 2026-09-21:
+  obtained and read, with ExtSFR (§10.13).
 - (e) Should the `docs/papers/*.pdf` files stay tracked in git (they are, contrary
   to earlier notes)?
 
@@ -2267,3 +2275,164 @@ correctly. Those places are corrected, each pointing here.
 - **Follow-ups.** The M7 beyond-4-generations test is redesigned to separate the two cases
   (plan.md M7). A near-term `btrfs-find-root -a` head-to-head against `btrfska roots` on the
   existing images is planned (plan.md §8 "Paper-readiness experiments"; `paper-draft.md` §10).
+
+### 10.13 Full-text reads of four papers that had been blocked (2026-09-21)
+
+The four PDFs are in `docs/papers/` and were read cover to cover on 2026-09-21. Where this
+section disagrees with an earlier one, this section is right and the earlier text was corrected in
+place with a pointer here.
+
+**Toolan & Humphries 2026, "Hiding data in Btrfs file systems"**
+(`toolan_humphries_hiding_data_btrfs_2026.pdf`, FSI:DI 58:302198, CC BY, 8 pp.).
+- **Six techniques**, each implemented and rated low/medium/high for capacity, detection difficulty
+  and stability (their Table 3):
+
+  | Technique | Location and size, as the paper gives them | Capacity | Detection difficulty | Stability |
+  |---|---|---|---|---|
+  | Pre-superblock | the first 0x10000 bytes of each device; not checksummed | medium | low | high |
+  | Superblock reserved and slack | "0xF0 bytes at 0x23B" and "0x235 bytes at 0xDCB", 0x325 per copy | low | medium | high |
+  | Chunk-array slack | 0x800 allocated, 0x81 used on every filesystem they built, 0x77F free | low | medium | medium |
+  | INODE_ITEM reserved | 0x20 bytes at offset 0x50 of every inode item | high | medium | high |
+  | STRING_ITEM misuse | a new item of type 0xFD appended to any leaf with free space; `nritems` + 1 | high | high | high |
+  | Internal-node slack | after the key pointers | medium | high | low |
+
+- **Every technique except the first needs the checksum rewritten** (superblock or tree block). Their
+  explanation of Wani et al. 2020's "hidden superblock data are lost on remount": Wani did not
+  update the checksum. With the checksum updated, the data survived every test.
+- **No tool detected anything.** Tests per technique: mount, create, modify, delete, unmount; TSK
+  4.14 `fsstat`, `fls`, `istat`, `icat`; `btrfs check`, `btrfs check --check-data-csum`; `dmesg`. All
+  passed for all six (their Table 1). The detection-difficulty ratings are therefore judgements
+  about a human with a hex viewer, not measurements. Message recovery failed only for
+  internal-node slack.
+- **Internal-node slack did not survive.** They report that when a node is copied on write "the
+  slack space is not copied ... slack space is overwritten by zeros at each copy", so the message
+  remains only in the old, soon unallocated node. **UNVERIFIED against the kernel**, and it matters
+  to claim C1: it says nothing about leaves, where deleting an item moves data and leaves remnants
+  (the legacy prototype recovered such remnants from `sandbox.img`), and the old node is exactly
+  what btrfska reads. To settle in M4: check `btrfs_cow_block` in v7.0 and measure slack content
+  of superseded against live copies of the same node on the corpus.
+- **Correction to Göbel et al. 2024:** the 64 KiB before the second and third superblock copies is
+  not free; their Fig. 1 shows a valid tree node 0x4000 bytes before the copy at 0x4000000. Only
+  the area before the first copy is usable.
+- **Scope:** crc32c only, default `mkfs.btrfs` options, btrfs-progs 6.6.3 and 6.19.1 (Linux Mint
+  22.3, openSUSE 15.6), no difference found between them. Capacity figures come from a Fedora
+  WS 43 install (458 330 files, 57 internal nodes, about 253 free bytes each) and an openSUSE 15.6
+  install (2 794 258 files, 463 internal nodes, about 218 bytes each).
+- **Their future work is our claim C5:** "build a toolkit to detect data hiding in the Btrfs file
+  system ... Many of the evaluated techniques would be very easy to detect, if there were a tool to
+  do so", because reserved areas should be zero and STRING_ITEMs should not exist. They also
+  propose marking extents as allocated to hide data in them, which is not implemented. 20
+  references; Beyond Carving is not among them.
+- **FINDING: the paper's superblock "reserved area" is an old layout.** Checked against
+  `src/btrfska/substrate/ondisk.py`, whose offsets are asserted against the v7.0
+  `btrfs_tree.h` by `tests/test_ondisk.py`:
+
+  | Bytes of the superblock | Paper | Kernel v7.0 |
+  |---|---|---|
+  | 0x23B–0x24A | reserved | `metadata_uuid` (read when incompat METADATA_UUID is set; kernel 5.0) |
+  | 0x24B–0x252 | reserved | `nr_global_roots` (extent-tree-v2) |
+  | 0x253–0x263 | reserved | `remap_root`, `remap_root_generation`, `remap_root_level` (7.0, remap tree) |
+  | 0x264–0x32A | reserved | reserved, 199 bytes |
+  | 0xDCB–0xFFF | slack, 0x235 bytes | padding, 565 bytes: agrees |
+
+  The paper's 0xF0 bytes at 0x23B are the `reserved[30]` of kernels before 5.0, taken from Toolan's
+  2025 book. On a filesystem with none of those features the kernel never reads the bytes, which is
+  why the technique worked for them. For the detector (plan.md M6) the consequence is that
+  **a reserved range is a function of the feature flags, not a constant**: non-zero bytes at
+  0x264–0x32A are always an anomaly, while `metadata_uuid`, `nr_global_roots` and `remap_root*` are
+  anomalies only when non-zero *without* their feature flag. A detector that takes the paper's
+  range literally reports every filesystem changed by `btrfstune -m` or using the remap tree. The
+  remaining offsets agree with our tables: chunk array 0x800 bytes at 0x32B, inode reserved 0x20
+  bytes at 0x50 (after `sequence`), header 0x65 bytes with `nritems` at 0x60, item 25 bytes (17-byte
+  key), STRING_ITEM 0xFD (253). This replaces the UNVERIFIED note on §8.3.
+
+**Plum & Dewald 2018, "Forensic APFS File Recovery"**
+(`plum_dewald_apfs_recovery_2018.pdf`, ARES 2018, 10 pp.; tool AFRO, open source).
+- The closest prior work in spirit: on a copy-on-write filesystem "a history of all files which were
+  not overwritten ... exist", and metadata carving reaches what parsing from the current superblock
+  cannot. Three methods, all scanning 4096-byte blocks and **validating every hit by the object
+  checksum (Fletcher-64)** to remove false positives: container-superblock carving (magic `NXSB`),
+  volume-superblock carving (`APSB`), and node carving (no signature, so object type 2 or 3 plus
+  subtype 0xe). They also follow the chain of older container superblocks in the checkpoint area.
+- **Dataset, public, with ground truth:** five images (2, 5, 10, 100, 500 GB), four volumes each,
+  1 000 random actions each (add, delete, move, change, clone file; add, remove folder; files from
+  EDRM File Formats 1.0), `F_FULLFSYNC` after 20 % of the actions and a detach/attach every 100. The
+  ground truth holds every item in every state.
+- **Metric: the share of all file *states* recovered with name, times, size and MD5 all matching.**
+  The denominator is every state that ever existed, which they state is an unreachable upper bound
+  because not every change reaches the disk. Parsing 14.1 %, NXSB carving 19.7 %, APSB carving
+  35.2 %, node carving 34.5 % (their Table 14). Content against PhotoRec: 42.6 % against 8.1 %
+  (Table 16). Runtime is linear in image size: 500 GB in about 41 min from a USB 3.0 SSD.
+- **Why node carving lost:** APFS nodes carry no volume, and file ids are unique per volume only, so
+  inode and extent entries from carved nodes are joined ambiguously. **Btrfs does not have this
+  problem:** every tree block header carries `owner`, `generation` and the fsid.
+- Not handled: snapshots, encryption, compression, unclean images.
+- **Relevance.** Analog of C1/C3 on APFS; cite with Prade 2020 and Bonnet 2026 (ReFS). Their
+  state-based denominator is the right metric for our timelines (M5): recovery of *deleted files*
+  under-counts what a tool that reconstructs history recovers. Their action generator (random
+  actions, forced sync points, a ground-truth log of every state) is a model for the M7 "aged"
+  scenarios.
+
+**Oh & Hwang 2025, "Advanced forensic recovery of deleted file data in F2FS"**
+(`oh_hwang_f2fs_recovery_2025.pdf`, FSI:DI 54:301976, DFRWS APAC 2025, CC BY-NC-ND, 9 pp.).
+- On deletion F2FS clears the directory entry's bitmap bit (the entry itself stays) and **zeroes the
+  block address in the node address table (NAT)**; the node and data blocks stay until garbage
+  collection. So the inode is found by carving, but for files above about 3.7 MB the index blocks
+  cannot be resolved, because the table that maps node ids to addresses no longer does.
+- Their algorithm: unallocated areas from the segment information table; **carve node blocks by
+  seven conditions on the 24-byte node footer**; identify inodes by five conditions; among blocks
+  with the same node id and inode number **keep the one with the largest checkpoint version and
+  discard the rest**; build a **virtual NAT** (node id + inode number → address of the carved
+  block); walk the live tree for inactive directory entries, resolve them through the virtual NAT
+  and verify type, name length and name hash; files left over are reported as orphans.
+- Evaluation: one 4 GB USB device, 20 text files from 3 KB to 70 MB, half deleted with their parent
+  directory, **unmounted immediately after deletion**; overwriting is explicitly out of scope.
+  F2FS_Recover 20/20 metadata and data, full paths and deleted directories; XRY 10.12 20/20 metadata
+  but 11/20 data; UFS Explorer 10.11 14/20; EnCase, AXIOM, X-Ways, FTK, Autopsy and Cellebrite PA do
+  not recover deleted F2FS files at all. How correct recovery was judged (hash or inspection) is not
+  stated. No tool release is mentioned. Limitation they name: garbage collection.
+- **Relevance.** The analog of C6: rebuilding an address-translation table from carved metadata so
+  that carved blocks resolve. It is what reading outside-map orphans through a reconstructed
+  historical chunk map does (plan.md M5). Two differences to state in the paper: they keep only the
+  newest version of a block, where we keep every generation (that is what makes a timeline
+  possible); and their evaluation is the best case, where ours varies what happens after deletion
+  (commits, balance, discard).
+
+**Lee, Jo, Eo & Shon 2020, "ExtSFR: scalable file recovery framework based on an Ext file system"**
+(`lee_extsfr_2020.pdf`, Multimedia Tools and Applications 79:16093–16111, online 2019, 19 pp.).
+- **CORRECTION: ExtSFR has no database.** §4.4 and §4.8 called it "DB-backed" and a
+  "scan-once-query-many precedent for our SQLite catalog". Neither is in the paper. It is a C
+  prototype in three phases: identify Ext2/3/4 (journal and extent feature flags); find deleted
+  files (inode tracer over the inode bitmap and table, journal analyzer for backup inodes in
+  Ext3/4 where size and block pointers are zeroed on deletion, directory tracer including hash-tree
+  directories); recover (block-mapping reader, extent reader, and a sequential carver for Ext2/3
+  when indirect blocks read as zeros). "Scalable" means 64-bit offsets throughout, so that 1 TB
+  images and a single 110 GB file work.
+- **CORRECTION: ExtSFR verifies by hash.** §4.4 and §4.7 said Kim et al. 2021 criticised it for
+  omitting hash verification. ExtSFR records the MD5 of every file before deletion and counts "MD5
+  value matched" next to "recovered files" and "recovered file name". What Kim et al. (p. 3) say
+  about it is that it predates journal checksum v3 and no longer applies to current Ext4.
+- Results against "Product A" (UFS Explorer Professional 5.5.1) and "Product B" (DiskInternals Linux
+  Recovery 4.4.1), MD5-exact, deleted files: 1 GB Ext2 22/30 (A 3, B 3; B produced 60 files from 30
+  deletions, 3 of them right); 1 GB Ext3 17/30 (A 11, B 5); 1 GB Ext4 30/30 (A 29, B 29); 1 TB Ext2
+  150/150 (A 149; no tool recovered a name); 1 TB Ext3 149/150 (A 135); 1 TB Ext4 148/150 (A 122).
+  Product B was dropped at 1 TB because it carved too many fragments to count. 1 TB in about 25 min against 50 min
+  for Product A. They state the result "does not represent an absolute recovery rate".
+- **Relevance.** Not a precedent for the catalog. **No database-backed forensic recovery catalog has
+  been found in the literature read so far**, so plan.md M3 should cite none and the claim should
+  stay modest: it is an engineering choice, not a contribution in itself (paper-draft.md G8 already
+  says it is "not evaluated by itself"). What ExtSFR does give us: three counts per tool (recovered,
+  hash-exact, name recovered), which separates "produced a file" from "produced the right file"; the
+  observation that a carver's output count can exceed the number of deleted files; and a TRIM
+  caveat: it names TRIM as unintended anti-forensics and defers it, which EXP-000 measures.
+
+**Consequences.**
+1. §8.3 is verified and corrected (the reserved range depends on the feature flags).
+2. §4.8 now lists only the three works still missing.
+3. C5 is strengthened by a published statement that detection is unbuilt and easy, and gains a
+   concrete correction of the published offsets.
+4. A new open question for M4: does copy-on-write zero the slack of an internal node, and of a
+   leaf?
+5. M7 should report file *states* recovered (Plum & Dewald) next to deleted files recovered, and
+   three counts per tool (ExtSFR).
+6. M3 cites no database precedent.
