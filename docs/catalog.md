@@ -20,6 +20,55 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — corpus/vm runs on any Linux distribution
+
+- **Branch:** `feature/portable-corpus-vm` (from `main` at `d3f499b`). Changes under `corpus/vm/`
+  and `experiments/env.sh`, a note in research.md §10.4. No change under `src/` or `tests/`.
+- **Why:** development moved to a new machine (Fedora 44, kernel 7.2.5, QEMU 10.2.2, btrfs-progs
+  7.1) and none of the first host's images survive. `corpus/vm/fetch_vm.sh` needed `apt-get` and
+  `dpkg`, so no image could be generated. The generator must work for anyone who clones the
+  repository, on whatever distribution they run.
+
+**corpus/vm no longer depends on the host distribution.**
+- The old pipeline was tied to an Ubuntu host in three ways: packages came from `apt-get download`
+  and `dpkg -x`; QEMU 8.2.2 was unpacked from Ubuntu packages and ran against host libraries; and
+  the guest's `btrfs` binary got its shared libraries from the host through `ldd` ("same distro").
+  It also formatted images with whatever `mkfs.btrfs` the host had. None of this was a design
+  choice: `apt-get download` was the rootless way to get the tools on the first host (research.md
+  §10.4).
+- Now: `corpus/vm/guest.lock` pins twelve `.deb` files by SHA-256 (values from Ubuntu's signed
+  `Packages` indices, 2026-09-20): guest kernel `7.0.0-31.31~24.04.1` and its modules,
+  `busybox-static`, `btrfs-progs 6.6.3-1.1build2` (the build the EXP-000/001/003 environment
+  records name) and the eight library packages in the closure of `btrfs` and `mkfs.btrfs`
+  (`readelf -d`). `fetch_vm.sh` uses `curl`, `sha256sum`, `ar` and `tar`, against a fixed
+  `snapshot.ubuntu.com` timestamp. `build_initramfs.sh` takes libraries and modules from the bundle
+  only. `run_scenario.sh` uses the host's `qemu-system-x86_64` (`QEMU` overrides). The new
+  `pinned.sh` runs a bundle tool on the host through the bundle's loader, and `make_image.sh`
+  formats with it (`MKFS=mkfs.btrfs` selects the host's). `experiments/env.sh` reports host QEMU,
+  the pinned mkfs and guest versions and the lock file's sha256.
+- The guest stays Ubuntu's stock kernel on purpose: it is the experimental variable and must be
+  pinned. Only the host became irrelevant.
+
+**Verification** (Fedora 44, host QEMU 10.2.2; one run, plan.md §7 applies to any number quoted).
+- `LD_DEBUG=libs` on the pinned `btrfs`: every library initialised comes from `images/vm/tools`.
+  A first version passed only `usr/lib` to the loader, and `liblzo2` (packaged under `/lib`) was
+  then silently taken from the host; both library directories are passed now.
+- A fresh pinned-mkfs image has generation 6 and incompat 0x341, as research.md §10.4 records.
+- `corpus/vm/discard_table.sh`, twice: none 367 355 18 832; async 367 355 18 832; sync 43 31 2 107.
+  These equal the EXP-000 medians (N = 15, QEMU 8.2.2, Ubuntu 24.04 base host) in every column.
+  This is a spot check on a new host, not a new EXP record.
+- All 14 manifest images regenerated, the five derived ones with the manifest's hard-coded
+  `flip-byte` offsets. `uv run pytest -m vm`: 59 passed, 12 failed. The 12 are exactly the
+  manifest-sha256 assertions (`test_local_image_matches_manifest_sha256` ×11 and
+  `test_manifest_lists_the_discard_trio`): a regenerated image has a new filesystem UUID, so its
+  hash cannot equal the recorded instance's. `corpus/manifest.tsv` is not changed here: the first
+  host's images no longer exist, so the recorded hashes describe instances nobody can rebuild (the
+  EXP-001/002 records cite them).
+- Ruff and format clean; `sh -n` clean on every `corpus/vm` script and on `experiments/env.sh`.
+  `uv run pytest` with all images present: 712 passed, 12 failed (the 12 manifest-sha256
+  assertions above), 0 skipped; `sandbox.img` sha256 unchanged. The manifest design is changed in
+  the next entry so that a rebuilt corpus passes.
+
 ## 2026-09-21 — Repository layout and paper library
 
 - **Branch:** `chore/repo-structure` (from `main` at `e86fd34`). No change under `src/`, `tests/`,
