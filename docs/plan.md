@@ -1314,7 +1314,11 @@ one run of 15 (365/353/18/828), the async and sync rows never.
 
 ### Paper-readiness experiments (2026-09-15, from the paper-draft review)
 
-- **Near-term, before M3 (not M7): E-findroot.** `btrfs-find-root -a` per
+- **E-findroot: done 2026-09-21 as EXP-004.** find-root enumerates the metadata
+  block groups of the current chunk map, so it printed every state inside the
+  map (229 of 229 on 13 images) and none outside it (0 of 133). Old-root
+  discovery is claimed **outside the current chunk map only**. The plan as
+  written: `btrfs-find-root -a` per
   generation against `btrfska roots --json --full-sweep` on the existing
   images (a copy of `sandbox.img`, the `m1_*` images, `m2_logtree`, the three
   `s01_discard_*_r1`). Split every generation by whether its root-tree block
