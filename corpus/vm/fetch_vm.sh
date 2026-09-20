@@ -1,61 +1,80 @@
 #!/bin/sh
-# Fetch the rootless VM tooling into images/vm/ (gitignored). No root needed:
-# packages are fetched with `apt-get download` and unpacked with `dpkg -x`.
+# Fetch the pinned guest bundle into images/vm/ (gitignored). No root and no package manager:
+# every package in corpus/vm/guest.lock is downloaded with curl, checked against its SHA-256 and
+# unpacked with ar + tar, so the host distribution does not matter.
 #
-#   images/vm/debs/    QEMU 8.2.2 + firmware + libs  -> unpacked into images/vm/qemu/
-#   images/vm/kdeb/    guest kernel image (and modules if the host lacks them)
-#                                                    -> unpacked into images/vm/kernel/
-#   images/vm/tooldebs busybox-static + btrfs-progs  -> unpacked into images/vm/tools/
+#   images/vm/debs/    the downloaded .deb files
+#   images/vm/kernel/  guest kernel image and modules        (lock group `kernel`)
+#   images/vm/tools/   busybox, btrfs-progs and their libs    (lock group `tools`)
 #
-# Idempotent: a package whose .deb is already present is not downloaded again,
-# and a tree that is already unpacked is not unpacked again.
+# QEMU is not fetched: run_scenario.sh uses the host's qemu-system-x86_64.
 #
-# Environment: VM_DIR (default <repo>/images/vm), KVER (default 7.0.0-31-generic).
+# Idempotent: a .deb that is present with the right hash is not downloaded again, and a group is
+# unpacked again only when the lock file is newer than its stamp.
+#
+# Host requirements: curl, sha256sum, ar (binutils), tar with zstd and xz support.
+# Environment: VM_DIR (default <repo>/images/vm), UBUNTU_MIRROR (default: the fixed snapshot below;
+# any Ubuntu archive root that still carries the pinned versions works).
 set -eu
 
-REPO=$(cd "$(dirname "$0")/../.." && pwd)
+HERE=$(cd "$(dirname "$0")" && pwd)
+REPO=$(cd "$HERE/../.." && pwd)
 VM=${VM_DIR:-$REPO/images/vm}
-KVER=${KVER:-7.0.0-31-generic}
+LOCK=$HERE/guest.lock
+MIRROR=${UBUNTU_MIRROR:-https://snapshot.ubuntu.com/ubuntu/20260919T000000Z}
 
-QEMU_PKGS="qemu-system-x86 qemu-system-common qemu-system-data seabios \
-libfdt1 libpmem1 librdmacm1t64 libslirp0 libndctl6 libdaxctl1"
-TOOL_PKGS="busybox-static btrfs-progs"
-KERNEL_PKGS="linux-image-unsigned-$KVER"
-# The btrfs module and its deps come from the host's world-readable
-# /lib/modules/$KVER when it exists; otherwise fetch the modules package too.
-[ -e "/lib/modules/$KVER/kernel/fs/btrfs/btrfs.ko.zst" ] ||
-    KERNEL_PKGS="$KERNEL_PKGS linux-modules-$KVER"
+for tool in curl sha256sum ar tar; do
+    command -v "$tool" >/dev/null || { echo "fetch_vm.sh needs $tool on the host" >&2; exit 1; }
+done
 
-# download DIR PKG... : apt-get download each PKG into DIR unless a .deb exists
-download() {
-    dir=$1; shift
-    mkdir -p "$dir"
-    for pkg in "$@"; do
-        if ls "$dir/${pkg}_"*.deb >/dev/null 2>&1; then
-            echo "have  $pkg"
-        else
-            echo "fetch $pkg"
-            (cd "$dir" && apt-get download "$pkg")
-        fi
-    done
+mkdir -p "$VM/debs"
+TAB=$(printf '\t')
+
+# hash_ok FILE SHA256
+hash_ok() {
+    [ -f "$1" ] && [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$2" ]
 }
 
-# unpack DIR DEST STAMP : dpkg -x every .deb in DIR into DEST unless STAMP exists
-unpack() {
-    if [ -e "$3" ]; then
-        echo "unpacked already: $2"
+grep -v '^#' "$LOCK" | while IFS=$TAB read -r group sha path; do
+    [ -n "$group" ] || continue
+    deb=$VM/debs/$(basename "$path")
+    if hash_ok "$deb" "$sha"; then
+        echo "have  $(basename "$path")"
     else
-        mkdir -p "$2"
-        for deb in "$1"/*.deb; do dpkg -x "$deb" "$2"; done
+        echo "fetch $(basename "$path")"
+        curl -fsSL --retry 3 -o "$deb.part" "$MIRROR/$path"
+        hash_ok "$deb.part" "$sha" || {
+            echo "SHA-256 mismatch for $path" >&2; rm -f "$deb.part"; exit 1; }
+        mv "$deb.part" "$deb"
     fi
+done
+
+# unpack GROUP: extract every .deb of the group into images/vm/GROUP
+unpack() {
+    dest=$VM/$1
+    stamp=$dest/.unpacked
+    if [ -e "$stamp" ] && [ "$stamp" -nt "$LOCK" ]; then
+        echo "unpacked already: $dest"
+        return
+    fi
+    rm -rf "$dest"
+    mkdir -p "$dest"
+    grep -v '^#' "$LOCK" | while IFS=$TAB read -r group sha path; do
+        [ "$group" = "$1" ] || continue
+        deb=$VM/debs/$(basename "$path")
+        member=$(ar t "$deb" | grep '^data\.tar')
+        case $member in
+            *.zst) ar p "$deb" "$member" | tar --zstd -x -C "$dest" ;;
+            *.xz)  ar p "$deb" "$member" | tar -J -x -C "$dest" ;;
+            *.gz)  ar p "$deb" "$member" | tar -z -x -C "$dest" ;;
+            *)     ar p "$deb" "$member" | tar -x -C "$dest" ;;
+        esac
+    done
+    touch "$stamp"
+    echo "unpacked: $dest"
 }
 
-download "$VM/debs" $QEMU_PKGS
-download "$VM/kdeb" $KERNEL_PKGS
-download "$VM/tooldebs" $TOOL_PKGS
-
-unpack "$VM/debs"     "$VM/qemu"   "$VM/qemu/usr/bin/qemu-system-x86_64"
-unpack "$VM/kdeb"     "$VM/kernel" "$VM/kernel/boot/vmlinuz-$KVER"
-unpack "$VM/tooldebs" "$VM/tools"  "$VM/tools/usr/bin/busybox"
+unpack kernel
+unpack tools
 
 echo "VM tooling ready in $VM"

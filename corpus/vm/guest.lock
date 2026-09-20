@@ -1,0 +1,21 @@
+# Pinned guest bundle for corpus/vm (read by fetch_vm.sh). Tab-separated:
+#   group  sha256  path
+# `path` is relative to an Ubuntu archive root. SHA-256 values are the ones in Ubuntu's signed
+# Packages indices for noble / noble-updates (24.04), read on 2026-09-20. The default mirror is a
+# fixed snapshot, so these URLs do not disappear when Ubuntu supersedes a package:
+#   https://snapshot.ubuntu.com/ubuntu/20260915T000000Z/
+# group kernel -> images/vm/kernel (guest kernel 7.0.0-31-generic and its modules)
+# group tools  -> images/vm/tools  (busybox, btrfs-progs 6.6.3 and every shared library they load)
+# Nothing here is installed on the host or needs root; the host distro does not matter.
+kernel	aa614fa05f21b04327434ac658f5165ce8891ae6317b327e1202c82806c0d2b1	pool/main/l/linux-hwe-7.0/linux-image-unsigned-7.0.0-31-generic_7.0.0-31.31~24.04.1_amd64.deb
+kernel	45f19f8e9aec61b57236925b9db5ee14469a854b1f631004443aa453880124ce	pool/main/l/linux-hwe-7.0/linux-modules-7.0.0-31-generic_7.0.0-31.31~24.04.1_amd64.deb
+tools	944b2728f53ceb3916cec2c962873c9951e612408099601751db2a0a5d81e0ed	pool/main/b/busybox/busybox-static_1.36.1-6ubuntu3.1_amd64.deb
+tools	b4aeb482adcce07b276827d8f4b0c502427a2a43574fa8349081f23dcd8c96aa	pool/main/b/btrfs-progs/btrfs-progs_6.6.3-1.1build2_amd64.deb
+tools	ff5557d99b51f761c4b7c92368b9cc45565eda17df9bf9eb4b134d09825008be	pool/main/g/glibc/libc6_2.39-0ubuntu8.9_amd64.deb
+tools	7e2992d3a79fc05514dc5966558ee9c66a7214a47edf2a36017b9e2777528665	pool/main/u/util-linux/libuuid1_2.39.3-9ubuntu6.6_amd64.deb
+tools	3bcf169cd65e2539059b2287924090fc629f9bf90f595fc25465a7efe950ee82	pool/main/u/util-linux/libblkid1_2.39.3-9ubuntu6.6_amd64.deb
+tools	6efea3770f738db2fd43ebdaed3d91ef0cde8aa8387b4803080af473326ebdb0	pool/main/s/systemd/libudev1_255.4-1ubuntu8.17_amd64.deb
+tools	84b9cf5752b29c9f92c27cd4c4ba9bbcc70b5ccf9b1b515421a28ae23212e273	pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.2_amd64.deb
+tools	e0d13be155013138b8db4cfe68212b866080af661c78302c2eab0d2f9d0d454e	pool/main/l/lzo2/liblzo2-2_2.10-2build4_amd64.deb
+tools	dfcf25061e07aad7efd3f4f880ba5ad4d4d09ebe7fc8cc77ab6b8a161d6d4727	pool/main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1.1_amd64.deb
+tools	23c627c77c66552a658e62852f244f4946dc543898e0ec5428d5dc6bffde2d6a	pool/main/libc/libcap2/libcap2_2.66-5ubuntu2.4_amd64.deb
