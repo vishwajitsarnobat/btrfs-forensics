@@ -1082,6 +1082,9 @@ kinds. Default: `--root current --tree 5`.
   is documented (`test_every_table_and_column_is_documented`); README documents the command and
   its records.
 
+**M4b status 2026-09-21: done** (catalog.md, M4b entry). Each bullet of its definition of done
+is a test in `tests/test_recover.py` or `tests/test_readonly.py`.
+
 ### M5 — Reconstruction & timelines (~2 weeks; novelty core — start early)
 - Orphan graph: reconcile scanned nodes + edges by owner/generation/
   key-range/csum into candidate historical subtrees; reattach fragments

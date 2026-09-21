@@ -20,6 +20,67 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — M4b: `btrfska recover`, anchored recovery from any cataloged root
+
+- **Branch:** `feature/m4-anchored-recovery` (from `main` at `7f4a78f`). New package
+  `src/btrfska/recover/` (`output.py`, `dbtree.py`, `inodes.py`, `engine.py`, `cli.py`),
+  `tests/test_recover.py`, `tests/ground_truth/sandbox_legacy_recovered.json`; changed
+  `substrate/extents.py` (streaming), `substrate/items.py` (`xattr_items`), `catalog/schema.py`
+  (version 3), `catalog/db.py` (`open_for_recovery`), `cli.py`, `tests/test_readonly.py`,
+  `tests/test_catalog.py`, `docs/evidence-db.md`, `README.md`, plan.md M4b.
+- **Planned first** (`2ce8cdd`): the eight decisions and the definition of done are in plan.md
+  "M4b", committed before any code.
+- **Metadata from the database, data from the image.** A tree is walked in the database: root
+  block, `key_ptrs`, the child with that (bytenr, generation, level), leaf `items`. That reaches
+  blocks of removed chunks, which a walk through the image cannot address, and it needs no
+  second parser: payloads go through `substrate/items.py`, as in `walk`. Every root is a row of
+  `states`, so `current`, `backup:GEN` and `state:ID` are one code path; `--tree all` takes every
+  file tree the root names.
+- **Streaming.** `stream_extent` maps the whole extent first (that is where `unmapped` and
+  `unreadable` are decided) and then yields it in pieces of at most 1 MiB; `FileAssembly` is the
+  file-order logic of `read_file` (holes, clipping, overlaps) one extent at a time, and
+  `read_file` now runs on it, so `cat` and `recover` cannot drift apart. Measured with
+  `tracemalloc`: recovering a 96 MiB extent peaks at about 2 MiB of traced memory.
+- **The writer** (`recover/output.py`) is the third and last module on the read-only test's
+  allowlist. It creates the output directory (which must not exist) and everything below it
+  relative to a directory descriptor with `O_CREAT | O_EXCL | O_NOFOLLOW`; it takes no image
+  path and imports nothing of btrfska. Every file starts as `NAME.partial` and gets its name
+  only when every byte was read (link, then unlink: nothing is ever replaced). Symlinks and
+  special files are recorded, not created. A new test pins all of this down.
+- **A bug the tests found before the first commit of the writer's tests:** an empty file name
+  passed validation because `.partial` was appended first. Names are now validated before and
+  after.
+- **Schema version 3.** `recovery_runs`, `artifacts`, `provenance`, every column documented.
+  `db.open_for_recovery` installs an SQLite authorizer: INSERT and UPDATE on those three tables,
+  nothing else (no DELETE, DDL, PRAGMA or ATTACH). M3's "written once" still holds for every
+  row the scan wrote; a test tries nine forbidden statements. A version-2 database is refused.
+- **Honest output.** `complete` only when every byte was read; otherwise `NAME.partial` with a
+  hole and a listed reason per missing range. An encrypted extent refuses the whole file, with a
+  report line. `in_current` compares (inode, creation generation) with the current tree, because
+  inode numbers are reused: on `sandbox.img` inode 257 is two different files, which the
+  prototype reports as one renamed file.
+- **Numbers** (Fedora 44, single runs, indicative). `sandbox.img`, all five states: the two files
+  the prototype recovers, byte-identical (`large_target.txt` 5 242 880 bytes from `backup:13`,
+  `target_file.txt` 31 bytes from `backup:11`), both `in_current` 0. `m3_wide`, all 12 states:
+  12 233 artifacts in 1.7 s; 1 514 files written, 10 719 recognised as unchanged duplicates;
+  601 written files are not in the current tree, 501 of them from a backup root and 100 from
+  state 10, which no superblock slot names. `s01_discard_none_r1`, `--tree all`, from a
+  pre-balance state: 3 files come out `partial` with every extent `unmapped`, because their
+  data chunks were removed by the balance. That is the case historical chunk maps (M5, C6) are
+  for; M4 reports it and does not guess.
+- **Verification.** `uv run pytest`: 862 passed, 0 skipped (40 new). On `sandbox.img`, `m1_lzo`,
+  `m1_zlib`, `m1_blake2b` and `m3_wide`, for every root set and every subvolume, the set of
+  regular files equals what an independent walk through the image finds, and their content
+  equals `read_file` (every file; every 40th on `m3_wide`, whose 1 500 files cost one tree walk
+  each). Hostile input: `..`, `/`, NUL, 255-byte and non-UTF-8 names, parent cycles, missing
+  parents, no INODE_ITEM, overlapping extents, an unmapped extent, an encrypted extent, a
+  symlink to `/etc/shadow`, a planted symlink in the output, and 25 trees of random payloads:
+  no crash, nothing outside the output directory. Image hashes unchanged. Ruff clean.
+- **Limits.** Data extents are read through the current chunk map only. Data checksums are not
+  verified (M6). Hard links are written once and listed, not linked. No ownership, no xattrs on
+  the output. The whole tree's inode records are held in memory (metadata only). Recovery from
+  unreferenced blocks and ORPHAN_ITEMs is the next pull request.
+
 ## 2026-09-21 — EXP-005: the kernel zeroes tree-block slack; claim C1 narrowed
 
 - **Branch:** `feature/exp005-cow-slack` (from `main` at `6858a74`). New `experiments/EXP-005.md`,
