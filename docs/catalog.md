@@ -20,6 +20,83 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — M5a: historical chunk maps, and EXP-007
+
+- **Branch:** `feature/m5-historical-chunk-maps` (from `main` at `ef98a68`). New
+  `src/btrfska/scan/chunkmaps.py`, `src/btrfska/recover/maps.py`, `tests/test_chunkmaps.py`,
+  `experiments/EXP-007.md`, `experiments/exp007.py`; changed `substrate/chunks.py` (`MapOrder`,
+  `stripe_size`), `substrate/extents.py`, `scan/roots.py`, `catalog/schema.py` (version 5),
+  `catalog/build.py`, `recover/engine.py`, `recover/cli.py` (`--maps`), `docs/evidence-db.md`,
+  `README.md`, plan.md (M5's order of features, M5a).
+- **Planned first** (`63bfb17`), and **EXP-007 registered before any map was built** (`51ef199`).
+- **Why.** A balance gives every chunk a new address and removes the old chunks. An older state's
+  blocks and file data stay where they were, but the current chunk map cannot name them: M4 wrote
+  such files as `partial`, every extent `unmapped`. The chunk-tree blocks that could name them are
+  still on the disk.
+- **What was built.**
+  - *One map per surviving chunk-tree root* (`historical:GEN@BYTENR`). Old-root discovery already
+    walked such roots through its block index to count what they place (M2b); the maps are now
+    kept, with the chunk-tree blocks found and missing and the backup slots naming the root.
+  - *DEV_EXTENTs as second witness.* `stripes.dev_extents` counts, per stripe of every map, the
+    scanned dev-tree leaves holding a DEV_EXTENT that agrees with it. One more map, `dev_extents`,
+    is assembled from DEV_EXTENTs alone. A DEV_EXTENT does not record the profile, so a chunk is
+    accepted there only when that cannot matter (a block-group item naming a single or mirrored
+    profile of the same length, or a one-device filesystem); striped chunks, extents that
+    disagree and addresses claimed twice are kept as rejected, with the reason. No stripe order
+    is guessed.
+  - *Which map a read goes through.* A root whose chunk root is the current one is read through
+    the current map alone. Any other root: its own map (`states.map_id`), then, for an extent
+    that map does not place, the newer maps oldest first, then `dev_extents`. One map places an
+    extent as a whole; `ExtentRead.chunk_map` and `artifacts.chunk_maps` name it. Nothing is
+    merged, and the current map is never overridden. A read reports when it did not go through
+    the root's own map, when a newer map gives the address to a different chunk, and when a newer
+    map has allocated the disk space again (the bytes may have been overwritten).
+  - *`node_maps`*: for every valid block the current map does not place where it lies, the maps
+    that do. A block's header carries its own address, so this checks the maps against something
+    they were not built from.
+  - *Schema version 5*, every column documented; `recover --maps current` keeps M4's behaviour.
+- **EXP-007** (N = 5 builds per discard mode on the dev host, median and range; hashes against
+  the scenario's log; all four registered hypotheses hold):
+
+  | | none | async | sync |
+  |---|---|---|---|
+  | states, of them with another chunk root | 35, 34 | 35, 34 | 2, 1 |
+  | file artifacts `unmapped` under the current map | 81 (81–81) | 81 (81–81) | 0 |
+  | … `complete` and hash-exact through their own map | 81 (81–81) | 81 (81–81) | 0 |
+  | `complete` with a wrong hash | 0 | 0 | 0 |
+  | valid blocks outside the current map, placed by the map of their time | 172 (172–174), all | 172, all | 16, all |
+  | historical stripes, confirmed by a DEV_EXTENT | 56, all | 56, all | 19, all |
+  | chunks known from CHUNK_ITEMs and from DEV_EXTENTs, agreeing | 8, 8 | 8, 8 | 8, 8 |
+
+  The 81 are *versions*: two logged files (`keep.txt`, `deleted_big.txt`), in the subvolume and its
+  snapshot, as 34 pre-balance states hold them. At file level the result is 2 of 2. Under
+  `discard=sync` there is nothing to gain, as predicted: no pre-balance state survives.
+- **Two things the work turned up.**
+  - `sandbox.img`'s "21 of 71 orphans outside the chunk map" are not traces of a balance. The 20
+    valid ones are blocks of the two temporary chunks `mkfs.btrfs` makes at 1 MiB and 5 MiB and
+    removes; the maps of generations 1 to 5 place every one of them. The 21st is an empty
+    generation-1 fs-tree leaf, invalid by the kernel's rule. The paper's N-number needs that
+    explanation (done with M5's closing update of the draft).
+  - An early state can hold a logged file at size 0 (created, data not yet on disk). It reads
+    `complete` with the hash of the empty string. EXP-007's registered check would have counted
+    these as wrong hashes; the record says so and counts them in a row of their own.
+- **A bug the hostile test found:** `stripe_size` raised `KeyError` on profile flags with two bits
+  set, which a forged CHUNK_ITEM or block group can carry. It now returns 0.
+- **A mistake in the registration, corrected in the record:** it quoted EXP-002's "26" as states
+  with another chunk root; that number counts slot references. No prediction used it.
+- **Verification.** `uv run pytest`: 940 passed, 0 skipped (38 new). The claims on
+  `s01_discard_none_r1` are asserted against its own log and recomputed from the stored chunks,
+  never as counts; the rules on forged DEV_EXTENTs, block groups and maps (13 rejection cases,
+  300 random inputs). Ruff clean. `sandbox.img` and the 18 corpus images unchanged. Catalog build
+  time on `m4_deep` and `m3_wide` is unchanged within noise (3.3 s and 1.7 s). No corpus script
+  changed.
+- **Limits.** `complete` means every byte was read: whether bytes from a freed chunk are still the
+  file's is for data checksums (M6); reuse of freed space inside a chunk that still exists is
+  invisible to the maps. One device, SINGLE and DUP, one-leaf chunk trees: striped and
+  multi-device rules are tested on forged items only. Orphan chunk-tree leaves without a
+  surviving root are not used (the `dev_extents` map is the fallback). `walk` and `cat` still read
+  through the current map only.
+
 ## 2026-09-21 — Prior-art re-run before M5: nothing changes C3 or C6
 
 - **Branch:** `docs/prior-art-rerun-m5` (from `main` at `e3506e3`). Documents only:

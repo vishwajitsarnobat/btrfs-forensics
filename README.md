@@ -12,8 +12,9 @@ hidden.
 classification, old-root discovery, discard experiments EXP-000 and EXP-002),
 M3 (the evidence catalog) and M4 (recovery) are done: `btrfska recover` extracts files from any
 cataloged root, from leaves no root tree leads to (dropped log trees included) and from inodes
-the kernel lists under ORPHAN_ITEM, each labelled with its source. Timelines and reconstruction
-(M5) come next. The earlier prototype is frozen, still runnable, under `legacy/`.
+the kernel lists under ORPHAN_ITEM, each labelled with its source. M5 (reconstruction and
+timelines) has begun: the catalog keeps the chunk maps of superseded chunk-tree roots, and
+`recover` reads a state from before a balance through the map of its own time. The earlier prototype is frozen, still runnable, under `legacy/`.
 - `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID|all]... [--tree ID|all] [--orphans]`
   extracts the files of a tree as the current, a backup or a discovered root saw them, and with
   `--orphans` also from leaves that no root tree leads to, one extent at a time, with a

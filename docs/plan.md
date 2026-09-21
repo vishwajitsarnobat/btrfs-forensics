@@ -1411,6 +1411,14 @@ already reaches them); the stale remap tree as a relocation log (C6's experiment
 - EXP-007 registered before measuring, five builds, median and range;
 - image hashes unchanged; every new column documented; README documents `--maps`.
 
+**M5a status 2026-09-21: done** (catalog.md, M5a entry; EXP-007). Each bullet of its definition
+of done is a test in `tests/test_chunkmaps.py` or a row of EXP-007 §6. On `sandbox.img` the 20
+valid blocks outside the current map are all placed by the maps of generations 1 to 5: they are
+blocks of the two temporary chunks `mkfs.btrfs` creates at 1 MiB and 5 MiB and removes again, not
+traces of a balance (the 21st block of the prototype's count is an empty generation-1 fs-tree
+leaf, which the kernel's checker rejects). That is the half of M5's definition of done that reads
+"`s01` yields a reconstructed historical chunk map and correctly-translated outside-map orphans".
+
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.
