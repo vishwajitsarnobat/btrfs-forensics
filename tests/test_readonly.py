@@ -17,11 +17,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 IMAGE_MODULE = SRC / "btrfska" / "substrate" / "image.py"
 CATALOG_DB_MODULE = SRC / "btrfska" / "catalog" / "db.py"
+RECOVER_OUTPUT_MODULE = SRC / "btrfska" / "recover" / "output.py"
 # The only modules allowed to open, create or writably map files: the one that opens images
-# (read-only) and the one that creates evidence databases (never an image; it refuses a path that
-# exists). The M4 `recover` output writers will join this allowlist explicitly; nothing else
-# should.
-WRITE_ALLOWLIST = frozenset({IMAGE_MODULE, CATALOG_DB_MODULE})
+# (read-only), the one that creates evidence databases (never an image; it refuses a path that
+# exists), and the one that writes recovered files (only below a directory it created itself,
+# with O_EXCL and O_NOFOLLOW; it takes no image path). Nothing else should join them.
+WRITE_ALLOWLIST = frozenset({IMAGE_MODULE, CATALOG_DB_MODULE, RECOVER_OUTPUT_MODULE})
 SCRATCH = REPO_ROOT / "images" / "scratch"
 
 
@@ -305,6 +306,32 @@ def test_the_database_module_never_touches_an_image():
     }
     assert not {name for name in imported if name and "substrate" in name}
     assert "mmap" not in imported
+
+
+def test_the_output_writer_creates_files_exclusively_and_never_touches_an_image():
+    """Every flagged call is an os.open whose flags come from the two constants defined with
+    O_NOFOLLOW (files also O_CREAT | O_EXCL), or the ftruncate of a file it created itself; it
+    imports nothing of the image layer, the scan or the catalog."""
+    source = RECOVER_OUTPUT_MODULE.read_text()
+    flagged = [source.splitlines()[n - 1] for n in write_violations(source)]
+    assert flagged
+    for line in flagged:
+        assert "os.ftruncate(self.fd" in line or (
+            "os.open(" in line and ("_DIR_FLAGS" in line or "_FILE_FLAGS" in line)
+        )
+    assert "_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW" in source
+    assert "_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW" in source
+    tree = ast.parse(source)
+    imported = {
+        name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for name in (
+            [node.module] if isinstance(node, ast.ImportFrom) else [a.name for a in node.names]
+        )
+    }
+    assert not {name for name in imported if name and name.startswith("btrfska")}
+    assert not {"mmap", "sqlite3", "shutil"} & imported
 
 
 def test_only_allowlisted_modules_write():
