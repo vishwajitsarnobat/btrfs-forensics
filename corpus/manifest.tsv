@@ -13,3 +13,4 @@ m2_logtree	CSUM=xxhash SCENARIO=logtree MOUNT_OPTS=commit=300 DONE_MARKER="=== L
 s01_discard_none_r1	NAME=s01_discard_none_r1 corpus/vm/scenarios/discard_none.sh	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	the run-1 image of its discard mode, as kept for EXP-000 and EXP-002
 s01_discard_async_r1	NAME=s01_discard_async_r1 corpus/vm/scenarios/discard_async.sh	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	the run-1 image of its discard mode, as kept for EXP-000 and EXP-002
 s01_discard_sync_r1	NAME=s01_discard_sync_r1 corpus/vm/scenarios/discard_sync.sh	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	the run-1 image of its discard mode, as kept for EXP-000 and EXP-002
+m3_wide	CSUM=xxhash SCENARIO=wide corpus/vm/make_image.sh m3_wide	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	trees with internal nodes: 48 subvolumes, 1500 files, deletions between commits, no balance
