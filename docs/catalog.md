@@ -20,6 +20,77 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — M5c-1: the orphan graph, and what an uncommitted leaf really holds (EXP-008)
+
+- **Branch:** `feature/m5-orphan-graph` (from `main` at `c3ab79b`). New
+  `src/btrfska/recover/graph.py`, `tests/test_graph.py`, `experiments/EXP-008.md`,
+  `experiments/exp008.py`; changed `recover/dbtree.py` (`fragment_roots`, `leaf_by_content`, the
+  owner check), `recover/inodes.py` (`paths` takes ancestors, `InodeRecord.joins`),
+  `recover/engine.py`, `recover/cli.py` (`--graph`), `catalog/schema.py` (version 6:
+  `artifacts.joined`), `docs/evidence-db.md`, `README.md`, `tests/test_recover.py`, plan.md (M5c).
+- **Planned first, and EXP-008 registered before any join existed** (`ddaa697`); the registration
+  was amended before the builds, with the trial's numbers, when two of its checks turned out to
+  measure something else (EXP-008 §2a).
+- **Why.** M4 read every leaf that no root tree leads to on its own and joined nothing, because a
+  wrong join makes a file that never existed. That left files cut by a leaf end `partial`, files
+  without their directory pathless, and hundreds of leaves unexplained.
+- **What was built: `recover --graph`.** Three joins, each written into the artifact
+  (`source_kind` `orphan_graph`, column `joined`), and refused when two candidates differ.
+  - `pointer`: a file-tree internal node that no key pointer, ROOT_ITEM or superblock slot names
+    is the top of a **fragment** and is walked like a tree, every child through its parent's
+    pointer (address, generation, level, first key, and now the owner, for every database walk).
+  - `sibling`: a file cut by its leaf's end continues in another leaf of the same tree when the
+    extents of both cover it exactly, none is newer than the INODE_ITEM, and the other leaf was
+    not written before the INODE_ITEM's last change. The last condition was added during the
+    work: one leaf boundary of `m4_deep` has 33 candidate tails, and an older one of the right
+    size would otherwise pass for the content.
+  - `parent_path`: a directory the leaf does not hold is named from other leaves of the tree when
+    its number has exactly one name and one creation generation there.
+  `--orphans` keeps M4's meaning, so EXP-006 regenerates unchanged.
+- **The main finding: an uncommitted leaf is not a small committed state.** EXP-008's checks for
+  wrong joins fired on the first trial, and not one hit was a join. btrfs updates an INODE_ITEM
+  through delayed items, at the commit at the latest, so a leaf written in the middle of a
+  transaction can hold the *new* data next to the *old* inode item: `pad/p298` of `m4_deep` read
+  `seq 24 324` cut at the 1 121 bytes of the version before. Within one transaction the same
+  happens without any difference in generation: `d/f1445` of `m3_wide`, size 0 in one leaf and
+  its 10 bytes of data in the next. M4 has called such files `complete` since M4d. Now:
+  **a file with an extent newer than its INODE_ITEM is `partial`
+  (`inode_item_older_than_extent`), for every source; in a block that was never committed, so is
+  a file with data past the sector of its end.** No anchored root of seven images (every state,
+  deduplication off) holds a file of the first kind: a commit guarantees it. `sandbox.img`'s own
+  orphan leaf holds one (`large_target.txt` at size 0 with its 5 MiB extent attached), so
+  `recover --orphans` on it now exits 1.
+- **EXP-008** (N = 5 builds of scenario `deep`, measured twice, see its §6; median and range):
+
+  | | five builds | `m3_wide` |
+  |---|---|---|
+  | orphan leaves, of them under a fragment | 345 (343–345), 303 (300–303) | 26, 26 |
+  | fragments | 110 (108–110) | 14 |
+  | files cut by a leaf end, `complete` with `--graph` | 134, 122 (122–122) | 2, 2 |
+  | pathless `complete` files, with a path with `--graph` | 2 849, 2 509 (2 459–2 509) | 403, 403 |
+  | joins refused | 10 (10–11) | 0 |
+  | files with a stale inode item, now `partial` | 303 (300–303) | 144 |
+  | wrong joins: logged hash / impossible padding content / disagreeing multi-leaf file | 0 of 22 / 0 of 37 518 / 0 of 2 875 | – / – / 0 of 142 |
+
+  H1 to H3 and H5 hold. H4 holds as amended; **H4(c) as first registered is refuted as a check**
+  (316 per build: single-leaf stale and size-0 versions, not joins), and the record keeps it.
+- **A correction to the M4d entry below.** Its "145 versions of size 0" on `m3_wide`, counted as
+  recovered never-committed versions, were mostly empty inode items with data already attached:
+  `complete` files that no root gives fell from 144 to 48 there, and from 68 to 33 on the deep
+  builds.
+- **Verification.** `uv run pytest`: 997 passed, 0 skipped (25 new in `tests/test_graph.py`). Seven
+  refusals of a sibling join, each with its reason (two tails that differ, too short, a gap, past
+  the end, a newer extent, a leaf older than the inode's last change, none); identical tails are
+  one candidate; a tail of another tree is none; a parent with two names, with two creation
+  generations, in a cycle; a fragment's pointer to a block of another tree or first key is a gap;
+  both inode-item rules; and on `m4_deep`, every `orphan_graph` artifact says what was joined,
+  every orphan leaf is read once, and no joined file has a content its scenario cannot have
+  written. Ruff clean; `sandbox.img` and the 18 corpus images unchanged. No corpus script changed.
+- **Limits.** A fragment is never a committed state, and says so on every artifact. The tail of a
+  joined file is still listed on its own as an `unknown` partial artifact. Log trees are not
+  joined yet (M5c-2): a dropped log leaf does not say which subvolume it logged. Files with holes
+  are never sibling-joined. Fragments of trees deeper than two levels were not seen.
+
 ## 2026-09-21 — M5b: integrity and linkage checks told apart
 
 - **Branch:** `feature/m5-integrity-linkage` (from `main` at `f6a14c7`). Changed

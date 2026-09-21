@@ -1556,6 +1556,13 @@ a parent chain of at most 4096 (as `paths`). A bound that bites is reported in t
   the joins list;
 - EXP-008 registered before measuring, five builds; README and evidence-db.md document it.
 
+**M5c-1 status 2026-09-21: done** (catalog.md, M5c-1 entry; EXP-008). Each bullet of its
+definition of done is a test in `tests/test_graph.py` or a row of EXP-008 §6. Two rules came out
+of the experiment's own checks and are now part of recovery for every orphan source: a file with
+an extent newer than its INODE_ITEM, or (in a block that was never committed) with data past the
+end of the file, is not `complete`. M5c-2 (log trees) and M5c-3 (deleted subvolumes) follow
+M5d: timelines are M5's definition of done and need only the joins that exist now.
+
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.
