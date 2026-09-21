@@ -1659,7 +1659,7 @@ EXP-008) and M5d (timelines), after the prior-art re-run (research.md §11). Bul
   (btrfs-progs 6.6.3) cannot make a filesystem with simple quotas, so nothing could test it
   (M5d, decision 8).
 - **Open, and moved to a follow-up (M5e) instead of being claimed:**
-  - *replay of the live log tree in recovery.* The timeline reads log trees, live and dropped,
+  - *replay of the live log tree in recovery* (**done since: M5e-1, 2026-09-22**). The timeline reads log trees, live and dropped,
     and files each under the subvolume its log root names; `recover` still leaves the live log
     alone and reads dropped log leaves without saying which subvolume they logged. `m2_logtree`
     has the ground truth for it (two fsynced files and one appended file, hashes logged).
@@ -1671,6 +1671,42 @@ EXP-008) and M5d (timelines), after the prior-art re-run (research.md §11). Bul
   - *the comparison with btrfscue v0.7.* Its release ships one binary, for arm64, and the source;
     the hosts are x86-64. Pinning it means pinning a Go toolchain and its module downloads, which
     belongs with the baseline builds of M7.
+
+**M5e-1: log trees in recovery** (design fixed 2026-09-21, before implementation; the first of
+the items M5's status left open).
+
+*What it is.* `recover --logs` reads every log tree the scan found, live or dropped, through the
+log root tree that names it, and replays it over the state it was written against.
+1. **Which subvolume.** A log root tree (owner -6) holds one ROOT_ITEM per logged subvolume: key
+   objectid -6, key offset = the subvolume's id, naming that subvolume's log tree. That is a
+   `pointer` join like any other, and it answers M4d's "a log leaf does not say which subvolume it
+   logged". Artifacts get `source` `log:BYTENR@GEN`, `source_kind` `log_tree`, the subvolume as
+   `tree_id`, and the join (`log_root`) in `joined`. Output goes to
+   `DIR/log_trees/subvol_ID/log_BYTENR_genG/`.
+2. **Replay, read-only, as the kernel would at mount** (tree-log.c `replay_one_extent`,
+   `replay_one_buffer`): a logged extent replaces whatever the base tree holds in its range (a
+   base extent that is only partly covered keeps its other part, with offset and length
+   adjusted); the logged INODE_ITEM gives the size; nothing past the sector of the new end is
+   kept. The base is the subvolume tree of the newest cataloged state older than the log, and
+   only an inode with the same creation generation is a base. The join (`log_replay`) names the
+   base state. An INODE_ITEM logged with generation 0 (the kernel's "exists only" mode) carries
+   no content and is recorded, not written.
+3. **In a log tree a range without an extent item is not a hole.** A fast fsync logs only what
+   changed. Without a base, such a range is `not_logged` and the file is `partial`; M4d's lone log
+   leaves get the same rule (they were read with NO_HOLES semantics, which would have passed an
+   appended file off as complete with zeros in front).
+
+*Definition of done.* On `m2_logtree`: `sv1/fsynced.txt` (new, fsynced, never committed) and
+`sv1/committed.txt` (committed, then appended and fsynced) come out complete with the SHA-256 the
+guest logged, the second through a replay over the current state; without its base the second
+is `partial` with `not_logged`. On `m4_deep` the flash files come out under the subvolume their
+log root names, hash-exact. Synthetic: overlay at the front, in the middle and at the end of a
+base extent, over an inline base, a log that shrinks the file, a reused inode number (no base),
+generation 0. README and evidence-db.md document it.
+
+**M5e-1 status 2026-09-22: done** (catalog.md, M5e-1 entry; `tests/test_logs.py`). Of the three
+items M5's status left open, two remain: deleted-subvolume recovery on a real image, and the
+btrfscue comparison.
 
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree

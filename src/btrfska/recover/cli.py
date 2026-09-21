@@ -47,6 +47,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
             dedup=not args.no_dedup,
             orphans=args.orphans,
             graph=args.graph,
+            logs=args.logs,
             maps=args.maps,
             rehash=not args.no_rehash,
             note=lambda line: _note(f"btrfska recover: {line}"),
@@ -118,6 +119,13 @@ def add_parser(sub) -> None:
         "a lone leaf is continued in the leaf that fits exactly, and a missing parent directory "
         "is named when its number has one name only; every join is recorded, an ambiguous one "
         "is refused",
+    )
+    parser.add_argument(
+        "--logs",
+        action="store_true",
+        help="also read every log tree the scan found, live or dropped, under the subvolume that "
+        "its log root tree names, replayed read-only over the newest cataloged state older than "
+        "the log: what was fsynced and not yet, or never, committed",
     )
     parser.add_argument(
         "--tree",

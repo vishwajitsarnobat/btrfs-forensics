@@ -20,6 +20,44 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-22 — M5e-1: log trees in recovery: which subvolume, and a read-only replay
+
+- **Branch:** `feature/m5-log-trees` (from `main` at `9004d5f`). New `src/btrfska/recover/logs.py`,
+  `tests/test_logs.py`; changed `recover/engine.py`, `recover/cli.py` (`--logs`),
+  `recover/dbtree.py` (`Root.subvolume`, `Root.named_by`), `recover/inodes.py`,
+  `docs/evidence-db.md`, `README.md`, plan.md. No change of the DDL.
+- **Planned first** (plan.md "M5e-1"). It closes the first of the three items M5's status left
+  open.
+- **Which subvolume a log tree logged.** A log root tree holds one ROOT_ITEM per logged subvolume
+  (key objectid -6, key offset = the subvolume's id). `recover --logs` reads every log tree the
+  scan found, live or dropped, through that item: `source` `log:BYTENR@GEN`, `source_kind`
+  `log_tree`, the subvolume as `tree_id`, the join `log_root` in `joined`.
+- **Replay, read-only, as the kernel would at mount.** Over the subvolume's tree in the newest
+  cataloged state older than the log: a logged extent replaces its range, the rest of a base
+  extent stays (as a piece with adjusted offset and length), the logged INODE_ITEM gives the
+  size, nothing past the sector of the new end is kept. Only the same inode number *and*
+  creation generation is a base. The join `log_replay` names the base state.
+- **A rule that was missing since M4d: in a log tree a range without an extent item is not a
+  hole.** A fast fsync logs only what changed. Lone log leaves were read with the NO_HOLES rule
+  of committed trees, which would pass an appended file off as complete with zeros in front.
+  Without a base such a range is now `not_logged` and the file `partial`. No corpus file was
+  affected (the flash files are full fsyncs), so the mistake was latent.
+- **What it shows.** `m2_logtree` (live log, hashes logged by the guest): `sv1/fsynced.txt`, which
+  was never committed, and `sv1/committed.txt`, committed and then appended and fsynced, both come
+  out complete with the logged SHA-256; the second through a replay over `current`, whose own
+  copy has the old content. The top-level `fsynced.txt` is in the committed tree of generation
+  8, and the image's log root names one subvolume, not two as the scenario's header says;
+  probably its fsync fell back to a full commit (UNVERIFIED: not traced in the kernel). `m4_deep`: all 8 flash files come out under subvolume 5, hash-exact.
+- **Verification.** `uv run pytest`: 1 019 passed, 0 skipped (8 new): the overlay at the front, in
+  the middle and at the end of a base extent, over an inline base, a log that shrinks the file;
+  a reused inode number is no base; generation 0 is names without content; a lone log leaf with
+  an unlogged range is `partial` while a committed tree reads the same items as a hole; the two
+  images against their logs. Ruff clean; images unchanged. No corpus script changed.
+- **Limits.** Directory logging (DIR_LOG ranges: which names an fsync of a directory removed) is
+  not replayed: names come from the log's INODE_REFs, else from the base. A piece of a split
+  base extent shares its provenance row with the other piece. Log trees with internal nodes were
+  not seen. One live-log image, two dropped-log images.
+
 ## 2026-09-21 — M5d: `btrfska timeline`, and M5's definition of done
 
 - **Branch:** `feature/m5-timelines` (from `main` at `ba6f283`). New package

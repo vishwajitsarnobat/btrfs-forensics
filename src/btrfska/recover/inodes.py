@@ -54,6 +54,8 @@ class InodeRecord:
     orphan_item: bool = False  # the tree lists it under ORPHAN_ITEM: unlinked, not yet cleaned up
     problems: list[str] = field(default_factory=list)
     joins: list[dict] = field(default_factory=list)  # recover/graph.py: what was joined, and why
+    log_only: bool = False  # from a log tree, without a base: what was not logged is not known
+    exists_only: bool = False  # logged with generation 0: names, no content
 
     @property
     def kind(self) -> str:
