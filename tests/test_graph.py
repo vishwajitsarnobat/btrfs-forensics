@@ -197,8 +197,8 @@ def test_a_cycle_of_parents_ends_unattached_without_a_crash():
     loop = [*dir_items_(300, b"a", parent=301)]
     back = [*dir_items_(301, b"b", parent=300)]
     rows, _, _ = graph_run([IN_DOCS, loop, back])
-    row = next(r for (kind, number), r in rows.items() if number == 400)
-    assert row["attached"] == 0
+    row = rows["orphan_node", 400]  # a chain that leads nowhere is no join
+    assert row["attached"] == 0 and row["joined"] == "[]"
 
 
 def test_paths_take_ancestors_only_for_directories_the_leaves_do_not_hold():

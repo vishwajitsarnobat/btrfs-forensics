@@ -41,7 +41,6 @@ from btrfska.recover.dbtree import (
 )
 from btrfska.recover.graph import ancestors, confirmed_by_dir_index, continue_file, pointer_join
 from btrfska.recover.inodes import (
-    MAX_DEPTH,
     ORPHAN_ITEMS,
     ROOT_DIR,
     InodeRecord,
@@ -455,20 +454,23 @@ def _join_lone_leaf(conn, run: _Run, root: Root, leaf: Leaf, inodes: dict, secto
             last.problems.append(f"not joined with another leaf: {outcome}")
     named, joins, refused = ancestors(conn, root.tree_id, inodes)
     for record in inodes.values():
-        current, steps = (record.names[0].parent if record.names else None), 0
-        while current is not None and current != ROOT_DIR and steps < MAX_DEPTH:
-            if current in named:
-                for join in joins.get(current, ()):
-                    child = record if steps == 0 else None
-                    confirmed = child is not None and confirmed_by_dir_index(
-                        conn, root.tree_id, current, record.objectid, record.names[0].name
-                    )
-                    record.joins.append(join | {"dir_index_names_this_file": confirmed})
-                current, steps = named[current].parent, steps + 1
-            else:
+        current, seen, found = (record.names[0].parent if record.names else None), set(), []
+        while current is not None and current != ROOT_DIR and current not in inodes:
+            if current in seen or current not in named:
                 if current in refused:
                     record.problems.append(f"no path: {refused[current]}")
+                found = []  # the chain does not reach the root directory: nothing was gained
                 break
+            seen.add(current)
+            for join in joins.get(current, ()):
+                if len(seen) == 1:  # the file's own directory: does it list the file?
+                    confirmed = confirmed_by_dir_index(
+                        conn, root.tree_id, current, record.objectid, record.names[0].name
+                    )
+                    join = join | {"dir_index_names_this_file": confirmed}
+                found.append(join)
+            current = named[current].parent
+        record.joins.extend(found)
     return named
 
 
