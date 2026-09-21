@@ -20,6 +20,24 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — EXP-004 addendum: the two-level root tree
+
+- **Branch:** `docs/exp004-multilevel-addendum` (from `main` at `6c944a2`). `experiments/EXP-004.md`
+  §6.6–§6.7 and §8, one sentence in paper-draft.md N5. No code change.
+- **Why:** EXP-004 listed one untested case: every root tree in its images was a single leaf, so
+  find-root's "highest level per generation" rule and btrfska's "nothing references it" rule could
+  not disagree. `m3_wide` (M3b) has a two-level root tree.
+- **Result.** The committed script, unchanged, on `m3_wide`: P1, P2 and P3 hold. btrfska indexes 25
+  root-tree blocks (10 nodes, 15 leaves); 12 are states; find-root printed 11, exactly the states
+  inside the current chunk map, and none of the 13 leaves a node references. Totals are now 14 of
+  14 images, 240 of 240 inside, 0 of 134 outside.
+- **Still untested:** a root-tree leaf whose parent node was lost. Here every parent survives.
+- **Side observation.** Without a final balance only one state (the mkfs-era one) lies outside the
+  current chunk map, against 13 on the s01-type images. Outside-map states come from chunk
+  relocation, as EXP-004 §6.6 cautions; how often that happens in practice is still M7's question.
+- **Verification:** the numbers were read from the run's `results.jsonl`; find-root ran on a
+  scratch copy, which it left unchanged; `m3_wide.img` still matches its build record.
+
 ## 2026-09-21 — M3b: contents, items, tree edges and the four reverse queries (completes M3)
 
 - **Branch:** `feature/m3b-items-and-queries` (from `main` at `2ad52ea`). New
