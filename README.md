@@ -15,7 +15,7 @@ cataloged root, from leaves no root tree leads to (dropped log trees included) a
 the kernel lists under ORPHAN_ITEM, each labelled with its source. M5 (reconstruction and
 timelines) has begun: the catalog keeps the chunk maps of superseded chunk-tree roots, and
 `recover` reads a state from before a balance through the map of its own time. The earlier prototype is frozen, still runnable, under `legacy/`.
-- `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID|all]... [--tree ID|all] [--orphans]`
+- `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID|all]... [--tree ID|all] [--orphans|--graph]`
   extracts the files of a tree as the current, a backup or a discovered root saw them, and with
   `--orphans` also from leaves that no root tree leads to, one extent at a time, with a
   provenance record per file. It writes only below the new directory
@@ -535,7 +535,7 @@ sqlite3 -readonly images/scratch/sandbox.db \
 
 ### `btrfska recover`
 
-`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--maps own|current] [--no-dedup] [--no-rehash]`
+`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--graph] [--maps own|current] [--no-dedup] [--no-rehash]`
 extracts files. `DB` is the evidence database built from `IMAGE` (`catalog build`, best with
 `--full-sweep`); the image's size and SHA-256 must match the ones recorded there (`--no-rehash`
 skips the hash, and the run is recorded as not checked).
@@ -580,6 +580,26 @@ skips the hash, and the run is recorded as not checked).
   `orphan_item` with or without `--orphans`: its content is intact and it has no name, so the
   database is searched for the name it had (same inode number *and* creation generation), and it
   is written as `.btrfska-orphan-items/INODE_NAME`.
+- **`--graph`: the orphan graph.** `--orphans` joins nothing, because a wrong join makes a file
+  that never existed. `--graph` reads the same blocks and makes the joins that can be justified,
+  writes the justification into every artifact it touches (`source_kind` `orphan_graph`, column
+  `joined`), and refuses the rest. *Fragments* first: a file-tree internal node that no scanned key
+  pointer, no ROOT_ITEM and no superblock slot names is walked like a tree, each child reached
+  through its parent's pointer (`fragment:BYTENR@GEN`, output under
+  `DIR/orphan_graph/tree_ID/fragment_BYTENR_genG/`). Most orphan leaves hang under one. A fragment
+  is a tree version that was written within a transaction and replaced before the commit, or one
+  whose root tree is lost; its blocks were written at different moments, and it was never a
+  committed state. Then the leaves under no fragment, as with `--orphans`, plus two joins: a file
+  cut by the end of its leaf is continued in another leaf of the same tree when the extents of
+  both cover the file exactly, none is newer than the INODE_ITEM and the other leaf was not
+  written before the INODE_ITEM's last change; and a parent directory the leaf does not hold is
+  named from other leaves of the tree when its number has exactly one name there. Two candidates
+  that differ mean no join, and the artifact's problems say so.
+- **A file is not `complete` when one of its extents is newer than its INODE_ITEM** (`missing`
+  reason `inode_item_older_than_extent`). A commit always updates the inode item, so no committed
+  tree holds such a file; a leaf written in the middle of a transaction can, and then the data is
+  already the new one while the size is still the old one. In blocks that were never committed
+  the same is concluded when an extent reaches past the sector of the end of the file.
 - **One extent at a time.** An extent is mapped in full first, then read and written in pieces
   of at most 1 MiB; memory does not grow with file size. Inline, regular and prealloc extents,
   holes (left sparse in the output), zlib, zstd and LZO are handled as in `cat`.
@@ -608,7 +628,7 @@ skips the hash, and the run is recorded as not checked).
   `inode_transid`, `kind`, `path`, `attached`, `names`, `size`, `mode`, `xattrs`,
   `symlink_target`, `status`, `bytes_written`, `sha256`, `extent_signature`, `duplicate_of`,
   `output_path`, `in_current` (1 when the current tree still holds this inode with the same
-  creation generation, 0 when it was deleted since), `chunk_maps`, `missing`, `problems`, and `inode` (the
+  creation generation, 0 when it was deleted since), `chunk_maps`, `joined`, `missing`, `problems`, and `inode` (the
   whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
 - Exit status 0 when every file is complete; 1 when any is `partial`, `refused_encrypted` or
   `failed`, or on an error (unknown root, wrong image, `DIR` exists); 2 for a refused format.

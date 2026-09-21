@@ -53,6 +53,7 @@ class InodeRecord:
     encrypted_name: bool = False  # a directory entry marks it FT_ENCRYPTED
     orphan_item: bool = False  # the tree lists it under ORPHAN_ITEM: unlinked, not yet cleaned up
     problems: list[str] = field(default_factory=list)
+    joins: list[dict] = field(default_factory=list)  # recover/graph.py: what was joined, and why
 
     @property
     def kind(self) -> str:
@@ -133,25 +134,29 @@ def safe_component(name: bytes, objectid: int) -> tuple[bytes, str | None]:
     return cleaned, None if cleaned == name else f"name {name!r} written as {cleaned!r}"
 
 
-def paths(inodes: dict[int, InodeRecord]) -> dict[int, tuple[tuple[bytes, ...], bool]]:
+def paths(
+    inodes: dict[int, InodeRecord], ancestors: dict[int, Name] | None = None
+) -> dict[int, tuple[tuple[bytes, ...], bool]]:
     """objectid -> (path components under the output root, attached to the root directory).
 
     An inode's path follows the first name of each ancestor. A chain that meets a missing inode,
     an inode without a name, or itself, ends under UNATTACHED/<objectid of where it broke>.
+    `ancestors` names directories the leaves do not hold (recover/graph.py).
     """
     done: dict[int, tuple[tuple[bytes, ...], bool]] = {ROOT_DIR: ((), True)}
+    known = dict(ancestors or {})
+    known.update({number: record.names[0] for number, record in inodes.items() if record.names})
 
     def resolve(objectid: int) -> tuple[tuple[bytes, ...], bool]:
         chain, current = [], objectid
         while current not in done:
-            record = inodes.get(current)
-            if record is None or not record.names or current in chain or len(chain) >= MAX_DEPTH:
+            if current not in known or current in chain or len(chain) >= MAX_DEPTH:
                 done[current] = ((UNATTACHED, str(current).encode()), False)
                 break
             chain.append(current)
-            current = record.names[0].parent
+            current = known[current].parent
         for member in reversed(chain):
-            first = inodes[member].names[0]
+            first = known[member]
             base, attached = done[first.parent]
             component, _ = safe_component(first.name, member)
             done[member] = ((*base, component), attached)

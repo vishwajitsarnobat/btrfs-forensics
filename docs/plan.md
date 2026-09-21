@@ -1481,6 +1481,88 @@ a test in `tests/test_linkage.py`; the first one was also checked once against t
 `m2_logtree` has a backup slot whose blocks were rewritten: its oldest slot's root, extent and dev
 tree addresses now hold blocks of other trees (`owner`, `parent_generation`).
 
+**M5c: the orphan graph** (design fixed 2026-09-21, before implementation). Three pull requests:
+M5c-1 joins (this design), M5c-2 log trees (which subvolume a dropped log leaf logged; replay of
+the live log), M5c-3 deleted subvolumes (a scenario and its images). btrfs-rec's `rebuild-trees`
+is the prior art for reattaching lost branches (research.md §2.5); it repairs a filesystem,
+this assembles evidence read-only and says on what grounds.
+
+*What M4 left open.* `recover --orphans` reads each leaf that no root tree leads to on its own:
+a file whose items continue in the next leaf stays `partial`, a file whose directory is in
+another leaf has no path, and nothing is ever joined. A wrong join makes a file that never
+existed, so M4 refused all joins. M5c-1 allows the ones that can be justified, names the
+justification on every artifact, and refuses the rest.
+
+*What a survey of the corpus showed first* (2026-09-21, `m4_deep`, one build): of 345 orphan
+leaves, 303 are named by the key pointer of a scanned internal node, and 110 internal nodes of
+file trees are named by no pointer and no ROOT_ITEM. Most orphan leaves are therefore not alone:
+they hang under tree versions whose root was written to disk and replaced before the commit.
+
+*Decisions.*
+1. **Three kinds of join, in order of strength.**
+   - `pointer`: a scanned internal node names the child by address and generation, the child is
+     one level down, its owner fits and its first key is the pointer's key. This is the evidence
+     an anchored walk uses. A **fragment** is everything reached this way from a file-tree block
+     that no pointer, no ROOT_ITEM and no superblock slot names; it is walked like a tree
+     (`fragment:BYTENR@GEN`).
+   - `sibling`: a lone leaf ends inside a file (M4's `continues_elsewhere`). Another leaf of the
+     same tree continues it when its first key belongs to the same inode and lies above the
+     head's last key, head and tail together cover the file exactly (no gap, no overlap, the
+     last extent ends at `i_size`, rounded up to a sector for regular extents), no extent item is
+     newer than the INODE_ITEM (`generation` ≤ `transid`), and the tail leaf was not written
+     before the INODE_ITEM's last change (header generation ≥ `transid`). *The last condition
+     was added during implementation, before any measurement:* the same leaf boundary exists in
+     dozens of versions of a tree (33 candidate tails for one padding file of `m4_deep`), and an
+     older tail of the right size would pass for the file's content when the right one is lost.
+     A leaf written at or after the last change holds the file as it was then or later, and a
+     later change of content shows as a newer extent or a different cover.
+     A chain over several leaves is followed the same way. With NO_HOLES a gap could be a hole, so
+     a file with holes is not joined: refused, and said so.
+   - `parent_path`: the file's INODE_REF names its parent's inode number. The parent's name is
+     taken from the scanned leaves of the same tree only when that number has exactly one name
+     there (one creation generation, one (parent, name) pair); a DIR_INDEX of the parent that
+     names this file under this name is recorded as confirmation. The chain is followed upward
+     to the root directory.
+2. **An ambiguous join is refused.** Two candidates that would give different results (two
+   tails with different items, two names for the parent number, two creation generations of
+   it) mean no join: the artifact stays what M4 made it, and its problems list the candidates.
+   Candidates that are byte-identical for the file are one candidate.
+3. **Every joined artifact says what was joined and on what evidence.** `source_kind` is
+   `orphan_graph`; the new column `artifacts.joined` is a JSON list of joins, each with its kind,
+   the blocks involved and the evidence in words; `provenance` names every item as before. A
+   fragment's artifacts also say that no ROOT_ITEM names their tree: it is a version written
+   within a transaction and replaced before the commit, or one whose root tree is lost, and its
+   blocks were written at different moments of that transaction. It was never a committed state.
+4. `recover --graph` does this; `--orphans` keeps M4's meaning (lone leaves, never joined), so
+   EXP-006 regenerates unchanged. With `--graph`, fragments come after the roots and before the
+   remaining lone leaves, and a leaf under a fragment is not read again on its own.
+5. Timelines (M5d) use `orphan_graph` artifacts as a third source, marked as such.
+6. **Schema version 6:** `artifacts.joined`; the `source_kind` value `orphan_graph`.
+
+*Bounds.* At most 4096 fragments per recovery (newest first); a tail chain of at most 64 leaves;
+a parent chain of at most 4096 (as `paths`). A bound that bites is reported in the run summary.
+
+*Definition of done for M5c-1.*
+- on `m4_deep` and `m3_wide`, files that `--orphans` leaves `partial` (`continues_elsewhere`) come
+  out `complete` with `--graph` where a join is justified, and every such file that an anchored
+  root also holds with the same inode, creation generation and `transid` has the same extent
+  signature; every `complete` padding file of `m4_deep` has one of the contents the scenario can
+  have produced for its name, and every logged file its logged hash;
+- files that were unattached gain a path where the parent has one name, and none where it has two;
+- forged input: two tails that differ, a tail newer than the head, a tail that overlaps or
+  leaves a gap, a parent number with two names, a parent cycle, a fragment whose pointer names a
+  block of another owner or first key: each refused or reported, no crash;
+- every `orphan_graph` artifact has a non-empty `joined`, and its provenance names only leaves
+  the joins list;
+- EXP-008 registered before measuring, five builds; README and evidence-db.md document it.
+
+**M5c-1 status 2026-09-21: done** (catalog.md, M5c-1 entry; EXP-008). Each bullet of its
+definition of done is a test in `tests/test_graph.py` or a row of EXP-008 §6. Two rules came out
+of the experiment's own checks and are now part of recovery for every orphan source: a file with
+an extent newer than its INODE_ITEM, or (in a block that was never committed) with data past the
+end of the file, is not `complete`. M5c-2 (log trees) and M5c-3 (deleted subvolumes) follow
+M5d: timelines are M5's definition of done and need only the joins that exist now.
+
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.

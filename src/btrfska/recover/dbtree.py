@@ -36,7 +36,9 @@ class Root:
     bytenr: int
     generation: int
     level: int
-    kind: str = "anchored_root"  # or orphan_node: `bytenr` is then a leaf no state reaches
+    # anchored_root; orphan_node: `bytenr` is a leaf no state reaches, read on its own;
+    # orphan_graph: `bytenr` is the top of a fragment (`fragment_roots`), or such a leaf with joins
+    kind: str = "anchored_root"
 
 
 @dataclass(frozen=True)
@@ -161,12 +163,12 @@ def resolve_root(conn: sqlite3.Connection, spec: str, tree_id: int) -> Root:
 
 
 def _block(conn: sqlite3.Connection, bytenr: int, generation: int, level: int):
-    """(content_id, physical, status, first_key) of the valid block, or None."""
+    """(content_id, physical, status, first_key, owner) of the valid block, or None."""
     return conn.execute(
         "SELECT n.content_id, MIN(n.physical),"
         " CASE WHEN MAX(n.status = 'live') THEN 'live'"
         "      WHEN MAX(n.status = 'backup_reachable') THEN 'backup_reachable'"
-        "      ELSE 'unreferenced' END, c.first_key"
+        "      ELSE 'unreferenced' END, c.first_key, n.owner"
         " FROM nodes n JOIN contents c USING (content_id)"
         " WHERE n.valid = 1 AND n.bytenr = ? AND n.generation = ? AND n.level = ?"
         " GROUP BY n.content_id ORDER BY MIN(n.physical) LIMIT 1",
@@ -203,6 +205,44 @@ def _mismatched(conn: sqlite3.Connection, tree_id: int, bytenr: int, generation:
     return "; a valid block lies at that address, not followed: " + "; ".join(found)
 
 
+def leaf_by_content(conn: sqlite3.Connection, content_id: int) -> Leaf | None:
+    """The valid leaf holding this content, as `orphan_leaves` describes one."""
+    row = conn.execute(
+        "SELECT bytenr, generation, MIN(physical), MAX(status = 'live'),"
+        " MAX(status = 'backup_reachable') FROM nodes"
+        " WHERE valid = 1 AND level = 0 AND content_id = ? GROUP BY bytenr, generation"
+        " ORDER BY generation DESC LIMIT 1",
+        (content_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    status = "live" if row[3] else "backup_reachable" if row[4] else "unreferenced"
+    return Leaf(content_id, u64(row[0]), u64(row[1]), row[2], status)
+
+
+def fragment_roots(conn: sqlite3.Connection, limit: int) -> tuple[int, list[Root]]:
+    """(how many there are, the newest `limit` of them): internal nodes of file trees that no
+    scanned key pointer, no ROOT_ITEM and no superblock slot names (plan.md M5c). Each is the
+    top of a fragment: a tree version that was never committed, or whose root tree is lost."""
+    rows = conn.execute(
+        "SELECT b.bytenr, b.generation, b.level, b.owner FROM blocks b WHERE b.level > 0"
+        " AND NOT EXISTS (SELECT 1 FROM key_ptrs k"
+        "   WHERE k.blockptr = b.bytenr AND k.ptr_generation = b.generation)"
+        " AND NOT EXISTS (SELECT 1 FROM root_items r"
+        "   WHERE r.bytenr = b.bytenr AND r.generation = b.generation)"
+        " AND NOT EXISTS (SELECT 1 FROM known_roots n"
+        "   WHERE n.bytenr = b.bytenr AND n.generation = b.generation)"
+        " ORDER BY b.generation DESC, b.bytenr"
+    ).fetchall()
+    found = [
+        Root(f"fragment:{u64(bytenr)}@{u64(generation)}", None, u64(owner), u64(bytenr),
+             u64(generation), level, kind="orphan_graph")
+        for bytenr, generation, level, owner in rows
+        if is_subvolume_tree(u64(owner))
+    ]  # fmt: skip
+    return len(found), found[:limit]
+
+
 def tree_leaves(conn: sqlite3.Connection, root: Root) -> tuple[list[Leaf], list[str]]:
     """The leaves of `root`'s tree in key order, and one line per gap."""
     leaves, gaps, seen = [], [], set()
@@ -222,7 +262,13 @@ def tree_leaves(conn: sqlite3.Connection, root: Root) -> tuple[list[Leaf], list[
             other = _mismatched(conn, root.tree_id, bytenr, generation, level)
             gaps.append(f"{where}: not among the valid scanned blocks{other}")
             continue
-        content_id, physical, status, first_key = found
+        content_id, physical, status, first_key, owner = found
+        if owner_ok(root.tree_id, u64(owner)) is False:
+            gaps.append(
+                f"{where}: a block of tree {u64(owner)}, not of this tree (linkage mismatch: "
+                "owner); not followed"
+            )
+            continue
         if expected_key is not None and first_key is not None and first_key != expected_key:
             gaps.append(
                 f"{where}: its first key is not the key its parent points to (linkage mismatch: "

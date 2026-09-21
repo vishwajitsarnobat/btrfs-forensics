@@ -5,7 +5,7 @@ learned to one SQLite file. Everything after it (recovery, timelines, confidence
 queries that file and not the image. This document is the contract: every table and column is
 listed here, and a test fails when one is not (`tests/test_catalog.py`).
 
-- **Schema version: 5.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
+- **Schema version: 6.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
   the DDL in `src/btrfska/catalog/schema.py` bumps it and adds a line to [Versions](#versions).
 - **One database, one image, one pass.** The path given to `--db` must not exist. A database is
   never overwritten; a rebuild is a new file. A pass that fails leaves no file. What the pass
@@ -403,8 +403,8 @@ and ATTACH. Rows are never deleted: a second recovery adds a second run.
 | `image_path` | the image path as given |
 | `image_checked` | 1 when the image's SHA-256 was compared with `scan_runs.image_sha256_before` and matched (a mismatch stops the run before anything is written); 0 with `--no-rehash`. The size is always compared |
 | `output_dir` | the directory that was created |
-| `options` | JSON: `roots` (as given), `tree_id` (a number or `all`), `dedup`, `orphans`, `maps` (`own` or `current`) |
-| `summary` | JSON: `artifacts` (count per status), `by_source` (count per source kind and status), `orphan_leaves` (lone leaves read), `bytes_written`, `gaps` (per root and tree, the blocks the tree walk could not follow) |
+| `options` | JSON: `roots` (as given), `tree_id` (a number or `all`), `dedup`, `orphans`, `graph`, `maps` (`own` or `current`) |
+| `summary` | JSON: `artifacts` (count per status), `by_source` (count per source kind and status), `orphan_leaves` (leaves no root tree leads to), `fragments` and `fragments_found` (fragments read with `--graph`, and how many there are; at most 4096 are read, newest first), `bytes_written`, `gaps` (per root and tree, the blocks the tree walk could not follow) |
 
 ### `artifacts`: one row per inode that was recovered, recorded or refused
 
@@ -412,8 +412,8 @@ and ATTACH. Rows are never deleted: a second recovery adds a second run.
 |---|---|
 | `artifact_id` | row id |
 | `recovery_id` | the run |
-| `source_kind` | how the inode was reached. `anchored_root`: a walk down from a cataloged root tree. `orphan_node`: a leaf read on its own (`recover --orphans`), either a file-tree leaf that no ROOT_ITEM in any scanned root-tree leaf leads to, or a leaf of a dropped log tree (`tree_id` -6). `orphan_item`: found by an anchored walk, in a tree that lists the inode under the kernel's ORPHAN_ITEM (unlinked while open) |
-| `source` | the root as the user names it: `current`, `backup:GEN` or `state:ID`; `orphan_node:BYTENR` for a lone leaf |
+| `source_kind` | how the inode was reached. `anchored_root`: a walk down from a cataloged root tree. `orphan_node`: a leaf read on its own (`recover --orphans`), either a file-tree leaf that no ROOT_ITEM in any scanned root-tree leaf leads to, or a leaf of a dropped log tree (`tree_id` -6). `orphan_item`: found by an anchored walk, in a tree that lists the inode under the kernel's ORPHAN_ITEM (unlinked while open). `orphan_graph` (`recover --graph`): assembled from blocks no root tree leads to, on the evidence `joined` records: every inode of a fragment, and an inode of a lone leaf that a join contributed to (a continuation in another leaf, or the name of a parent directory) |
+| `source` | the root as the user names it: `current`, `backup:GEN` or `state:ID`; `orphan_node:BYTENR` for a lone leaf; `fragment:BYTENR@GEN` for a fragment, named after its top block: a file-tree internal node that no scanned key pointer, no ROOT_ITEM and no superblock slot names. A fragment is a tree version that was written within a transaction and replaced before the commit, or one whose root tree is lost. Its blocks were written at different moments of that transaction: it was never a committed state |
 | `state_id` | the row of `states` that root is; NULL for `orphan_node` |
 | `tree_id` | *u64*; the fs or subvolume tree (for a lone leaf, the owner in its header) |
 | `root_bytenr`, `root_generation` | *u64*; that tree's root block under this root; for `orphan_node`, the leaf itself |
@@ -435,7 +435,8 @@ and ATTACH. Rows are never deleted: a second recovery adds a second run.
 | `output_path` | relative to `output_dir`: `SOURCE/tree_ID/PATH`; NULL when nothing was written |
 | `in_current` | 1 when the current tree of the same id holds this `objectid` with this `inode_generation`; 0 when it does not (deleted since, or the number was reused); NULL when the current tree could not be read completely |
 | `chunk_maps` | JSON list of the chunk maps (`chunk_maps.name`) the file's extents were read through, in order of first use; empty when no extent was read from disk (inline data, holes, duplicates). With `--maps own`, a root whose chunk root is the current one is read through `current` alone; any other root through its own map (`states.map_id`; for a lone leaf the newest map not newer than the leaf), then, only for an extent that map does not place, through the newer maps, oldest first, and last through `dev_extents`. An extent is always placed by one map as a whole. `complete` still means that every byte was read: a range freed by a balance may have been overwritten or trimmed since, and only a data checksum (plan.md M6) or a known hash says whether the bytes are the file's |
-| `missing` | JSON list of `[file offset, length, reason]`: an extent failure class of `substrate/extents.py` (`unmapped`, `unreadable`, a decode error, …), `overlap`, `short`, or `continues_elsewhere` (the last inode of a lone leaf: its remaining extent items may be in the next leaf, and with NO_HOLES a range without an item looks like a hole) |
+| `joined` | JSON list of the joins the artifact rests on (`recover/graph.py`); empty unless `source_kind` is `orphan_graph`. Each has `kind` and `evidence` (the grounds, in words). `pointer`: `fragment_root`, `generation`, `level`, and the fragment's `leaves` and `gaps`; every block was reached through its parent's key pointer (address, generation, level, first key, owner), as in an anchored walk. `sibling`: `objectid` and the `leaves` (bytenr, generation), head first; the file's items continue in the next leaf of the same tree, the extents of all of them cover the file exactly, none is newer than the INODE_ITEM, no joined leaf was written before the INODE_ITEM's last change, and no other scanned leaf continues the file differently. `parent_path`: the directory `objectid`, its `name_hex` and `parent`, the `leaves` holding that name, and, for the file's own directory, `dir_index_names_this_file` (whether a DIR_INDEX of that directory names this file under this name); the number has exactly one name and one creation generation in the scanned leaves of the tree. A join that would be ambiguous is not made: the artifact stays as `--orphans` gives it, and `problems` says why (`not joined with another leaf: …`, `no path: …`) |
+| `missing` | JSON list of `[file offset, length, reason]`: an extent failure class of `substrate/extents.py` (`unmapped`, `unreadable`, a decode error, …), `overlap`, `short`, `inode_item_older_than_extent` (the whole file: an extent's generation is above the INODE_ITEM's `transid`. A commit always updates the inode item, so no committed tree holds this; a leaf written within a transaction can, and then the data is the new one while size and times are the old ones. What was written is neither version, so it is not `complete`. The same reason is given, for orphan sources only, when the generations agree but an inline or regular extent reaches past the sector of the end of the file: within one transaction the inode item was written at an earlier moment than the extent), or `continues_elsewhere` (the last inode of a lone leaf: its remaining extent items may be in the next leaf, and with NO_HOLES a range without an item looks like a hole) |
 | `problems` | JSON list: names that had to be changed, FT_ENCRYPTED on the directory entry, item payloads that did not parse, findings of the extent reader (at most 16 distinct ones; all are in `provenance.read_record`). Among them, for a read through a historical map: that the extent was not placed by the root's own map; that a newer map gives the same logical address to a different chunk (the address was reused); that a newer map has allocated the disk space read to another chunk, so the bytes may have been overwritten |
 
 ### `provenance`: the items each artifact was built from
@@ -551,3 +552,8 @@ are never guessed, so a striped chunk known only from DEV_EXTENTs stays rejected
   current one: **a query that means the current map must say `WHERE map_id = 1`** (or `map_source
   = 'current'`, which worked before too). Nothing else changed meaning. A version-4 database is
   refused; rebuild it from the image.
+- **6** (2026-09-21): the orphan graph (plan.md M5c). `artifacts.joined`; the `source_kind` value
+  `orphan_graph` and the `source` form `fragment:BYTENR@GEN`; the `missing` reason
+  `inode_item_older_than_extent`, which also applies to `--orphans`: such a file was `complete`
+  before and is `partial` now; `graph`, `fragments` and `fragments_found` in `recovery_runs`.
+  Nothing the scan writes changed. A version-5 database is refused; rebuild it from the image.

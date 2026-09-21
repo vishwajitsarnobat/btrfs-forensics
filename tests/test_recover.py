@@ -222,8 +222,9 @@ def dir_item(child: int, name: bytes, file_type: int, value: bytes = b"") -> byt
     return head + name + value
 
 
-def inline(data: bytes) -> bytes:
-    return struct.pack("<QQBBHB", 7, len(data), 0, 0, 0, ondisk.FILE_EXTENT_INLINE) + data
+def inline(data: bytes, generation: int = 7) -> bytes:
+    head = struct.pack("<QQBBHB", generation, len(data), 0, 0, 0, ondisk.FILE_EXTENT_INLINE)
+    return head + data
 
 
 def regular(disk_bytenr, length, encryption=0) -> bytes:
@@ -237,7 +238,8 @@ def file_items(objectid: int, name: bytes, data: bytes, parent: int = 256, **ino
     return [
         ((objectid, K["INODE_ITEM"], 0), inode_item(len(data), **inode)),
         ((objectid, K["INODE_REF"], parent), inode_ref(name)),
-        ((objectid, K["EXTENT_DATA"], 0), inline(data)),
+        # written in the transaction of the inode's last change, as in a committed tree
+        ((objectid, K["EXTENT_DATA"], 0), inline(data, min(7, inode.get("generation", 7)))),
     ]
 
 
@@ -295,18 +297,22 @@ def _catalog(conn, trees: dict[str, list], loose: tuple[list, ...] = ()) -> None
         )
     for number, entry in enumerate(loose, start=len(trees) + 1):
         entry = entry if isinstance(entry, dict) else {"items": entry}
-        items, owner = entry["items"], entry.get("owner", 5)
-        bytenr, generation = META_LOGICAL + number * NODESIZE, 7 + number
-        leaf = make_node(bytenr, items=sorted(items, key=lambda e: e[0]), owner=owner,
-                         generation=generation)  # fmt: skip
+        items, owner = entry.get("items", []), entry.get("owner", 5)
+        bytenr = entry.get("bytenr", META_LOGICAL + number * NODESIZE)
+        generation, ptrs = entry.get("generation", 7 + number), entry.get("ptrs")
+        if ptrs is None:
+            leaf = make_node(bytenr, items=sorted(items, key=lambda e: e[0]), owner=owner,
+                             generation=generation)  # fmt: skip
+        else:  # an internal node: ((objectid, type, offset), child bytenr, child generation)
+            leaf = make_node(bytenr, level=1, ptrs=ptrs, owner=owner, generation=generation)
         conn.execute(
             "INSERT INTO nodes (physical, region_id, bytenr, generation, owner, level, nritems,"
             " valid, status, orphan, outside_map, legacy_orphan, log_tree, bytenr_mapped,"
             " maps_here, problems, content_id)"
-            " VALUES (?, 1, ?, ?, ?, 0, ?, 1, ?, 1, 0, 1, ?, 1, 1, '[]', ?)",
-            (META_PHYS + number * NODESIZE, bytenr, generation, s64(owner), len(items),
-             "live" if entry.get("log_tree") else "unreferenced", int(entry.get("log_tree", 0)),
-             writer.add(leaf, True)),
+            " VALUES (?, 1, ?, ?, ?, ?, ?, 1, ?, 1, 0, 1, ?, 1, 1, '[]', ?)",
+            (META_PHYS + number * NODESIZE, bytenr, generation, s64(owner), int(ptrs is not None),
+             len(ptrs or items), "live" if entry.get("log_tree") else "unreferenced",
+             int(entry.get("log_tree", 0)), writer.add(leaf, True)),
         )  # fmt: skip
     writer.flush()
     conn.execute(
@@ -1013,11 +1019,19 @@ def test_cli_recover_all_states_with_orphans_reports_the_orphan_sources(capsys):
         code = main(["recover", str(SANDBOX), "--db", str(database), "--out", str(d / "out"),
                      "--root", "all", "--orphans"])  # fmt: skip
         out = capsys.readouterr().out
-        assert code == 0 and out.count("\nroot state:") + out.startswith("root state:") >= 5
+        assert out.count("\nroot state:") + out.startswith("root state:") >= 5
         line = next(row for row in out.splitlines() if row.startswith("orphan sources:"))
         conn = db.open_readonly(database)
         leaves = len(orphan_leaves(conn))
+        # One orphan leaf holds large_target.txt at size 0 with its 5 MiB extent already
+        # attached: written between the data and the inode update. Not a version of the file.
+        partial = conn.execute("SELECT source_kind, path, missing FROM artifacts"
+                               " WHERE status = 'partial'").fetchall()  # fmt: skip
         conn.close()
+        assert code == 1 and [(r[0], r[1]) for r in partial] == [
+            ("orphan_node", "large_target.txt.partial")
+        ]
+        assert "inode_item_older_than_extent" in partial[0][2]
         assert line.startswith(f"orphan sources: {leaves} leaves no root tree leads to")
         assert (d / "out" / "orphan_nodes").is_dir()
 
