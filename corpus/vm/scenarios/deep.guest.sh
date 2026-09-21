@@ -1,11 +1,11 @@
 # Guest scenario deep (sourced by /init with the filesystem mounted at $MNT).
 # History that runs deeper than the four backup roots, without a balance. 48 subvolumes give the
-# root tree a second level (so a root-tree node can be lost while its leaves survive, EXP-004
-# §6.8). Then 24 rounds; each round
-# creates one victim file, commits, prints its SHA-256 as ground truth, deletes it, commits, and
-# then rewrites a seventh of 400 small padding files and commits again. A victim therefore exists
-# in exactly one committed generation, and about 75 generations pass in all, so no backup root
-# holds any victim but the last.
+# root tree a second level (EXP-004 §6.8 needs a root-tree node that can be lost while its leaves
+# survive). Then 24 rounds; each round creates one victim file, commits, prints its SHA-256 as
+# ground truth, deletes it, commits, and then rewrites a seventh of 400 small padding files and
+# commits again. A victim therefore exists in exactly one committed generation. About 90
+# generations pass in all, and the last victim is deleted six commits before the end, so no
+# backup root holds any victim.
 #
 # Odd victims are inline (about 1 KiB). Even victims are regular and grow from round to round,
 # and a small regular separator file is written behind each one before it is deleted: the hole
