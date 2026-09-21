@@ -3,8 +3,9 @@ name: CI
 # Cost: this repository is public, and GitHub Actions is free for public repositories on the
 # standard GitHub-hosted runners used here, so these jobs consume no paid minutes. The guards
 # below keep usage small anyway, and would matter if the repository were ever made private
-# (2,000 free minutes a month): nothing runs for documentation-only changes, a newer push cancels
-# the run it supersedes, and every job has a hard time limit (GitHub's default is 6 hours).
+# (2,000 free minutes a month): nothing runs for documentation-only changes, a newer push to a
+# pull request cancels the run it supersedes, and every job has a hard time limit (GitHub's
+# default is 6 hours).
 on:
   push:
     branches: [main]
@@ -12,9 +13,12 @@ on:
   pull_request:
     paths-ignore: ["docs/**"]
 
+# A newer push to a pull request cancels the run it supersedes. A run on main is never cancelled:
+# every commit on main gets a complete verification. Pull requests are grouped by number, so a run
+# that GitHub creates late for an already merged pull request cannot share a group with main.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
