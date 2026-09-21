@@ -58,6 +58,7 @@ def _line(event: dict) -> str:
             detail += "; the inode number was used before by another file"
     marks = "".join(
         f" [{mark}]" for mark, on in (
+            ("order within the generation assumed", event.get("order_assumed")),
             ("uncommitted", event.get("uncommitted_only")),
             ("inconsistent", event.get("inconsistent")),
         ) if on

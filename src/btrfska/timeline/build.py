@@ -48,10 +48,15 @@ class Seen:
     source: str  # current, backup:GEN, state:ID, fragment:BYTENR@GEN or orphan_node:BYTENR
     generation: int  # of the state's root tree, or of the block for an uncommitted source
     committed: bool
+    # Within one generation: uncommitted sources first, then root trees only the scan found (by
+    # address, which follows allocation order on a sequential allocator), then the one a
+    # superblock slot names. Generations are evidence; this order within one is an assumption,
+    # and events that rest on it say so (`order_assumed`).
+    rank: tuple[int, int] = (0, 0)
 
     @property
-    def order(self) -> tuple[int, int]:
-        return self.generation, int(self.committed)
+    def order(self) -> tuple[int, int, int, int]:
+        return (self.generation, int(self.committed), *self.rank)
 
 
 @dataclass(frozen=True)
@@ -161,17 +166,20 @@ class _TreeAt:
     observations: dict[tuple[int, int], Observation]  # (objectid, created) -> observation
 
 
-def _states(conn: sqlite3.Connection) -> list[tuple[int, int, str, bool]]:
-    """(state id, generation, label, whether its whole root tree was found), oldest first."""
+def _states(conn: sqlite3.Connection) -> list[tuple[int, int, str, bool, tuple[int, int]]]:
+    """(state id, generation, label, whether its whole root tree was found, rank within its
+    generation), oldest first."""
     rows = conn.execute(
-        "SELECT state_id, generation, known_as, root_tree_missing FROM states"
+        "SELECT state_id, generation, known_as, root_tree_missing, bytenr FROM states"
     ).fetchall()
     found = []
-    for state_id, generation, known_as, missing in rows:
+    for state_id, generation, known_as, missing, bytenr in rows:
         names = json.loads(known_as)
         label = "current" if "current" in names else (names[0] if names else f"state:{state_id}")
-        found.append((state_id, u64(generation), label, not missing))
-    return sorted(found, key=lambda row: (row[1], row[0]))
+        found.append(
+            (state_id, u64(generation), label, not missing, (int(bool(names)), u64(bytenr)))
+        )
+    return sorted(found, key=lambda row: (row[1], row[4]))
 
 
 class Timeline:
@@ -183,10 +191,10 @@ class Timeline:
         self.trees: dict[int, list[_TreeAt]] = {}  # tree id -> what each source shows, in order
         self.gaps: list[str] = []
         self._walked: dict[tuple, tuple[bool, dict]] = {}
-        for state_id, generation, label, _ in _states(conn):
+        for state_id, generation, label, _, rank in _states(conn):
             for root in resolve_roots(conn, f"state:{state_id}", None):
                 if tree_id in (None, root.tree_id):
-                    self._add(root, Seen(label, generation, True))
+                    self._add(root, Seen(label, generation, True, rank))
         if uncommitted:
             self._add_uncommitted()
         for shown in self.trees.values():
@@ -248,7 +256,14 @@ class Timeline:
         return found
 
     def events(self, tree_id: int) -> Iterator[dict]:
-        """Every event of one tree, by inode identity and then in order."""
+        """Every event of one tree, by inode identity and then in order. `order_assumed`: the
+        two sources that bound the event have the same generation, so which came first is an
+        assumption (see `Seen.rank`), not evidence."""
+        for event in self._events(tree_id):
+            bounds = event.get("generations")
+            yield event | {"order_assumed": bool(bounds) and bounds[0] == bounds[1]}
+
+    def _events(self, tree_id: int) -> Iterator[dict]:
         shown = self.trees.get(tree_id, [])
         committed = [tree for tree in shown if tree.seen.committed]
         by_number: dict[int, list[int]] = {}
@@ -328,7 +343,7 @@ class Timeline:
                 yield {
                     "event": "subvolume_deleted", "tree_id": tree_id, "objectid": None,
                     "created": None, "transaction": None, "between": [last.source, after[2]],
-                    "generations": [last.generation, after[1]],
+                    "generations": [last.generation, after[1]], "order_assumed": False,
                 }  # fmt: skip
 
 

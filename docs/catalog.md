@@ -20,6 +20,63 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — M5d: `btrfska timeline`, and M5's definition of done
+
+- **Branch:** `feature/m5-timelines` (from `main` at `ba6f283`). New package
+  `src/btrfska/timeline/` (`build.py`, `cli.py`), `tests/test_timeline.py`; changed `cli.py`,
+  `catalog/schema.py` (version 7), `recover/engine.py` (no more `in_current`),
+  `tests/test_recover.py`, `tests/test_deep.py`, `docs/evidence-db.md`, `README.md`, plan.md (M5d,
+  M5 status), paper-draft.md (C3, C6, G6).
+- **Planned first** (plan.md "M5d", committed before the code).
+- **What it is.** `btrfska timeline DB [--tree ID|all] [--inode N] [--uncommitted] [--json]`. Every
+  cataloged state (current, backup roots, roots only the scan found) is walked in the database;
+  every inode gives an observation; equal consecutive observations of one identity are a
+  version; events are the differences between versions: `create`, `rename`, `move`, `link`,
+  `unlink`, `modify` (with the byte ranges whose extent differs), `attr`, `touch`, `delete`,
+  `not_seen` (absence from a walk with gaps proves nothing), `subvolume_deleted`. Identity is
+  (tree, inode number, creation generation). Nothing is stored and the image is not needed.
+- **`--uncommitted`** adds fragments, lone leaves and log trees as sources that never prove a
+  delete. Log trees are filed under the subvolume that the ROOT_ITEM of their log root tree names
+  (key offset = subvolume id), which answers M4d's "a log leaf does not say which subvolume it
+  logged" for the timeline. A file fsynced and deleted within one transaction ends with
+  `never_committed`.
+- **`artifacts.in_current` is gone** (schema version 7), as M4b announced: a flag against one tree
+  became a bounded event for an identity.
+- **What it shows** (fixed images, one run each; image hashes in EXP-006 and EXP-007):
+  - `sandbox.img`: inode 257 is `target_file.txt` (created in generation 10, first seen in
+    `backup:11`, deleted between `backup:11` and `backup:12`) and then `large_target.txt` (created
+    in 13, deleted between `backup:13` and `current`), marked as a reused number. The prototype
+    reports one renamed file. With `--uncommitted`, `large_target.txt` also shows at size 0 and
+    with its 5 MiB extent attached to a size-0 inode item, both within generation 13.
+  - `m4_deep`: 49 trees, 1 774 events in 1.8 s. 21 of 24 victims have exactly one `create` and one
+    `delete`, 18 of the deletes bounded to a single generation (the others to 2, 6 and 9, where
+    the walks in between have gaps), each with the SHA-256 the guest logged. With `--uncommitted`,
+    8 of 8 flash files are `never_committed`, first seen in a dropped log tree of subvolume 5.
+  - `s01_discard_none_r1`: `deleted_big.txt` is created at size 0 and grows to 288 894 bytes
+    *within generation 7*, between two root trees of that generation.
+- **That last case was not foreseen.** Two root trees of one generation can survive, one of them
+  written in the middle of the transaction and never named by a superblock. Generations cannot
+  order them. They are taken by address, the superblock-named one last, and an event resting on
+  that says `order_assumed`.
+- **EXTENT_OWNER_REF is not used**, and the plan says why: simple quotas need btrfs-progs 6.7 in
+  the guest, the pin is 6.6.3, so no image could test an attribution.
+- **M5's definition of done is checked bullet by bullet in plan.md ("M5 status").** Both bullets
+  hold. Three items of M5's scope are open and moved to a follow-up instead of being claimed:
+  replay of the live log in `recover`, deleted-subvolume recovery on a real image (it needs a
+  scenario), and the btrfscue comparison (no x86-64 binary to pin).
+- **Verification.** `uv run pytest`: 1 010 passed, 0 skipped (14 new in `tests/test_timeline.py`):
+  each event kind on synthetic trees with the states that bound it; a reused inode number is two
+  files; hard links; one version across unchanged states; deltas compare what extents point at,
+  not how they are cut; a walk with a gap gives `not_seen`; uncommitted sources never delete;
+  same-generation states; payloads that do not parse and parent cycles; the sandbox's history;
+  `m4_deep` against its log; README keys against the command's JSON. Ruff clean; images
+  unchanged. No corpus script changed.
+- **Limits.** Several changes between two surviving states show as their net effect. A delete is
+  bounded by states, not timed: wall-clock times are copied from inode items and can be set by a
+  user. Directory content changes show as `touch` on the directory plus the children's own
+  events. Timelines are per tree: a move between subvolumes is a delete and a create. No
+  baseline was run (SecurityRonin's `recover_deleted` and a Beyond Carving-style set diff are M7).
+
 ## 2026-09-21 — M5c-1: the orphan graph, and what an uncommitted leaf really holds (EXP-008)
 
 - **Branch:** `feature/m5-orphan-graph` (from `main` at `c3ab79b`). New

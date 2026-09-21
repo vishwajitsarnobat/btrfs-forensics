@@ -582,12 +582,16 @@ items say so exactly: the creation generation for `create`, the version's `trans
 `create`) and `generations` (theirs), `path`, `attached`, `kind`, `size`, `transid`,
 `extent_signature`, `inconsistent`, `times`, `first_seen` and `last_seen` (`source` and
 `generation` of the version the event leads to; for `delete` and `not_seen`, of the last version),
-`seen_in` (how many sources showed that version), `uncommitted_only`, `sha256`. Added by kind:
+`seen_in` (how many sources showed that version), `uncommitted_only`, `sha256`, and `order_assumed`:
+true when the two bounding sources have the same generation. Two root trees of one generation can
+survive (one written in the middle of the transaction); generations cannot order them, so they are
+taken in the order of their addresses, the one a superblock slot names last, and the event says
+that this order is an assumption. Added by kind:
 `create` has `reused_inode_number` and `previous_creation_generations`; `rename` and `move` have
 `from` and `to` (`parent`, `name`, `path`); `link` and `unlink` have `name` (`parent`, `name`);
 `modify` has `size_before` and `delta`; `attr` has `before` and `after` (`mode`, `uid`, `gid`);
 `not_seen` has `reason`. A `subvolume_deleted` event has only `event`, `tree_id`, `between`,
-`generations` and `null` for `objectid`, `created` and `transaction`. The summary and the first
+`generations`, `order_assumed` and `null` for `objectid`, `created` and `transaction`. The summary and the first
 gaps go to stderr.
 
 ### `btrfska recover`

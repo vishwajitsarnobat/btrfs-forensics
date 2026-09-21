@@ -112,6 +112,19 @@ def test_a_change_of_the_inode_item_alone_is_a_touch_and_an_unchanged_file_is_on
     assert create["seen_in"] == 2 and create["last_seen"]["source"] == "backup:9"
 
 
+def test_two_states_of_one_generation_are_ordered_by_an_assumption_and_the_event_says_so():
+    empty = [*ROOT_DIR_ITEMS, *file_items(257, b"f", b"")]
+    written = [*ROOT_DIR_ITEMS, *file_items(257, b"f", b"data")]
+    with synthetic({"state:a": empty, "current": written}) as (conn, _, _):
+        conn.execute("UPDATE states SET generation = 9")  # both root trees of generation 9
+        conn.execute("UPDATE states SET known_as = '[]' WHERE known_as LIKE '%state:a%'")
+        events = [e for e in Timeline(conn).events(5) if e["objectid"] == 257]
+    assert [(e["event"], e["order_assumed"]) for e in events] == [
+        ("create", False), ("modify", True),
+    ]  # fmt: skip
+    assert events[1]["between"][1] == "current"  # the one a superblock slot names comes last
+
+
 def test_delta_compares_what_the_extents_point_at_not_how_they_are_cut():
     whole = ((0, 3 * SECTOR, ("regular", 100, 0), 0),)
     split = ((0, SECTOR, ("regular", 100, 0), 0), (SECTOR, 2 * SECTOR, ("regular", 100, 0), SECTOR))
