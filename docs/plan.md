@@ -1320,6 +1320,97 @@ live log tree (M5); data checksum verification and confidence tiers (M6).
   - `s01` (balance, 3/3 chunks relocated) yields a reconstructed historical
     chunk map and correctly-translated outside-map orphans.
 
+**M5 is built as four features, in this order** (decided 2026-09-21): M5a historical chunk
+maps, because a pre-balance state's file data cannot be read without them and everything later
+wants file content; M5b integrity and linkage checks; M5c the orphan graph, deleted subvolumes
+and log replay; M5d timelines. The prior-art watch was re-run first (research.md §11).
+
+**M5a: historical chunk maps** (design fixed 2026-09-21, before implementation).
+
+*What it is.* A balance gives every chunk a new logical address and removes the old chunks. The
+blocks and the file data of an older state still lie where the old chunks were, but the current
+chunk map no longer names those addresses, so today a pre-balance state's files come out
+`partial`, every extent `unmapped` (catalog.md, M4b). The superseded chunk-tree blocks are still
+on the disk. M5a reads them, stores one chunk map per surviving chunk-tree root, and lets
+`btrfska recover` read a state's data through the map of its own time.
+
+*Decisions.*
+1. **One map per chunk-tree root that survives.** Old-root discovery already finds candidate
+   chunk roots (owner 3, referenced by no block) and walks them through the block index, without
+   a chunk map (M2b: `states.maps_historical` counts what such a map places). M5a keeps those
+   maps instead of only counting: every candidate chunk root, and every chunk root a backup slot
+   names, becomes a map `historical:GEN@BYTENR` with its chunks, its stripes, the chunk-tree
+   blocks found and missing, and the sources naming it. The current map stays as it is, built
+   by `open_filesystem` from the superblock; a historical map is never merged into it.
+2. **DEV_EXTENTs are the second witness, and a fallback.** The dev tree records the same mapping
+   from the other side: (devid, physical) to (chunk logical, length). For every stripe of every
+   map, the catalog counts the scanned dev-tree leaves holding a DEV_EXTENT that agrees with it
+   (`stripes.dev_extents`; 0 means the stripe rests on the CHUNK_ITEM alone). A last map,
+   `dev_extents`, is assembled from DEV_EXTENTs only, for chunks whose CHUNK_ITEM did not
+   survive. A DEV_EXTENT does not record the profile, so a chunk is accepted there only when
+   it cannot matter: the BLOCK_GROUP_ITEM of that address names a mirrored or single profile
+   whose length equals the extents', or there is no such item and the filesystem has one device
+   (then every stripe is a full copy: SINGLE or DUP). A striped chunk, a chunk whose extents
+   disagree, or one address with two different stripe sets (the address was reused) is recorded
+   as rejected, with the reason. The pass never guesses a stripe order.
+3. **Which map a read goes through.** A state's own map is the one of its chunk root
+   (`states.chunk_root_*`, from the superblock or backup slot naming the state, else the newest
+   surviving chunk root not newer than the state; `states.map_id`). A state whose chunk root is
+   the current one is read exactly as today, through the current map and nothing else: the kernel
+   rule for the current state. For any other state the order is: its own map; then, only for an
+   address its own map does not hold, the maps newer than it, oldest first, ending with the
+   current one; then `dev_extents`. A chunk never moves (relocation makes a new chunk at a new
+   address), so a newer map that still holds the address is right unless the address was reused
+   in between. An orphan leaf is read like a state of its header generation.
+4. **Every read says which map it went through; no map overrides another silently.** An extent
+   is mapped by one map as a whole, and `ExtentRead.chunk_map` (in `provenance.read_record`)
+   names it. `artifacts.chunk_maps` lists the maps an artifact's content came through. A read
+   that did not go through the state's own map says so in the artifact's problems. When the
+   map used and a newer map place the same logical address at different physical offsets, the
+   address was reused, and the problems say so. When the physical range read lies inside a
+   chunk of a newer map, the space was given out again after the state, and the problems say
+   that the bytes may have been overwritten. `complete` keeps its meaning (every byte was
+   read); whether the bytes are the file's is settled by data checksums in M6, and until then by
+   the scenario's logged hashes in tests and experiments.
+5. **Outside-map blocks are checked against the maps, not assumed.** A tree block carries its own
+   logical address and a checksum, so it is ground truth for a map: a map places the block
+   correctly when it translates the header's `bytenr` to the offset the block was scanned at.
+   `node_maps` stores, for every valid block the current map does not place where it lies, each
+   historical map that does. This is the measurement behind "correctly translated outside-map
+   orphans" in M5's definition of done, and it is how a wrong reconstruction would show.
+6. **Schema version 5.** New table `chunk_maps`; `chunks.map_id` (and `chunks.map_source` keeps
+   the map's name); `stripes.dev_extents`; `states.map_id`; `node_maps`; `artifacts.chunk_maps`.
+   Every column documented in evidence-db.md; a version-4 database is refused.
+7. `recover --maps current` keeps the M4 behaviour (current map only), so the effect of the
+   historical maps can be measured with one tool. The default is `--maps own`.
+
+*Bounds, stated so that no result rests on one silently.* At most 4096 chunk maps are built
+(forged chunk roots must not flood the database); when the bound bites, `problems` says so. The
+walk of a chunk root uses the existing bounds of old-root discovery.
+
+*Not in M5a.* RAID5/6 parity reconstruction; multi-device images (the corpus has none before
+M7, so the multi-device rules are tested on synthetic chunk items only); reading tree blocks
+through a historical map in `walk`/`cat` (recovery takes metadata from the database, which
+already reaches them); the stale remap tree as a relocation log (C6's experimental part, later).
+
+*Definition of done for M5a.*
+- on `s01_discard_none_r1` the catalog holds the pre-balance chunk maps, and every stripe of
+  every historical chunk is confirmed by a DEV_EXTENT or reported as unconfirmed;
+- the files of a pre-balance state that M4 wrote as `partial` come out `complete`, and their
+  SHA-256 equals the one the scenario logged; with `--maps current` they are `partial` as before;
+- every artifact read through a map other than the current one names that map, in the artifact
+  and in the read record of each extent;
+- `node_maps` explains the position of outside-map blocks, and the test asserts it relative to
+  the image (each placement is recomputed from the stored chunks), never as a count;
+- the `dev_extents` map, built without any CHUNK_ITEM, translates like the CHUNK_ITEM maps for
+  every chunk both know (tested on the corpus, and with the CHUNK_ITEMs withheld);
+- hostile input: DEV_EXTENTs that overlap, disagree in length, name a striped block group, claim
+  an address twice with different stripes, or carry absurd lengths; forged chunk roots; a chunk
+  item whose stripes point past the image: no crash, nothing accepted that the rules above
+  reject, and the current map unchanged by any of it;
+- EXP-007 registered before measuring, five builds, median and range;
+- image hashes unchanged; every new column documented; README documents `--maps`.
+
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.
