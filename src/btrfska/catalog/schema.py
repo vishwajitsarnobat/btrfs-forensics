@@ -16,7 +16,11 @@ exactly as btrfs_comp_cpu_keys does; range and ordering queries use it.
 
 import struct
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# The tables a recovery appends to after the build (plan.md M4b). Every other table is written
+# by the one pass of `catalog build` and never again; catalog/db.py enforces that.
+RECOVERY_TABLES = ("recovery_runs", "artifacts", "provenance")
 
 _U64 = 1 << 64
 _S64_MAX = (1 << 63) - 1
@@ -419,6 +423,73 @@ CREATE TABLE extent_backrefs (
     FOREIGN KEY (content_id, slot) REFERENCES items(content_id, slot)
 );
 CREATE INDEX extent_backrefs_by_extent ON extent_backrefs (extent_bytenr);
+
+CREATE TABLE recovery_runs (
+    recovery_id    INTEGER PRIMARY KEY,
+    tool_version   TEXT    NOT NULL,
+    started_utc    TEXT    NOT NULL,
+    finished_utc   TEXT,
+    image_path     TEXT    NOT NULL,
+    image_checked  INTEGER NOT NULL,
+    output_dir     TEXT    NOT NULL,
+    options        TEXT    NOT NULL,
+    summary        TEXT
+);
+
+CREATE TABLE artifacts (
+    artifact_id       INTEGER PRIMARY KEY,
+    recovery_id       INTEGER NOT NULL REFERENCES recovery_runs(recovery_id),
+    source_kind       TEXT    NOT NULL,
+    source            TEXT    NOT NULL,
+    state_id          INTEGER REFERENCES states(state_id),
+    tree_id           INTEGER NOT NULL,
+    root_bytenr       INTEGER,
+    root_generation   INTEGER,
+    objectid          INTEGER NOT NULL,
+    inode_generation  INTEGER,
+    inode_transid     INTEGER,
+    kind              TEXT    NOT NULL,
+    path              TEXT    NOT NULL,
+    path_raw          BLOB    NOT NULL,
+    attached          INTEGER NOT NULL,
+    names             TEXT    NOT NULL,
+    size              INTEGER,
+    mode              INTEGER,
+    xattrs            TEXT    NOT NULL,
+    symlink_target    TEXT,
+    status            TEXT    NOT NULL,
+    bytes_written     INTEGER NOT NULL,
+    sha256            TEXT,
+    extent_signature  TEXT,
+    duplicate_of      INTEGER REFERENCES artifacts(artifact_id),
+    output_path       TEXT,
+    in_current        INTEGER,
+    missing           TEXT    NOT NULL,
+    problems          TEXT    NOT NULL
+);
+CREATE INDEX artifacts_by_inode ON artifacts (tree_id, objectid);
+CREATE INDEX artifacts_by_sha256 ON artifacts (sha256);
+
+CREATE TABLE provenance (
+    provenance_id  INTEGER PRIMARY KEY,
+    artifact_id    INTEGER NOT NULL REFERENCES artifacts(artifact_id),
+    seq            INTEGER NOT NULL,
+    role           TEXT    NOT NULL,
+    content_id     INTEGER NOT NULL,
+    slot           INTEGER NOT NULL,
+    bytenr         INTEGER NOT NULL,
+    generation     INTEGER NOT NULL,
+    physical       INTEGER NOT NULL,
+    block_status   TEXT    NOT NULL,
+    file_offset    INTEGER,
+    length         INTEGER,
+    extent_sha256  TEXT,
+    error_kind     TEXT,
+    read_record    TEXT,
+    FOREIGN KEY (content_id, slot) REFERENCES items(content_id, slot)
+);
+CREATE INDEX provenance_by_artifact ON provenance (artifact_id, seq);
+CREATE INDEX provenance_by_item ON provenance (content_id, slot);
 
 CREATE VIEW content_blocks AS
 SELECT content_id, bytenr, generation, level, owner,
