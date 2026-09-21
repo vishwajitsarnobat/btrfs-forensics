@@ -1,0 +1,13 @@
+{
+  "image": "sandbox.img",
+  "sha256": "07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418",
+  "captured": "2026-09-21",
+  "oracle": "the frozen prototype: `python main.py ../sandbox.img -o OUT --full-sweep` in legacy/ (experiments/exp005.py legacy runs it). Its report lists each file once per leaf copy it met; the distinct files are these two. Hashes are of the files it wrote.",
+  "recovered_files": [
+    {"filename": "large_target.txt", "inode": 257, "generation": 13, "extent_type": "regular",
+     "size": 5242880, "sha256": "dbbe5517996826bd5861ac22b745d21d11219055d89243ca1aea0ad31f552b12"},
+    {"filename": "target_file.txt", "inode": 257, "generation": 11, "extent_type": "inline",
+     "size": 31, "sha256": "a540534756d216e384005f896ba52164f4e671462340f0d59b239ad98ed3c866"}
+  ],
+  "note": "The prototype reports these two as one inode 257 that was renamed (its move_artifacts). They are two files: the inode number was reused, and the INODE_ITEM generations differ."
+}

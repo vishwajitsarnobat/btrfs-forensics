@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from btrfska.catalog import build, db
-from btrfska.catalog.schema import DDL, SCHEMA_VERSION, s64, u64
+from btrfska.catalog.schema import DDL, RECOVERY_TABLES, SCHEMA_VERSION, s64, u64
 from btrfska.cli import main
 from btrfska.scan.classify import scan_image
 from btrfska.scan.roots import discover_image
@@ -137,7 +137,7 @@ def test_build_tables_lists_every_table_of_the_schema():
     conn = sqlite3.connect(":memory:")
     conn.executescript(DDL)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert tables == set(build.TABLES)
+    assert tables == set(build.TABLES) | set(RECOVERY_TABLES)  # appended to by `recover`
 
 
 # ---------------------------------------------------------------------------
