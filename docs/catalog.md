@@ -20,6 +20,16 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — Checkpoint: M0 to M3 confirmed done before M4
+
+- **Branch:** `docs/mark-m0-m3-done` (from `main` at `45c08db`). plan.md only: status lines for M0
+  and M3, which had none (M1 and M2 had theirs).
+- **Confirmed at `45c08db`:** working tree clean, no open pull request; CI on `main` succeeded
+  with both jobs (`test`, `corpus`); locally `uv run pytest` 810 passed, 0 skipped, ruff clean;
+  `sandbox.img` matches its recorded SHA-256 and all 15 corpus images match their build record.
+- **Next:** M4, starting with EXP-005 (does copy-on-write zero node slack?), because its answer
+  shapes the slack-mining part of M4 and claim C1.
+
 ## 2026-09-21 — Merged branches are kept; the 22 deleted ones are restored
 
 - **Branch:** `docs/keep-merged-branches` (from `main` at `ed47e59`). One rule in `CONTRIBUTING.md`.
