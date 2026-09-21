@@ -942,9 +942,9 @@ volume-management slack.
   feeds, btrfs-progs releases, rustutils/btrfsutils progress).
 - Anything discussed in chat that matters must land in this file or
   catalog.md.
-- Latest refresh: **§10 (2026-09-15)**. Append later refreshes as new dated
-  top-level sections (§11, …) rather than rewriting §1–§8; fold confirmed
-  plan changes into plan.md.
+- Latest refresh: **§11 (2026-09-21)**, the re-run before M5; before it **§10
+  (2026-09-15)**. Append later refreshes as new dated top-level sections
+  rather than rewriting §1–§8; fold confirmed plan changes into plan.md.
 - Each refresh also re-checks: kernel `btrfs_tree.h` for new item types and
   tree objectids (remap tree = objectid 13 on current master), btrfs-progs
   mkfs defaults, discard/reclaim defaults (§10.3), and `dissect.btrfs`
@@ -2462,3 +2462,98 @@ usage string). It replaces the guesses in §2 and §10.11–§10.12.
 - Measured in EXP-004: on 13 images it printed exactly the root-tree blocks btrfska indexes inside
   the current chunk map, and none of the 133 states outside it. It left its input unchanged on 15
   of 15 images.
+
+---
+
+## 11. Prior-art re-run before M5 — 2026-09-21
+
+> **Scope:** the watch of §9, run again six days after §10 because plan.md §8 asks for it before
+> M5 starts. M5 builds the two claims a competitor could take first: timelines (C3) and historical
+> chunk maps (C6). Everything below was fetched on 2026-09-21 from the source named; what could
+> not be checked is marked **UNVERIFIED**. No PDF was downloaded and no paper was read in full, so
+> nothing here may be cited for its content yet.
+
+**Headline: nothing found changes C3 or C6.** No paper, preprint or tool does per-inode timelines
+on btrfs or keeps more than one chunk map. One new tool reads superseded btrfs leaves (a slice of
+C1, §11.2), and one date matters for the paper plan (§11.4).
+
+### 11.1 Literature
+
+- **No new btrfs paper since June 2026.** Crossref and OpenAlex keyword sweeps ("btrfs", "btrfs
+  forensic", "btrfs recovery", "copy-on-write file system forensic", "bcachefs forensic", "ZFS
+  forensic recovery", "APFS forensic deleted", "file system timeline reconstruction", "chunk tree",
+  "logical to physical" with recovery) and the arXiv API (`all:btrfs`, newest entry 2024) return
+  only works already in §4 and §10.1.
+- **Beyond Carving: still 0 citing works** (OpenAlex `W7168240764` `cited_by_count` 0 and an empty
+  `filter=cites:` list; Semantic Scholar `citationCount` 0; Crossref `is-referenced-by-count` 0,
+  which now gives vol. 14, pp. 120632–120660). `Vikaran101/btrfs-beyond-carving` is still empty
+  (GitHub API: size 0, last push 2026-07-08). Nobody has published its future work, which includes
+  the historical chunk tree.
+- **FSI:DI vol. 58 and vol. 59** (Crossref, journal 2666-2817, 33 records since 2026-08-01): the
+  file-system papers of vol. 58 are the two of §10.1 (Toolan & Humphries; Oh, Ext4 Log Tracker).
+  Vol. 59 (December, 8 records so far) has none. New and peripheral: Waguespack et al., "Scalpel3:
+  A high-performance data carving architecture for recovery of fragmented files", FSI:DI
+  59:302199, DOI 10.1016/j.fsidi.2026.302199 (Crossref record checked; no abstract deposited). A
+  carving baseline at most.
+- **DFRWS APAC 2026: the program is now published** (`dfrws.org/apac-2026-program/`; the 403 of
+  §10.1 was user-agent filtering). 15 accepted papers. None is about a file system, btrfs or
+  copy-on-write: the page does not contain the words. The nearest are SQLite WAL page recovery
+  ("WALRUS") and deleted-video recovery on a surveillance file system (Giri, Yoon & Hwang). **The
+  October re-check that §10.1 and plan.md §8 ask for is done.**
+- **Author feeds** (OpenAlex, publication date from 2026-06-01): Wani, Bhat, Hilgert, Göbel,
+  Baier, Dewald, Prade, Shon, Oh, Hwang, Toolan, Humphries, Bonnet, Pandey, Shetty. No file-system
+  work beyond what §10.1 lists.
+- **Copy-on-write timelines on other file systems** (ZFS uberblock history, APFS checkpoint or
+  snapshot diffing, ReFS checkpoints, bcachefs journal): nothing from 2026.
+- **Peripheral datasets, new to this file** (Zenodo API records checked; contents UNVERIFIED, no
+  accompanying paper found): Kim, "ReFS-Analyzer v1.0.0 Dataset (Image & Script)", DOI
+  10.5281/zenodo.21127503, CC BY 4.0 (ReFS images with generation scripts, a corpus analog for
+  C7); Gendre & Bharadwaj, "F2AF Metadata-Hiding F2FS Corpus", DOI 10.5281/zenodo.20763326, CC BY
+  4.0 (62 synthetic F2FS images, 58 with hidden data; an analog for C5 and C7).
+- **Not checked:** DBLP (the API returned a non-JSON body); ScienceDirect and IEEE Xplore full
+  texts (not attempted). OpenAlex boolean queries returned HTTP 500 and were re-run as plain
+  searches.
+
+### 11.2 Tools
+
+| Tool | State on 2026-09-21 (GitHub API) | Touches |
+|---|---|---|
+| `SecurityRonin/btrfs-forensic` | Active: 8 commits since `e6cd73f` (2026-08-26), the newest today. They add XATTR_ITEM decoding, hard links from INODE_REF, and a dependency on the author's `forensic-vfs`. crates.io still has `btrfs-forensic` 0.1.3 and `btrfs-core` 0.1.5. README and commit subjects read: `recover_deleted` is unchanged (one older FS tree, reached through a backup slot, diffed against the current one); the only chunk map is the current one. The same author's `state-history-forensic` crate defines time-indexed *types* and names btrfs among snapshot sources; it reads nothing | C3, C6: no change. Still the closest tool; re-read its source before submission |
+| **`nkbeast/ghost-recover`** (new to this file) | C++, MIT, v1.0.0 of 2026-08-14, 17 stars; a recovery suite for 44 file systems. Its btrfs module (`src/fs/btrfs.cpp`, read at `9ab2673`) builds the **current** chunk map, then steps through the METADATA and SYSTEM chunks of that map on the nodesize grid, first stripe only, and takes every leaf whose header carries the fsid and the address the map gives that position. It verifies **no checksum**, keeps per inode number the items of the newest generation seen, and calls an inode deleted when its `nlink` is 0 or it is seen only in older leaves. It skips ROOT_ITEMs and ignores the header's owner, so it has no states and does not tell subvolumes apart, and it reads nothing outside the current chunk map | A slice of C1 (superseded leaves inside the current map, unverified and keyed by inode number alone, the reuse pitfall of `sandbox.img` inode 257). Not C3, not C6. A candidate baseline for M7 |
+| `cblichmann/btrfscue` | unchanged: v0.7, last push 2026-07-04 | — |
+| `fox-it/dissect.btrfs` | unchanged: 1.10 on PyPI, last push 2026-03-19 | — |
+| `xbqt/forefst` (ReFS) | v1.12.3, 2026-09-13; nothing after the push §10.1 records | — |
+| The Sleuth Kit | 4.15.0 is still the newest release; btrfs is still only on `develop` | — |
+| `fkie-cad/mind-the-slack`, `Vikyek/btrfs-recovery-tool` | unchanged | — |
+| btrfs-progs | v7.1 (2026-07-14) is still the newest tag | — |
+| Kernel format | `include/uapi/linux/btrfs_tree.h` at `master` (v7.3-rc4) against v7.0: no key type or tree objectid added; one free-space flag mask added | — |
+
+A GitHub search for btrfs forensic, recovery, undelete and timeline repositories created since
+2026-08-15 or pushed since 2026-09-10 found nothing else on the topic. Two repositories near it
+were not opened: `noahsabaj/btrfs-peek` (a read-only reader) and `er1c-zh/synology-btrfs-recovery`.
+
+### 11.3 What this means for C3 and C6
+
+- **C3 (timelines): unchanged.** The comparison points stay Beyond Carving's objectid-set diff and
+  SecurityRonin's backup-slot diff, both existence-only. `ghost-recover` adds a third way to list
+  deleted files and none to order events. The wording of plan.md §1 stands.
+- **C6 (historical chunk maps): unchanged, with one sentence to keep exact.** Rebuilding *a* chunk
+  map by scanning a device is prior art from the repair tools, and the paper must say so:
+  `btrfs rescue chunk-recover` (btrfs-progs v7.1, `cmds/rescue-chunk-recover.c`, read today)
+  collects chunk, block-group and device-extent records from every checksum-valid leaf of the
+  chunk, dev and extent trees whose generation does not exceed the superblock's, keeps **one
+  record per key, the one of the highest generation** (l.131, 256, 313, 363: an older record is
+  dropped), and then **writes** a new chunk tree (`rebuild_chunk_tree`). `btrfs-rec
+  rebuild-mappings` (§2.5) has the same goal. What C6 claims is what they discard: the superseded
+  records, kept as one map per chunk-tree generation, stored as evidence, never written to the
+  image, and used to read what an older state points at. No tool or paper found does that.
+
+### 11.4 A date for the paper plan
+
+DFRWS EU has been renamed **Digital Forensics Conference Europe 2027** (30 March to 2 April 2027,
+Edinburgh). Its page (`dfrws.org/conferences/dfceurope2027/`, fetched today) gives, as extended
+deadlines: **abstract and title 2 October 2026, full paper 9 October 2026**, notification 4
+December. The call says full papers are 10 pages, double-blind, and appear in the proceedings
+(FSI:DI). That is 18 days from today, with M5 to M7 not yet built. Whether to aim for it with a
+narrower paper or to take the next DFRWS deadline is the maintainer's decision; plan.md §8 and
+paper-draft.md record the date.

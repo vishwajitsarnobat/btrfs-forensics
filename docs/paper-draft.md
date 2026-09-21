@@ -52,15 +52,16 @@ The tool name `btrfska` is a placeholder (§13).
 ## 2. Target venue and format
 
 **Primary: DFRWS (USA or EU), published in *Forensic Science International: Digital
-Investigation* (FSI:DI).** Fallback: **IEEE Access**. Both come from plan.md §8. Re-check DFRWS APAC
-2026 (19–22 Oct) accepted papers in October before submitting (plan.md §8, research.md §10.1).
+Investigation* (FSI:DI).** Fallback: **IEEE Access**. Both come from plan.md §8. The accepted papers
+of DFRWS APAC 2026 (19–22 Oct) were checked on 2026-09-21: none is about a file system
+(research.md §11.1).
 
 | Item | DFRWS (FSI:DI) | IEEE Access |
 |---|---|---|
 | Why | The venue of this literature: Hilgert et al. 2017/2018/2024, Schwietert & Hilgert 2025/2026, Oh & Hwang 2025, Toolan & Humphries 2026 (FSI:DI) | Where Beyond Carving appeared; fast, open access |
-| Next deadline | **check** (DFRWS USA 2027, DFRWS EU 2027 and DFRWS APAC 2027 calls) | Rolling submission |
-| Page or word limit | **check** the current call for papers (whether references and appendices count) | **check** the author guide; there is an article processing charge (**check** amount) |
-| Review model | **check** whether the call is double-blind. If it is, the tool name, repo URL and corpus DOI must be anonymised | **check** |
+| Next deadline | Digital Forensics Conference Europe 2027 (formerly DFRWS EU): abstract 2 October 2026, full paper **9 October 2026**, both marked extended on the conference page on 2026-09-21 (research.md §11.4). **check** the DFRWS USA 2027 and APAC 2027 calls | Rolling submission |
+| Page or word limit | 10 pages in the Europe 2027 call; **check** whether references and appendices count | **check** the author guide; there is an article processing charge (**check** amount) |
+| Review model | Double-blind in the Europe 2027 call, so the tool name, repo URL and corpus DOI must be anonymised | **check** |
 | Template | Elsevier FSI:DI two-column template; author–year citations, as in the DFRWS papers in `docs/papers/` (for example `docs/papers/schwietert_hilgert_mind_the_slack_2026.pdf`, "Carrier (2005)") | IEEE Access template, numbered citations |
 | Artifact | **check** whether DFRWS runs artifact evaluation this cycle; plan.md §8 plans a `uvx`-installable tool, a Zenodo corpus and EXP scripts regardless | Code and data availability statement |
 

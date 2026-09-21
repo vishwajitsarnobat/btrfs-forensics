@@ -20,6 +20,39 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — Prior-art re-run before M5: nothing changes C3 or C6
+
+- **Branch:** `docs/prior-art-rerun-m5` (from `main` at `e3506e3`). Documents only:
+  research.md (new §11, two pointers), plan.md §8, paper-draft.md §1 (venue table).
+- **Why.** plan.md §8 asks for the watch of research.md §9 to be run again before M5 starts,
+  because M5 builds the two claims a competitor could take first: timelines (C3) and historical
+  chunk maps (C6). The last run was six days old (§10, 2026-09-15).
+- **Result: nothing found changes C3 or C6.** No new btrfs paper or preprint since June; Beyond
+  Carving has 0 citing works and its code repository is still empty; FSI:DI vol. 58 and 59 and
+  the author feeds add nothing; no 2026 work on copy-on-write timelines for ZFS, APFS, ReFS or
+  bcachefs. The DFRWS APAC 2026 program is out (the re-check planned for October): 15 papers,
+  none on a file system.
+- **Tools.** `SecurityRonin/btrfs-forensic` is active (8 commits since the last look: xattrs,
+  hard links) but still diffs one backup-slot FS tree against the current one and knows only the
+  current chunk map. New to the record: `nkbeast/ghost-recover` (C++, MIT, v1.0.0), whose btrfs
+  module sweeps the leaves of the current map's metadata chunks without verifying a checksum and
+  merges items per inode number. A slice of C1, a baseline candidate for M7, neither C3 nor C6.
+  Kernel `btrfs_tree.h` at v7.3-rc4 adds no key type or tree objectid over v7.0.
+- **One sentence of C6 made exact.** Read in `cmds/rescue-chunk-recover.c` (btrfs-progs v7.1):
+  chunk-recover keeps one record per key, the newest generation, drops the older ones and writes
+  a new chunk tree. Rebuilding *a* chunk map by scanning is therefore prior art from repair
+  tools; C6 claims the superseded records, kept as one map per generation, as evidence, and used
+  to read what an old state points at.
+- **A date.** DFRWS EU is now the Digital Forensics Conference Europe 2027; its page gives 2
+  October (abstract) and **9 October 2026** (full paper, 10 pages, double-blind) as extended
+  deadlines. Recorded in plan.md §8 and the paper draft; whether to aim for it is the
+  maintainer's decision.
+- **Verification.** Every statement names the API or page it was read from; the deadline page,
+  the APAC program, the citation counts, the tool repositories and both source files were
+  fetched on 2026-09-21. No paper was read in full and no PDF was added, so none of the new works
+  may be cited for its content yet. Not checked: DBLP, publisher full texts. No code changed;
+  a change under `docs/` only starts no CI run.
+
 ## 2026-09-21 — M4e: the deep image, EXP-006, EXP-004 §6.8, and M4 done
 
 - **Branch:** `feature/m4-deep-image` (from `main` at `cf895f1`). New
