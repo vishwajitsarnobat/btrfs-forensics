@@ -31,6 +31,11 @@ from btrfska.substrate.fs import Filesystem, open_filesystem
 from btrfska.substrate.image import open_image
 
 BATCH = 2000  # node rows buffered between inserts
+# Root trees evaluated as states. `btrfska roots` keeps its small default (scan/roots.py
+# MAX_STATES bounds a terminal report); a catalog is what recovery works from, and a root tree
+# that is not cataloged cannot be recovered from, so the bound here only stops a flood of forged
+# candidates. When it bites, `problems` says so.
+MAX_STATES = 4096
 
 
 @dataclass(frozen=True)
@@ -317,6 +322,7 @@ def build_catalog(
     workers: int = 1,
     allow_unsupported: bool = False,
     rehash: bool = True,
+    max_states: int = MAX_STATES,
 ) -> Built:
     """Scan `image_path` once and write its evidence database to `db_path` (which must not exist).
 
@@ -358,8 +364,16 @@ def build_catalog(
                 found = discover(
                     img, index, ctx=ctx, chunk_map=fs.chunk_map, known=known_roots(fs.fields),
                     log_live=scan.reach.log_logical, walk_failures=scan.reach.walk_failures,
+                    max_states=max_states,
                 )  # fmt: skip
                 _insert_discovery(conn, found)
+                if found.root_tree_candidates > len(found.states):
+                    conn.execute(
+                        "INSERT INTO problems (source, detail) VALUES ('roots', ?)",
+                        (f"{found.root_tree_candidates} root tree candidates, only the newest "
+                         f"{len(found.states)} evaluated as states (--max-states): older root "
+                         "trees are in `nodes` and `root_items` but not in `states`",),
+                    )  # fmt: skip
                 after = img.sha256() if rehash else None
                 conn.execute(
                     "UPDATE scan_runs"

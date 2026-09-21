@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from btrfska.catalog.schema import s64, u64
 from btrfska.substrate.node import Item, Key, is_subvolume_tree
 from btrfska.substrate.ondisk import FS_TREE_OBJECTID as FS_TREE
+from btrfska.substrate.ondisk import ROOT_TREE_OBJECTID as ROOT_TREE
+from btrfska.substrate.ondisk import TREE_LOG_OBJECTID as LOG_TREE
 
 
 class RootNotCataloged(LookupError):
@@ -93,23 +95,40 @@ def every_state(conn: sqlite3.Connection) -> list[str]:
 
 
 def orphan_leaves(conn: sqlite3.Connection) -> list[tuple[Root, Leaf]]:
-    """Valid file-tree leaves that no cataloged state reaches, each as a root of its own.
+    """Valid file-tree leaves that no scanned root tree leads to, and leaves of dropped log
+    trees, each as a root of its own.
 
-    Reached means: among the leaves of tree 5 or of a subvolume under any row of `states`. That
-    is stricter than `nodes.status`, which knows the current and the backup roots only.
+    Reached means: among the leaves of a file tree whose root some ROOT_ITEM names, in any valid
+    root-tree leaf the scan found, of any generation. That covers every cataloged state, root
+    trees beyond the number evaluated as states, and root-tree leaves whose parent node is lost;
+    `nodes.status` knows the current and the backup roots only.
     """
+    named = conn.execute(
+        "SELECT DISTINCT r.tree_id, r.bytenr, r.generation, r.level FROM root_items r"
+        " JOIN content_blocks b USING (content_id) WHERE b.owner = ? AND r.bytenr != 0",
+        (ROOT_TREE,),
+    ).fetchall()
     reached: set[int] = set()
-    for spec in every_state(conn):
-        for root in resolve_roots(conn, spec, None):
+    for tree, bytenr, generation, level in named:
+        if is_subvolume_tree(u64(tree)):
+            root = Root("root_item", None, u64(tree), u64(bytenr), u64(generation), level)
             reached.update(leaf.content_id for leaf in tree_leaves(conn, root)[0])
     rows = conn.execute(
-        "SELECT content_id, bytenr, generation, owner, first_physical, live, backup_reachable"
-        " FROM content_blocks WHERE level = 0 ORDER BY owner, generation DESC, bytenr"
+        "SELECT content_id, bytenr, generation, owner, MIN(physical), MAX(status = 'live'),"
+        " MAX(status = 'backup_reachable'), MAX(log_tree) FROM nodes"
+        " WHERE valid = 1 AND level = 0 AND content_id IS NOT NULL"
+        " GROUP BY content_id, bytenr, generation, owner ORDER BY owner, generation DESC, bytenr"
     ).fetchall()
     found = []
-    for content_id, bytenr, generation, owner, physical, live, backup in rows:
+    for content_id, bytenr, generation, owner, physical, live, backup, in_live_log in rows:
         tree = u64(owner)
-        if content_id in reached or not is_subvolume_tree(tree):
+        if tree == LOG_TREE:
+            # A leaf of a log tree: what fsync wrote between two commits. The log the superblock
+            # still names is not orphaned (replaying it is reconstruction, plan.md M5); a log
+            # tree dropped by a later commit is, and no root tree ever pointed to it.
+            if in_live_log:
+                continue
+        elif content_id in reached or not is_subvolume_tree(tree):
             continue
         status = "live" if live else "backup_reachable" if backup else "unreferenced"
         leaf = Leaf(content_id, u64(bytenr), u64(generation), physical, status)

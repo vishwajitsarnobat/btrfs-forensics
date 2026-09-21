@@ -139,7 +139,8 @@ class _Run:
 
     @staticmethod
     def _base(root: Root) -> tuple[bytes, ...]:
-        tree = f"tree_{root.tree_id}".encode()
+        log = root.tree_id == ondisk.TREE_LOG_OBJECTID
+        tree = b"tree_log" if log else f"tree_{root.tree_id}".encode()
         if root.kind == "orphan_node":
             return b"orphan_nodes", tree, f"leaf_{root.bytenr}_gen{root.generation}".encode()
         return root.source.replace(":", "_").encode(), tree
@@ -470,7 +471,8 @@ def recover(
         lone = tuple(
             (root, leaf)
             for root, leaf in (orphan_leaves(conn) if orphans else ())
-            if tree_id is None or root.tree_id == tree_id
+            # a log leaf does not say which subvolume it logged, so it goes with any --tree
+            if tree_id in (None, root.tree_id) or root.tree_id == ondisk.TREE_LOG_OBJECTID
         )
         with open_image(image) as img:
             if img.size != scan["image_size"]:
