@@ -1096,7 +1096,7 @@ filesystem last written by an older kernel, where the prototype's technique does
 correctly. The parsers are ported to the spec, not line by line.
 
 *Decisions.*
-1. `recover/slack.py`, pure functions over one block's bytes:
+1. `substrate/slack.py` (a block parser belongs to the substrate, where the catalog may import it; §4.1 had pencilled in `recover/slack.py`), pure functions over one block's bytes:
    - `slack_range`: the two ranges `prepare_eb_write` zeroes (moved here from
      `experiments/exp005.py`, which imports it);
    - **stale items**: item headers on the leaf's 25-byte grid, from slot `nritems` to the end of
