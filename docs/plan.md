@@ -1708,6 +1708,35 @@ generation 0. README and evidence-db.md document it.
 items M5's status left open, two remain: deleted-subvolume recovery on a real image, and the
 btrfscue comparison.
 
+**M5e-2: a deleted subvolume on a real image** (design fixed 2026-09-22, before implementation;
+the second item M5's status left open).
+
+*What it is.* No new recovery code is expected: a subvolume whose ROOT_ITEM an older root tree
+still holds is recovered from that state (`recover --root all --tree all`, M4b); one that no
+ROOT_ITEM names any more is a fragment or a lone leaf for `recover --graph` (M5c-1); the timeline
+reports `subvolume_deleted` (M5d). None of it was ever run on a deleted subvolume, because the
+corpus has none. This adds the images and the tests, and fixes what they find.
+- **Scenario `delsubvol`** (`m5_delsubvol`): two subvolumes; the doomed one gets a directory,
+  one regular and one inline file whose SHA-256 the guest logs, and 300 small files so that its
+  tree has a second level; commit; `btrfs subvolume delete`, `btrfs subvolume sync` (the cleaner
+  drops the tree and removes the ROOT_ITEM); three more commits of small writes in the other
+  subvolume; unmount.
+- **`m5_delsubvol_lost_items`**, made by `corpus/mutate.py lose-root-items TREE`: every physical
+  copy of every root-tree leaf that holds a ROOT_ITEM of that tree is broken, as
+  `m4_deep_lost_parent` loses a node. Then no root tree names the subvolume, in any generation,
+  and only its own blocks can give it back. A natural history is unlikely to produce this (a
+  tree's blocks and its root-tree leaf are allocated side by side, EXP-006), so it is made.
+- Both rows go into `corpus/manifest.tsv`; the corpus scripts change, so a fresh clone runs
+  `./setup.sh`.
+
+*Definition of done.* On `m5_delsubvol`: the current state does not name the doomed tree, an
+older state does, the two logged files come back hash-exact from such a state, and the timeline
+has one `subvolume_deleted` for that tree, bounded by two states, and no per-file `delete` in
+it. On `m5_delsubvol_lost_items`: no scanned ROOT_ITEM names the tree; `recover --root all --tree
+all` gives none of its files; `recover --graph` gives both logged files hash-exact, as
+`orphan_graph`, with the doomed tree's id and their paths. Tests assert this relative to the
+images and their log. Whatever does not hold is reported as a finding, not tuned away.
+
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.
