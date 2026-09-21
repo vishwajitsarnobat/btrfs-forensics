@@ -34,6 +34,15 @@ Checks, in `CHECK_NAMES` order (kernel v7.0 references):
 - first_key: the first key equals the parent pointer's key (disk-io.c:418-436).
 A check whose reference is unknown (no parent, no chunk tree uuid yet) is recorded with ok=None.
 
+Two questions, one verdict (plan.md M5b). *Integrity*: is this a well-formed block of this
+filesystem? csum, bytenr, fsid, chunk_tree_uuid, generation, nritems, written, layout, and level
+below 8 (`check_integrity`). *Linkage*: is it the block the referrer meant? owner,
+parent_generation, first_key, and level against the expected level (`check_linkage`). The kernel
+needs both, and so does `read_node` by default (`linkage="enforce"`). A walk from an old root
+often finds a sound block that is newer than the old pointer says; with `linkage="report"` such
+a copy is used when no copy passes everything, and the node names the linkage checks it failed
+(`ValidatedNode.linkage_mismatch`). A copy that fails an integrity check is never used.
+
 Why a referenced block cannot be used (`node_failure`, one class per node):
 - `reused`: a copy passes every integrity check (csum, fsid, chunk_tree_uuid, nritems, written,
   layout, level below 8) but fails a linkage check (bytenr, level, owner, parent_generation,
@@ -71,6 +80,8 @@ CHECK_NAMES = (
     "parent_generation",
     "first_key",
 )
+LINKAGE_CHECKS = ("level", "owner", "parent_generation", "first_key")
+INTEGRITY_CHECKS = tuple(name for name in CHECK_NAMES if name not in LINKAGE_CHECKS) + ("level",)
 _HEADER = ondisk.HEADER.size
 # Trees whose leaves may never be empty (tree-checker.c:2052-2078; the extent tree unless
 # extent-tree-v2, which the feature gate refuses). Owner 0 is undefined.
@@ -257,11 +268,15 @@ def _layout(block, ctx: NodeContext, level: int, count: int) -> tuple[bool, str]
     return True, ""
 
 
-def check_block(block, ctx: NodeContext, logical: int | None, expect: Expect) -> tuple[Check, ...]:
-    """Validate one physical copy of a tree block; one `Check` per entry of `CHECK_NAMES`.
+def check_integrity(
+    block, ctx: NodeContext, logical: int | None, *, log: bool = False
+) -> tuple[Check, ...]:
+    """Is this a well-formed block of this filesystem? One `Check` per integrity check, `level`
+    (below BTRFS_MAX_LEVEL) included, in `CHECK_NAMES` order.
 
-    `logical` is the address the block was read for (None when scanning physical blocks).
-    Never raises on content; raises ValueError only when `block` is not nodesize bytes long.
+    `logical` is the address the block was read for (None when scanning physical blocks); `log`
+    applies the log tree's generation rule. Never raises on content; raises ValueError only when
+    `block` is not nodesize bytes long.
     """
     _require_size(block, ctx.nodesize)
     header = ondisk.HEADER.unpack_from(block)
@@ -286,7 +301,7 @@ def check_block(block, ctx: NodeContext, logical: int | None, expect: Expect) ->
         f"chunk_tree_uuid {header['chunk_tree_uuid'].hex()} != {ctu and ctu.hex()}",
     )
     generation = header["generation"]
-    if expect.log:
+    if log:
         record(
             "generation",
             generation == ctx.generation + 1,
@@ -301,14 +316,7 @@ def check_block(block, ctx: NodeContext, logical: int | None, expect: Expect) ->
         )
 
     level = header["level"]
-    if level >= ondisk.MAX_LEVEL:
-        record("level", False, f"level {level} >= {ondisk.MAX_LEVEL}")
-    else:
-        record(
-            "level",
-            expect.level is None or level == expect.level,
-            f"level {level} != expected {expect.level}",
-        )
+    record("level", level < ondisk.MAX_LEVEL, f"level {level} >= {ondisk.MAX_LEVEL}")
 
     count, owner = header["nritems"], header["owner"]
     limit = _capacity(ctx.nodesize, level)
@@ -335,7 +343,28 @@ def check_block(block, ctx: NodeContext, logical: int | None, expect: Expect) ->
         record("layout", *_layout(block, ctx, level, count))
     else:
         record("layout", None, "")
+    return tuple(checks)
 
+
+def check_linkage(block, ctx: NodeContext, expect: Expect) -> tuple[Check, ...]:
+    """Is this the block the referrer meant? One `Check` per entry of `LINKAGE_CHECKS`.
+
+    `level` here is the block's level against `expect.level`; whether the level is possible at
+    all is an integrity check. Never raises on content.
+    """
+    _require_size(block, ctx.nodesize)
+    header = ondisk.HEADER.unpack_from(block)
+    checks = []
+
+    def record(name: str, ok: bool | None, detail: str) -> None:
+        checks.append(Check(name, ok, detail if ok is False else ""))
+
+    level, generation, owner = header["level"], header["generation"], header["owner"]
+    record(
+        "level",
+        expect.level is None or level == expect.level,
+        f"level {level} != expected {expect.level}",
+    )
     record("owner", owner_ok(expect.owner, owner), f"owner {owner} != expected {expect.owner}")
     parent_gen = expect.generation
     relation = "newer: rewritten after the parent" if generation > (parent_gen or 0) else "older"
@@ -344,9 +373,11 @@ def check_block(block, ctx: NodeContext, logical: int | None, expect: Expect) ->
         None if parent_gen is None else generation == parent_gen,
         f"generation {generation} != parent pointer generation {parent_gen} ({relation})",
     )
+    count = header["nritems"]
+    fits = 0 < count <= _capacity(ctx.nodesize, min(level, 1))
     if expect.first_key is None:
         record("first_key", None, "")
-    elif not (nritems_ok and count):
+    elif not fits:
         record("first_key", False, f"no first key to compare with {expect.first_key}")
     else:
         first = _key(ondisk.ITEM.unpack_from(block, _HEADER))  # keys lead items and pointers
@@ -356,6 +387,20 @@ def check_block(block, ctx: NodeContext, logical: int | None, expect: Expect) ->
             f"first key {first} != parent key {expect.first_key}",
         )
     return tuple(checks)
+
+
+def check_block(block, ctx: NodeContext, logical: int | None, expect: Expect) -> tuple[Check, ...]:
+    """Validate one physical copy of a tree block; one `Check` per entry of `CHECK_NAMES`.
+
+    `check_integrity` and `check_linkage` merged: `level` fails when either of its halves does,
+    the impossible level first. Never raises on content; raises ValueError only when `block` is
+    not nodesize bytes long.
+    """
+    found = {check.name: check for check in check_linkage(block, ctx, expect)}
+    for check in check_integrity(block, ctx, logical, log=expect.log):
+        if check.name != "level" or check.ok is False:
+            found[check.name] = check
+    return tuple(found[name] for name in CHECK_NAMES)
 
 
 @dataclass(frozen=True)
@@ -377,6 +422,16 @@ class NodeCopy:
         return all(check.ok is not False for check in self.checks)
 
     @property
+    def linkage_mismatch(self) -> tuple[str, ...] | None:
+        """The linkage checks this copy fails when its every integrity check holds (empty for a
+        copy that passes everything); None when an integrity check fails or nothing was read."""
+        failed = [check.name for check in self.checks if check.ok is False]
+        impossible_level = self.level is None or self.level >= ondisk.MAX_LEVEL
+        if not self.readable or impossible_level or set(failed) - set(LINKAGE_CHECKS):
+            return None
+        return tuple(failed)
+
+    @property
     def readable(self) -> bool:
         """False when the copy's bytes could not be read (missing device, beyond the image end):
         its only check is then `readable`, and none of `CHECK_NAMES` ran."""
@@ -391,14 +446,23 @@ class NodeCopy:
 class ValidatedNode:
     logical: int
     copies: tuple[NodeCopy, ...]
-    chosen: int | None  # index into `copies` of the copy used; None when no copy is valid
+    chosen: int | None  # index into `copies` of the copy used; None when no copy is usable
     header: dict | None  # the chosen copy's header, else the first readable copy's (report only)
     problems: tuple[str, ...]  # every failed check of every copy, plus node-level findings
     _items: tuple[Item, ...] = field(default=(), repr=False)
     _key_ptrs: tuple[KeyPtr, ...] = field(default=(), repr=False)
+    # Only with linkage="report": the linkage checks the chosen copy fails. Its integrity holds,
+    # but it is not the block the referrer named, so what it holds belongs to another state.
+    linkage_mismatch: tuple[str, ...] = ()
 
     @property
     def valid(self) -> bool:
+        """The kernel's rule: a copy passes every check."""
+        return self.chosen is not None and not self.linkage_mismatch
+
+    @property
+    def usable(self) -> bool:
+        """A copy's items may be read: `valid`, or flagged with `linkage_mismatch`."""
         return self.chosen is not None
 
     @property
@@ -414,7 +478,7 @@ class ValidatedNode:
         return None if self.header is None else self.header["owner"]
 
     def _require_valid(self) -> None:
-        if not self.valid:
+        if not self.usable:
             raise InvalidNode(f"node {self.logical} has no valid copy: {'; '.join(self.problems)}")
 
     @property
@@ -436,8 +500,17 @@ def read_node(
     logical: int,
     ctx: NodeContext,
     expect: Expect = NO_EXPECTATIONS,
+    linkage: str = "enforce",
 ) -> ValidatedNode:
-    """Read and validate every copy of the tree block at `logical`. Never raises on content."""
+    """Read and validate every copy of the tree block at `logical`. Never raises on content.
+
+    `linkage` is `enforce` (a copy is used only when every check holds: the kernel's rule) or
+    `report` (when no copy passes everything, the first whose integrity checks all hold is used
+    and the node names the linkage checks it fails). A `report` read of the current state is the
+    caller's mistake, not prevented here.
+    """
+    if linkage not in ("enforce", "report"):
+        raise ValueError(f"linkage must be enforce or report, not {linkage!r}")
     try:
         physical_copies = chunk_map.copies(logical, ctx.nodesize)
     except MappingError as exc:
@@ -467,6 +540,10 @@ def read_node(
         blocks.append(block)
 
     chosen = next((i for i, copy in enumerate(copies) if copy.ok), None)
+    mismatch = ()
+    if chosen is None and linkage == "report":
+        chosen = next((i for i, copy in enumerate(copies) if copy.linkage_mismatch), None)
+        mismatch = () if chosen is None else copies[chosen].linkage_mismatch
     problems = [f"mirror {c.mirror}: {p}" for c in copies for p in c.problems]
     items, ptrs = (), ()
     if chosen is None:
@@ -484,13 +561,17 @@ def read_node(
             items, _ = parse_items(block, ctx.nodesize)
         else:
             ptrs, _ = parse_key_ptrs(block, ctx.nodesize)
-    return ValidatedNode(logical, tuple(copies), chosen, header, tuple(problems), items, ptrs)
+    return ValidatedNode(
+        logical, tuple(copies), chosen, header, tuple(problems), items, ptrs, mismatch
+    )
 
 
 FAILURE_CLASSES = (
     "reused", "mismatch", "corrupt", "overwritten", "zeroed", "unreadable", "unmapped",
 )  # fmt: skip
-INTEGRITY_CHECKS = frozenset({"csum", "fsid", "chunk_tree_uuid", "nritems", "written", "layout"})
+# The checks whose failure means damage, for `copy_failure`. A wrong bytenr or a generation above
+# the superblock's is an integrity failure too, but says "another block", not "a damaged one".
+_DAMAGE_CHECKS = frozenset({"csum", "fsid", "chunk_tree_uuid", "nritems", "written", "layout"})
 
 
 def copy_failure(copy: NodeCopy, expect: Expect) -> str | None:
@@ -504,7 +585,7 @@ def copy_failure(copy: NodeCopy, expect: Expect) -> str | None:
     failed = {check.name for check in copy.checks if check.ok is False}
     if "fsid" in failed:
         return "overwritten"
-    if failed & INTEGRITY_CHECKS or (copy.level is not None and copy.level >= ondisk.MAX_LEVEL):
+    if failed & _DAMAGE_CHECKS or (copy.level is not None and copy.level >= ondisk.MAX_LEVEL):
         return "corrupt"
     newer = expect.generation is not None and (copy.generation or 0) > expect.generation
     # Only a generation beyond the superblock's (a newer, uncommitted block) or linkage failed.
@@ -533,5 +614,7 @@ class NodeReader:
     chunk_map: ChunkMap
     ctx: NodeContext
 
-    def read(self, logical: int, expect: Expect = NO_EXPECTATIONS) -> ValidatedNode:
-        return read_node(self.img, self.chunk_map, logical, self.ctx, expect)
+    def read(
+        self, logical: int, expect: Expect = NO_EXPECTATIONS, linkage: str = "enforce"
+    ) -> ValidatedNode:
+        return read_node(self.img, self.chunk_map, logical, self.ctx, expect, linkage)
