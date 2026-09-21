@@ -131,6 +131,16 @@ def dir_items(data) -> list[dict]:
     return entries
 
 
+def xattr_items(data) -> list[dict]:
+    """XATTR_ITEM: the attributes packed in one item, each a name and its value bytes."""
+    found, pos = [], 0
+    for entry in dir_items(data):
+        pos += ondisk.DIR_ITEM.size + len(entry["name"].encode("utf-8", "surrogateescape"))
+        found.append({"name": entry["name"], "value": bytes(data[pos : pos + entry["data_len"]])})
+        pos += entry["data_len"]
+    return found
+
+
 def file_extent(data) -> dict:
     """EXTENT_DATA. Inline extents report `inline_size`; the data follows the 21-byte head."""
     head = _unpack(_FILE_EXTENT_HEAD, data)
