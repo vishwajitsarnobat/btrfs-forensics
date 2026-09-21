@@ -2307,11 +2307,14 @@ place with a pointer here.
   internal-node slack.
 - **Internal-node slack did not survive.** They report that when a node is copied on write "the
   slack space is not copied ... slack space is overwritten by zeros at each copy", so the message
-  remains only in the old, soon unallocated node. **UNVERIFIED against the kernel**, and it matters
-  to claim C1: it says nothing about leaves, where deleting an item moves data and leaves remnants
-  (the legacy prototype recovered such remnants from `sandbox.img`), and the old node is exactly
-  what btrfska reads. To settle in M4: check `btrfs_cow_block` in v7.0 and measure slack content
-  of superseded against live copies of the same node on the corpus.
+  remains only in the old, soon unallocated node. **Checked on 2026-09-21 (EXP-005): the
+  observation is right, the mechanism is not, and it holds for leaves too.** Copy-on-write copies
+  the whole block (`copy_extent_buffer_full`, v7.0 `ctree.c:511`); `prepare_eb_write`
+  (`extent_io.c:2215`, since v4.9) zeroes everything beyond `nritems` before every tree-block
+  write. No kernel-written block of the corpus has a non-zero slack byte, superseded blocks
+  included, so the old node holds nothing in its slack either. An earlier version of this note
+  said the legacy prototype "recovered such remnants from `sandbox.img`": what it saved there is
+  stale items left by `mkfs.btrfs`, not remnants of deleted files (EXP-005 §6.5).
 - **Correction to Göbel et al. 2024:** the 64 KiB before the second and third superblock copies is
   not free; their Fig. 1 shows a valid tree node 0x4000 bytes before the copy at 0x4000000. Only
   the area before the first copy is usable.
@@ -2433,7 +2436,8 @@ place with a pointer here.
 3. C5 is strengthened by a published statement that detection is unbuilt and easy, and gains a
    concrete correction of the published offsets.
 4. A new open question for M4: does copy-on-write zero the slack of an internal node, and of a
-   leaf?
+   leaf? **Answered by EXP-005:** the write path does, for both, since v4.9; C1 is narrowed
+   accordingly (plan.md §1).
 5. M7 should report file *states* recovered (Plum & Dewald) next to deleted files recovered, and
    three counts per tool (ExtSFR).
 6. M3 cites no database precedent.
