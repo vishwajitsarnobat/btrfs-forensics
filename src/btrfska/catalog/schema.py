@@ -16,7 +16,7 @@ exactly as btrfs_comp_cpu_keys does; range and ordering queries use it.
 
 import struct
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # The tables a recovery appends to after the build (plan.md M4b). Every other table is written
 # by the one pass of `catalog build` and never again; catalog/db.py enforces that.
@@ -101,8 +101,22 @@ CREATE TABLE problems (
     detail      TEXT NOT NULL
 );
 
+CREATE TABLE chunk_maps (
+    map_id           INTEGER PRIMARY KEY,
+    name             TEXT    NOT NULL UNIQUE,
+    kind             TEXT    NOT NULL,
+    root_bytenr      INTEGER,
+    root_generation  INTEGER,
+    root_level       INTEGER,
+    known_as         TEXT    NOT NULL,
+    blocks           INTEGER,
+    missing          INTEGER,
+    problems         TEXT    NOT NULL
+);
+
 CREATE TABLE chunks (
     chunk_id     INTEGER PRIMARY KEY,
+    map_id       INTEGER NOT NULL REFERENCES chunk_maps(map_id),
     map_source   TEXT    NOT NULL,
     accepted     INTEGER NOT NULL,
     logical      INTEGER NOT NULL,
@@ -121,8 +135,10 @@ CREATE TABLE stripes (
     devid         INTEGER NOT NULL,
     physical      INTEGER NOT NULL,
     dev_uuid      TEXT    NOT NULL,
+    dev_extents   INTEGER NOT NULL,
     PRIMARY KEY (chunk_id, stripe_index)
 );
+CREATE INDEX chunks_by_map ON chunks (map_id, logical);
 
 CREATE TABLE regions (
     region_id      INTEGER PRIMARY KEY,
@@ -173,6 +189,12 @@ CREATE INDEX nodes_by_block ON nodes (bytenr, generation);
 CREATE INDEX nodes_by_content ON nodes (content_id);
 CREATE INDEX nodes_by_owner ON nodes (owner, generation, level);
 
+CREATE TABLE node_maps (
+    node_id  INTEGER NOT NULL REFERENCES nodes(node_id),
+    map_id   INTEGER NOT NULL REFERENCES chunk_maps(map_id),
+    PRIMARY KEY (node_id, map_id)
+) WITHOUT ROWID;
+
 CREATE TABLE node_checks (
     node_id  INTEGER NOT NULL REFERENCES nodes(node_id),
     name     TEXT    NOT NULL,
@@ -210,6 +232,7 @@ CREATE TABLE states (
     chunk_root_level       INTEGER,
     chunk_root_source      TEXT,
     chunk_root_differs     INTEGER,
+    map_id                 INTEGER REFERENCES chunk_maps(map_id),
     maps_current           INTEGER NOT NULL,
     maps_historical        INTEGER,
     maps_neither           INTEGER NOT NULL,
@@ -498,6 +521,7 @@ CREATE TABLE artifacts (
     duplicate_of      INTEGER REFERENCES artifacts(artifact_id),
     output_path       TEXT,
     in_current        INTEGER,
+    chunk_maps        TEXT    NOT NULL,
     missing           TEXT    NOT NULL,
     problems          TEXT    NOT NULL
 );

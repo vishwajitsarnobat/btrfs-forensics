@@ -5,7 +5,7 @@ learned to one SQLite file. Everything after it (recovery, timelines, confidence
 queries that file and not the image. This document is the contract: every table and column is
 listed here, and a test fails when one is not (`tests/test_catalog.py`).
 
-- **Schema version: 4.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
+- **Schema version: 5.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
   the DDL in `src/btrfska/catalog/schema.py` bumps it and adds a line to [Versions](#versions).
 - **One database, one image, one pass.** The path given to `--db` must not exist. A database is
   never overwritten; a rebuild is a new file. A pass that fails leaves no file. What the pass
@@ -86,26 +86,42 @@ listed here, and a test fails when one is not (`tests/test_catalog.py`).
 | Column | Meaning |
 |---|---|
 | `problem_id` | row id |
-| `source` | `superblock` (copies disagree), `chunk_map`, `scan_plan`, `walk`, or `roots` (more root-tree candidates than `--max-states`: the older ones are in `nodes` and `root_items` but not in `states`) |
+| `source` | `superblock` (copies disagree), `chunk_map`, `scan_plan`, `walk`, or `roots` (more root-tree candidates than `--max-states`: the older ones are in `nodes` and `root_items` but not in `states`), or `chunk_maps` (more chunk-tree roots than the bound of 4096 historical maps: the roots a superblock slot names and then the newest were built) |
 | `detail` | the message |
 
-### `chunks` and `stripes`: the current chunk map
+### `chunk_maps`, `chunks` and `stripes`: the current chunk map and the historical ones
+
+A balance gives every chunk a new logical address and removes the old chunks. What older states
+point at then lies outside the current map, but the chunk-tree blocks that mapped it are usually
+still on the disk. The build stores one map per chunk-tree root it finds (plan.md M5a). **No map
+is merged into another, and none changes what the current map says.** Which map a recovery read
+went through is recorded with the read (`provenance.read_record`, `artifacts.chunk_maps`).
 
 | Column | Meaning |
 |---|---|
+| `chunk_maps.map_id` | row id; the current map is always 1 |
+| `chunk_maps.name` | `current`; `historical:GEN@BYTENR` for the map under a superseded chunk-tree root (with `/levelN` appended when blocks claim that address and generation at several levels, which only a planted block does); `dev_extents` for the one map assembled from DEV_EXTENT items alone |
+| `chunk_maps.kind` | `current`, `historical` or `dev_extents` |
+| `chunk_maps.root_bytenr`, `chunk_maps.root_generation` | *u64*; the chunk-tree root the map was walked from. NULL for `dev_extents`, which has no place in time |
+| `chunk_maps.root_level` | that root's level |
+| `chunk_maps.known_as` | JSON list of the `current` and `backup:GEN` sources naming that chunk root; empty for a root only the scan found (a block of tree 3 that no block points to) |
+| `chunk_maps.blocks`, `chunk_maps.missing` | for a historical map: distinct chunk-tree blocks found under the root, and referenced but not found. A map with `missing` above 0 may lack chunks. NULL otherwise |
+| `chunk_maps.problems` | JSON list: what building the map found (rejected and overlapping chunks, stripes on a device the image does not hold) |
 | `chunks.chunk_id` | row id |
-| `chunks.map_source` | which map this is; `current` in version 1 (historical maps come with plan.md M5) |
-| `chunks.accepted` | 0 for a chunk item rejected as invalid; it takes no part in address translation |
+| `chunks.map_id` | the map this chunk belongs to |
+| `chunks.map_source` | that map's `name`, repeated for reading |
+| `chunks.accepted` | 0 for a chunk rejected as invalid; it takes no part in address translation |
 | `chunks.logical`, `chunks.length` | *u64* |
-| `chunks.type` | *u64* block-group flags |
+| `chunks.type` | *u64* block-group flags. In the `dev_extents` map they come from the BLOCK_GROUP_ITEM of the same address; without one, on a one-device filesystem, the type bits are 0 and the profile is `single` for one device extent and `DUP` for two |
 | `chunks.type_name` | as `dump-tree` prints them, for example `METADATA\|DUP` |
 | `chunks.num_stripes`, `chunks.sub_stripes` | from the item |
-| `chunks.origin` | where the item was read (the superblock's system array, or a chunk-tree leaf and slot) |
-| `chunks.problems` | JSON list; non-empty exactly when `accepted` is 0 |
+| `chunks.origin` | where the chunk was read: the superblock's system array, a chunk-tree leaf and slot, or the DEV_EXTENTs and the block-group item it was assembled from |
+| `chunks.problems` | JSON list; non-empty exactly when `accepted` is 0. In the `dev_extents` map: device extents of different lengths or overlapping, a striped profile (a DEV_EXTENT does not record the stripe order, and none is guessed), more device extents than the profile has copies (the address was reused), a length the block group contradicts, or no block-group item on a filesystem with several devices |
 | `stripes.chunk_id`, `stripes.stripe_index` | the stripe's chunk and position |
 | `stripes.devid` | *u64* |
 | `stripes.physical` | *u64* byte offset on that device |
-| `stripes.dev_uuid` | hex |
+| `stripes.dev_uuid` | hex; in the `dev_extents` map the uuid of the image's device of that id, zeros for a device the image does not hold |
+| `stripes.dev_extents` | the second witness: how many scanned dev-tree leaves, of any generation, hold a DEV_EXTENT with this device and offset that names this chunk's logical address and the length one stripe of it takes. 0: the stripe rests on the CHUNK_ITEM alone |
 
 ### `regions`: what was scanned and what was skipped
 
@@ -144,6 +160,19 @@ recorded whether or not it validates.
 | `maps_here` | 1 when a copy of `bytenr` lies at `physical`; 0 for stale blocks in removed chunks |
 | `problems` | JSON list, for example a block cut by the image end |
 | `content_id` | the content this copy holds; NULL for a block cut by the image end |
+
+### `node_maps`: which historical map explains where a block lies
+
+A tree block carries its own logical address and a checksum, so it tests a chunk map against
+something the map was not built from. One row for every valid node that the current map does not
+place where it was scanned (`maps_here` 0) and every historical or `dev_extents` map that does:
+the map translates the header's `bytenr` to a copy at `physical`. A valid node outside the
+current map with no row here lies where no surviving map says it should.
+
+| Column | Meaning |
+|---|---|
+| `node_id` | the node |
+| `map_id` | a map that places it there |
 
 ### `node_checks`: the validation record of every node
 
@@ -206,6 +235,7 @@ roots`).
 | `states.chunk_root_level` | its level |
 | `states.chunk_root_source` | `current`, `backup:GEN` or `inferred` |
 | `states.chunk_root_differs` | 1 when it is not the current chunk root |
+| `states.map_id` | the row of `chunk_maps` walked from that chunk root: the map of the state's own time, through which `recover` reads its file data first. NULL when no chunk root is known or its map was not built |
 | `states.maps_current` | found blocks the current chunk map places where they were scanned |
 | `states.maps_historical` | the same under the state's own chunk items; NULL unless the chunk root differs |
 | `states.maps_neither` | found blocks neither places |
@@ -373,7 +403,7 @@ and ATTACH. Rows are never deleted: a second recovery adds a second run.
 | `image_path` | the image path as given |
 | `image_checked` | 1 when the image's SHA-256 was compared with `scan_runs.image_sha256_before` and matched (a mismatch stops the run before anything is written); 0 with `--no-rehash`. The size is always compared |
 | `output_dir` | the directory that was created |
-| `options` | JSON: `roots` (as given), `tree_id` (a number or `all`), `dedup`, `orphans` |
+| `options` | JSON: `roots` (as given), `tree_id` (a number or `all`), `dedup`, `orphans`, `maps` (`own` or `current`) |
 | `summary` | JSON: `artifacts` (count per status), `by_source` (count per source kind and status), `orphan_leaves` (lone leaves read), `bytes_written`, `gaps` (per root and tree, the blocks the tree walk could not follow) |
 
 ### `artifacts`: one row per inode that was recovered, recorded or refused
@@ -404,8 +434,9 @@ and ATTACH. Rows are never deleted: a second recovery adds a second run.
 | `duplicate_of` | the artifact of this run that holds the same tree, inode, `inode_generation` and `extent_signature` |
 | `output_path` | relative to `output_dir`: `SOURCE/tree_ID/PATH`; NULL when nothing was written |
 | `in_current` | 1 when the current tree of the same id holds this `objectid` with this `inode_generation`; 0 when it does not (deleted since, or the number was reused); NULL when the current tree could not be read completely |
+| `chunk_maps` | JSON list of the chunk maps (`chunk_maps.name`) the file's extents were read through, in order of first use; empty when no extent was read from disk (inline data, holes, duplicates). With `--maps own`, a root whose chunk root is the current one is read through `current` alone; any other root through its own map (`states.map_id`; for a lone leaf the newest map not newer than the leaf), then, only for an extent that map does not place, through the newer maps, oldest first, and last through `dev_extents`. An extent is always placed by one map as a whole. `complete` still means that every byte was read: a range freed by a balance may have been overwritten or trimmed since, and only a data checksum (plan.md M6) or a known hash says whether the bytes are the file's |
 | `missing` | JSON list of `[file offset, length, reason]`: an extent failure class of `substrate/extents.py` (`unmapped`, `unreadable`, a decode error, …), `overlap`, `short`, or `continues_elsewhere` (the last inode of a lone leaf: its remaining extent items may be in the next leaf, and with NO_HOLES a range without an item looks like a hole) |
-| `problems` | JSON list: names that had to be changed, FT_ENCRYPTED on the directory entry, item payloads that did not parse, findings of the extent reader |
+| `problems` | JSON list: names that had to be changed, FT_ENCRYPTED on the directory entry, item payloads that did not parse, findings of the extent reader (at most 16 distinct ones; all are in `provenance.read_record`). Among them, for a read through a historical map: that the extent was not placed by the root's own map; that a newer map gives the same logical address to a different chunk (the address was reused); that a newer map has allocated the disk space read to another chunk, so the bytes may have been overwritten |
 
 ### `provenance`: the items each artifact was built from
 
@@ -425,7 +456,7 @@ the item, and for an extent `read_record` names every physical range and copy th
 | `file_offset`, `length` | for `extent_data`: the file range it supplied, after clipping to `i_size` |
 | `extent_sha256` | of the bytes it supplied; NULL for zeros (holes, prealloc) and failures |
 | `error_kind` | why it supplied nothing; NULL otherwise |
-| `read_record` | JSON: the extent reader's full record (kind, compression, addresses, the physical ranges with every copy and whether it matched, problems) |
+| `read_record` | JSON: the extent reader's full record (kind, compression, addresses, `chunk_map`: the name of the map that placed the extent, the physical ranges with every copy and whether it matched, problems) |
 
 ## Reverse queries
 
@@ -463,6 +494,17 @@ FROM nodes n JOIN node_checks c USING (node_id) WHERE n.bytenr = 30720000;
 SELECT generation, completeness, maps_current, maps_historical
 FROM states WHERE known_as = '[]' ORDER BY generation DESC;
 
+-- the chunk maps of the image, newest first, and what each is anchored by
+SELECT name, root_generation, known_as, blocks, missing FROM chunk_maps ORDER BY root_generation DESC;
+
+-- stale blocks outside the current chunk map, and whether an older map explains their position
+SELECT n.bytenr, n.generation, n.owner, COUNT(m.map_id) AS maps_placing_it
+FROM nodes n LEFT JOIN node_maps m USING (node_id)
+WHERE n.valid AND NOT n.maps_here GROUP BY n.node_id;
+
+-- after a recovery: files whose content depended on a historical map
+SELECT source, path, status, chunk_maps FROM artifacts WHERE chunk_maps NOT IN ('[]', '["current"]');
+
 -- log-tree blocks: owner -6 is the log tree (see Conventions)
 SELECT generation, COUNT(*) FROM nodes WHERE owner = -6 GROUP BY generation;
 
@@ -485,8 +527,8 @@ SELECT slot, type_name, key_objectid, key_offset FROM items WHERE content_id = 1
 
 Confidence tiers on `artifacts` arrive with plan.md M6, and with them the decision whether a
 block's slack content is tampering (`slack_class` only describes it). Log generations and the (owner,
-generation, level) groups that `btrfska roots` prints are one `GROUP BY` over `nodes`. Only the
-current chunk map is stored; historical maps come with M5 (`chunks.map_source`).
+generation, level) groups that `btrfska roots` prints are one `GROUP BY` over `nodes`. Stripe orders
+are never guessed, so a striped chunk known only from DEV_EXTENTs stays rejected.
 
 ## Versions
 
@@ -503,4 +545,9 @@ current chunk map is stored; historical maps come with M5 (`chunks.map_source`).
 - **4** (2026-09-21): `contents.slack_start`, `slack_len`, `slack_nonzero`, `slack_class`; tables
   `stale_items` and `stale_key_ptrs`. Nothing of version 3 changed meaning. A version-3 database
   is refused; rebuild it from the image.
-
+- **5** (2026-09-21): historical chunk maps (plan.md M5a). New tables `chunk_maps` and `node_maps`;
+  `chunks.map_id`, `stripes.dev_extents`, `states.map_id`, `artifacts.chunk_maps`; the option
+  `maps` in `recovery_runs.options`. `chunks` and `stripes` now hold every map, not only the
+  current one: **a query that means the current map must say `WHERE map_id = 1`** (or `map_source
+  = 'current'`, which worked before too). Nothing else changed meaning. A version-4 database is
+  refused; rebuild it from the image.

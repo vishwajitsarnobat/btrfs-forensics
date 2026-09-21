@@ -1,9 +1,13 @@
 """Chunk maps: logical-to-physical translation from the sys_chunk_array and chunk items.
 
 A `ChunkMap` is built from parsed chunk items and names its `source` ("sys_chunk_array" for the
-bootstrap map, "current" for the chunk tree; later milestones add historical and reconstructed
-maps). `copies()` turns a logical range into every physical copy that holds it. Walking the chunk
-tree needs the node reader, so it lives in `fs.open_filesystem`, not here.
+bootstrap map, "current" for the chunk tree, "historical:GEN@BYTENR" for the map of a superseded
+chunk-tree root, "dev_extents" for the one assembled from DEV_EXTENT items; scan/chunkmaps.py).
+`copies()` turns a logical range into every physical copy that holds it. Walking the chunk
+tree needs the node reader, so it lives in `fs.open_filesystem`, not here. A `MapOrder` is the
+list of maps a read of historical data may go through (plan.md M5a): one map places an extent as
+a whole, the read says which, and what a newer map says about the same address or the same disk
+space is reported, never applied.
 
 Kernel v7.0 references:
 - BTRFS_STRIPE_LEN is 64 KiB (volumes.h:46); stripe_nr = offset >> 16 and
@@ -105,6 +109,25 @@ def type_name(type_: int) -> str:
     profile = type_ & PROFILE_MASK
     names.append(PROFILES[profile][0] if profile in PROFILES else f"PROFILES_{profile:#x}")
     return "|".join(names)
+
+
+def stripe_size(chunk: Chunk) -> int:
+    """Bytes one stripe of `chunk` takes on its device: what its DEV_EXTENT records as length.
+
+    The chunk's length for SINGLE, DUP and RAID1*; the length divided by the data stripes for the
+    striped profiles (volumes.c:5641 sizes a chunk as stripe_size * data_stripes). 0 when the
+    stripe counts leave no data stripe or the profile flags are not one profile.
+    """
+    n, profile = chunk.num_stripes, chunk.type & PROFILE_MASK
+    if profile not in PROFILES:
+        return 0
+    if not profile & _STRIPED:
+        return chunk.length
+    if profile == BG["RAID10"]:
+        data = n // chunk.sub_stripes if chunk.sub_stripes > 0 else 0
+    else:
+        data = n - PROFILES[profile][2]
+    return chunk.length // data if data > 0 else 0
 
 
 def _valid_stripe_count(profile: int, num_stripes: int, sub_stripes: int) -> bool:
@@ -371,3 +394,94 @@ class ChunkMap:
             )
             for mirror, stripe in enumerate((chunk.stripes[i] for i in indices), start=1)
         )
+
+    def order(self) -> tuple[ChunkMap, ...]:
+        """The maps a read through this one consults: itself."""
+        return (self,)
+
+    def notes(self, used: ChunkMap, logical: int, segments) -> tuple[str, ...]:
+        return ()
+
+
+def _same_chunk(a: Chunk, b: Chunk) -> bool:
+    placement = [(s.devid, s.offset) for s in a.stripes]
+    return (a.logical, a.length, placement) == (
+        b.logical, b.length, [(s.devid, s.offset) for s in b.stripes],
+    )  # fmt: skip
+
+
+class MapOrder:
+    """The chunk maps a read of historical data may go through, in the order it consults them.
+
+    `maps` starts with the map of the state being read and goes on in time: the maps newer than
+    it, oldest first, ending with the current one. `fallback` maps have no place in time (the map
+    assembled from DEV_EXTENTs) and come last. The extent reader takes the first map that places
+    a whole extent and records its `source`; nothing is ever merged.
+    """
+
+    def __init__(self, maps, fallback=()) -> None:
+        self.maps, self.fallback = tuple(maps), tuple(fallback)
+        self.source = self.maps[0].source
+        self.devices = self.maps[0].devices
+
+    def order(self) -> tuple[ChunkMap, ...]:
+        return self.maps + self.fallback
+
+    def copies(self, logical: int, length: int) -> tuple[PhysicalCopy, ...]:
+        """As `ChunkMap.copies`, under the first map of the order that places the range: what a
+        tree-block read uses. A block proves its own address (header bytenr and checksum), so
+        no record of the map is needed there; extent reads go map by map (extents.py)."""
+        first = None
+        for chunk_map in self.order():
+            try:
+                return chunk_map.copies(logical, length)
+            except MappingError as exc:
+                first = first or exc
+        raise first
+
+    def notes(self, used: ChunkMap, logical: int, segments) -> tuple[str, ...]:
+        """What the other maps say about a range read through `used`: that it is not the map of
+        the state, that a newer map gives the logical address to a different chunk, and that a
+        newer map has given the disk space read (`segments`: (physical, size)) to another chunk.
+        """
+        found = []
+        if used is not self.maps[0]:
+            found.append(
+                f"logical {logical}: not placed by the {self.source} chunk map; read through "
+                f"the {used.source} chunk map"
+            )
+        chunk = used.chunk_for(logical)
+        later = self.maps[self.maps.index(used) + 1 :] if used in self.maps else self.maps
+        for other in later:
+            try:
+                there = other.chunk_for(logical)
+            except UnmappedAddress:
+                continue
+            if not _same_chunk(chunk, there):
+                found.append(
+                    f"logical {logical}: the {other.source} chunk map places this address in a "
+                    f"different chunk; the address was reused after the {used.source} map"
+                )
+                break
+        for other in later:
+            hit = next(
+                (
+                    (physical, size, there)
+                    for there in other.chunks
+                    if not _same_chunk(chunk, there)
+                    for stripe in there.stripes
+                    for physical, size in segments
+                    if physical < stripe.offset + stripe_size(there)
+                    and stripe.offset < physical + size
+                ),
+                None,
+            )
+            if hit:
+                physical, size, there = hit
+                found.append(
+                    f"physical {physical}+{size} lies in chunk {there.logical} of the "
+                    f"{other.source} chunk map: the space was allocated again after the "
+                    f"{used.source} map, and the bytes may have been overwritten"
+                )
+                break
+        return tuple(found)

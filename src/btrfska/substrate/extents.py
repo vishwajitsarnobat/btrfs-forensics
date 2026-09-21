@@ -3,7 +3,8 @@
 `read_extent(reader, item, leaf)` turns one EXTENT_DATA item into its file bytes and an
 `ExtentRead` record; `stream_extent` gives the same record and the bytes in pieces of at most
 1 MiB, for writers that must not hold an extent in memory (recover/). Physical reads go through
-`reader.chunk_map`, whichever map that is (current now; historical or reconstructed in M5).
+`reader.chunk_map`: one map, or a `chunks.MapOrder`, of which the first map that places the
+whole extent is used and named in the record (`ExtentRead.chunk_map`; plan.md M5a).
 `read_file(reader, root, inode, no_holes=)` walks an fs tree for the inode and assembles its
 content in file order; `FileAssembly` is that assembly, one extent at a time.
 
@@ -111,13 +112,34 @@ def _same(img, first: int, second: int, size: int) -> bool:
 
 
 def _map(reader: NodeReader, logical: int, length: int):
-    """(ranges, segments, problems, (error kind, detail) or None) for a logical range.
+    """(map source, ranges, segments, problems, (error kind, detail) or None) for a logical range.
+
+    The range is mapped by one chunk map as a whole: the first of `reader.chunk_map.order()` that
+    places all of it. When none does, the result is the first map's failure, with the other maps
+    tried named in the detail.
+    """
+    order = reader.chunk_map.order()
+    first = None
+    for chunk_map in order:
+        ranges, segments, problems, error = _map_through(reader.img, chunk_map, logical, length)
+        if error is None or error[0] != "unmapped":
+            if error is None:
+                problems += reader.chunk_map.notes(chunk_map, logical, segments)
+            return chunk_map.source, ranges, segments, problems, error
+        first = first or (ranges, segments, problems, error)
+    ranges, segments, problems, (kind, detail) = first
+    if len(order) > 1:
+        detail += "; nor by " + ", ".join(m.source for m in order[1:])
+    return order[0].source, ranges, segments, problems, (kind, detail)
+
+
+def _map_through(img, chunk_map, logical: int, length: int):
+    """(ranges, segments, problems, (error kind, detail) or None) under one chunk map.
 
     `segments` holds (physical, size) of the copy used for each piece, in order. Nothing of the
     content is kept: this is where `unmapped` and `unreadable` are decided, so a caller that then
     reads the segments cannot fail halfway through an extent.
     """
-    chunk_map, img = reader.chunk_map, reader.img
     ranges, segments, problems = [], [], []
     pieces = chunk_map.pieces(logical, length)
     while True:  # one piece at a time: stop at the first unmapped or unreadable one
@@ -161,11 +183,11 @@ def _pieces(img, segments: list[tuple[int, int]]) -> Iterator[bytes]:
 
 
 def _read(reader: NodeReader, logical: int, length: int):
-    """(bytes or None, ranges, problems, (error kind, detail) or None) for a logical range."""
-    ranges, segments, problems, error = _map(reader, logical, length)
+    """(map source, bytes or None, ranges, problems, (error kind, detail) or None)."""
+    source, ranges, segments, problems, error = _map(reader, logical, length)
     if error:
-        return None, ranges, problems, error
-    return b"".join(_pieces(reader.img, segments)), ranges, problems, None
+        return source, None, ranges, problems, error
+    return source, b"".join(_pieces(reader.img, segments)), ranges, problems, None
 
 
 def _nonzero(data: bytes) -> int:
@@ -240,7 +262,6 @@ def _extent(reader: NodeReader, item: Item, leaf: int):
     if fe["disk_bytenr"] == 0:
         return ExtentRead("hole", length=length, **info), None, None
 
-    info["chunk_map"] = reader.chunk_map.source
     offset, ram, disk_bytes = fe["offset"], fe["ram_bytes"], fe["disk_num_bytes"]
     if code == compress.NONE:
         image_size = reader.img.size
@@ -251,7 +272,9 @@ def _extent(reader: NodeReader, item: Item, leaf: int):
         if offset + length > disk_bytes:
             return failed("invalid_extent", f"offset {offset} + num_bytes {length} > "
                           f"disk_num_bytes {disk_bytes}")  # fmt: skip
-        ranges, segments, problems, error = _map(reader, fe["disk_bytenr"] + offset, length)
+        info["chunk_map"], ranges, segments, problems, error = _map(
+            reader, fe["disk_bytenr"] + offset, length
+        )
         if error:
             return failed(*error, ranges=ranges, problems=problems)
         record = ExtentRead("regular", length=length, ranges=ranges, problems=problems, **info)
@@ -265,7 +288,7 @@ def _extent(reader: NodeReader, item: Item, leaf: int):
         )
     if offset + length > ram:
         return failed("invalid_extent", f"offset {offset} + num_bytes {length} > ram_bytes {ram}")
-    raw, ranges, problems, error = _read(reader, fe["disk_bytenr"], disk_bytes)
+    info["chunk_map"], raw, ranges, problems, error = _read(reader, fe["disk_bytenr"], disk_bytes)
     if error:
         return failed(*error, ranges=ranges, problems=problems)
     try:

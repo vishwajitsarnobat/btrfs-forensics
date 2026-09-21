@@ -315,6 +315,22 @@ def test_a_planted_higher_level_block_does_not_hide_the_root_tree_leaves_of_its_
     assert (groups[(1, 90, 0)].top, groups[(1, 90, 0)].candidates) == (False, 1)
 
 
+def test_forged_chunk_roots_claiming_one_address_at_two_levels_get_maps_with_distinct_names():
+    real, planted, leaf = a(0), a(1), a(2)
+    chunk = [((256, CHUNK_ITEM, MIB), chunk_item(MIB, 15 * MIB))]
+    blocks = {
+        real: make_node(real, owner=3, generation=90, items=chunk),
+        # at another offset, claiming the same address and generation one level up
+        planted: make_node(real, level=1, owner=3, generation=90,
+                           ptrs=[((256, CHUNK_ITEM, MIB), leaf, 90)]),
+        leaf: make_node(leaf, owner=3, generation=90, items=chunk),
+    }  # fmt: skip
+    found = discover_blocks("test_scan_roots_chunk_twins_", blocks)
+    names = [m.name for m in found.chunk_maps]
+    assert len(names) == len(set(names))
+    assert {f"historical:90@{real}/level0", f"historical:90@{real}/level1"} <= set(names)
+
+
 def test_old_leaves_of_a_multi_leaf_root_tree_that_newer_parents_still_use_are_not_states():
     # Generation 40 had a root node over two leaves; only its leaf B40 survives. Generation 50
     # rewrote the other leaf and still points to B40; generation 60 rewrote B40 and kept A50.

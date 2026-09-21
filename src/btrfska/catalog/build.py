@@ -20,13 +20,13 @@ from datetime import UTC, datetime
 from btrfska import __version__
 from btrfska.catalog import db
 from btrfska.catalog.content import ContentWriter
-from btrfska.catalog.schema import SCHEMA_VERSION, s64
+from btrfska.catalog.schema import SCHEMA_VERSION, s64, u64
 from btrfska.scan.classify import Classified, scan_image
 from btrfska.scan.kernel_numpy import NodeRecord
 from btrfska.scan.regions import Region
-from btrfska.scan.roots import Discovery, discover, index_records, known_roots
+from btrfska.scan.roots import MAX_MAPS, Discovery, discover, index_records, known_roots
 from btrfska.substrate import csum, superblock
-from btrfska.substrate.chunks import ChunkMap, type_name
+from btrfska.substrate.chunks import ChunkMap, MappingError, type_name
 from btrfska.substrate.fs import Filesystem, open_filesystem
 from btrfska.substrate.image import open_image
 
@@ -132,14 +132,33 @@ def _insert_problems(conn: sqlite3.Connection, source: str, details) -> None:
     )
 
 
-def _insert_chunks(conn: sqlite3.Connection, chunk_map: ChunkMap) -> None:
+def _insert_chunk_map(
+    conn: sqlite3.Connection,
+    chunk_map: ChunkMap,
+    kind: str,
+    witnesses: dict,
+    *,
+    root: tuple[int, int, int] | None = None,
+    known_as: tuple[str, ...] = (),
+    blocks: int | None = None,
+    missing: int | None = None,
+) -> int:
+    """One map with its chunks and stripes; `witnesses` as chunkmaps.witnesses returns them."""
+    bytenr, generation, level = root or (None, None, None)
+    map_id = conn.execute(
+        "INSERT INTO chunk_maps (name, kind, root_bytenr, root_generation, root_level, known_as,"
+        " blocks, missing, problems) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (chunk_map.source, kind, s64(bytenr), s64(generation), level,
+         json.dumps(list(known_as)), blocks, missing, json.dumps(list(chunk_map.problems))),
+    ).lastrowid  # fmt: skip
     for accepted, chunks in ((1, chunk_map.chunks), (0, chunk_map.rejected)):
         for chunk in chunks:
             cursor = conn.execute(
-                "INSERT INTO chunks (map_source, accepted, logical, length, type, type_name,"
-                " num_stripes, sub_stripes, origin, problems)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO chunks (map_id, map_source, accepted, logical, length, type,"
+                " type_name, num_stripes, sub_stripes, origin, problems)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
+                    map_id,
                     chunk_map.source,
                     accepted,
                     s64(chunk.logical),
@@ -153,13 +172,69 @@ def _insert_chunks(conn: sqlite3.Connection, chunk_map: ChunkMap) -> None:
                 ),
             )
             conn.executemany(
-                "INSERT INTO stripes VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO stripes VALUES (?, ?, ?, ?, ?, ?)",
                 [
-                    (cursor.lastrowid, i, s64(s.devid), s64(s.offset), s.dev_uuid.hex())
+                    (cursor.lastrowid, i, s64(s.devid), s64(s.offset), s.dev_uuid.hex(),
+                     witnesses.get((chunk.logical, i), 0))
                     for i, s in enumerate(chunk.stripes)
                 ],
-            )
-    _insert_problems(conn, "chunk_map", chunk_map.problems)
+            )  # fmt: skip
+    return map_id
+
+
+def _insert_chunk_maps(conn: sqlite3.Connection, fs: Filesystem, found: Discovery) -> dict:
+    """The current map, then every historical map: chunk root (bytenr, generation, level) ->
+    map_id."""
+    chunk_roots = [r.root for r in found.rediscovered if r.root.tree == "chunk"]
+    current = next((root for root in chunk_roots if root.source == "current"), None)
+    known = [
+        root.source
+        for root in chunk_roots
+        if current is not None
+        and root.source != "current"
+        and (root.bytenr, root.generation) == (current.bytenr, current.generation)
+    ]
+    root = (current.bytenr, current.generation, current.level) if current else None
+    by_root = {}
+    map_id = _insert_chunk_map(
+        conn, fs.chunk_map, "current", found.current_witnesses, root=root,
+        known_as=("current", *known),
+    )  # fmt: skip
+    if root:
+        by_root[root] = map_id
+    _insert_problems(conn, "chunk_map", fs.chunk_map.problems)
+    for entry in found.chunk_maps:
+        map_id = _insert_chunk_map(
+            conn, entry.chunk_map, entry.kind, entry.witnesses, root=entry.root,
+            known_as=entry.known_as, blocks=entry.blocks if entry.root else None,
+            missing=entry.missing if entry.root else None,
+        )  # fmt: skip
+        if entry.root:
+            by_root[entry.root] = map_id
+    return by_root
+
+
+def _insert_node_maps(conn: sqlite3.Connection, found: Discovery, nodesize: int) -> None:
+    """For every valid block the current map does not place where it lies: the historical maps
+    that translate its header's bytenr to that offset (plan.md M5a, decision 5)."""
+    maps = [
+        (map_id, entry.chunk_map)
+        for entry in found.chunk_maps
+        for (map_id,) in conn.execute(
+            "SELECT map_id FROM chunk_maps WHERE name = ?", (entry.chunk_map.source,)
+        )
+    ]
+    rows = []
+    query = "SELECT node_id, physical, bytenr FROM nodes WHERE valid AND NOT maps_here"
+    for node_id, physical, bytenr in conn.execute(query).fetchall():
+        for map_id, chunk_map in maps:
+            try:
+                copies = chunk_map.copies(u64(bytenr), nodesize)
+            except MappingError:
+                continue
+            if any(c.physical == physical and not c.missing_device for c in copies):
+                rows.append((node_id, map_id))
+    conn.executemany("INSERT INTO node_maps VALUES (?, ?)", rows)
 
 
 def _insert_regions(conn: sqlite3.Connection, scanned, skipped) -> dict[Region, int]:
@@ -223,7 +298,7 @@ class _NodeWriter:
         self.checks.clear()
 
 
-def _insert_discovery(conn: sqlite3.Connection, found: Discovery) -> None:
+def _insert_discovery(conn: sqlite3.Connection, found: Discovery, map_ids: dict) -> None:
     conn.executemany(
         "INSERT INTO known_roots (source, tree, tree_id, bytenr, generation, level, indexed,"
         " candidate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -247,8 +322,8 @@ def _insert_discovery(conn: sqlite3.Connection, found: Discovery) -> None:
             "INSERT INTO states (bytenr, generation, level, known_as, root_tree_blocks,"
             " root_tree_missing, found, referenced, completeness, missing, chunk_root_bytenr,"
             " chunk_root_generation, chunk_root_level, chunk_root_source, chunk_root_differs,"
-            " maps_current, maps_historical, maps_neither, level_consistent, problems)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " map_id, maps_current, maps_historical, maps_neither, level_consistent, problems)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 s64(state.bytenr),
                 s64(state.generation),
@@ -265,6 +340,7 @@ def _insert_discovery(conn: sqlite3.Connection, found: Discovery) -> None:
                 root.level if root else None,
                 root.source if root else None,
                 _flag(root.differs_from_current) if root else None,
+                map_ids.get((root.bytenr, root.generation, root.level)) if root else None,
                 state.maps_current,
                 state.maps_historical,
                 state.maps_neither,
@@ -303,10 +379,11 @@ def _insert_discovery(conn: sqlite3.Connection, found: Discovery) -> None:
 
 
 TABLES = (
-    "scan_runs", "superblocks", "problems", "chunks", "stripes", "regions", "nodes",
-    "node_checks", "known_roots", "states", "state_copies", "state_trees", "walk_failures",
-    "contents", "items", "item_problems", "key_ptrs", "inodes", "inode_refs", "dir_entries",
-    "file_extents", "root_items", "extents", "extent_backrefs", "stale_items", "stale_key_ptrs",
+    "scan_runs", "superblocks", "problems", "chunk_maps", "chunks", "stripes", "regions", "nodes",
+    "node_checks", "node_maps", "known_roots", "states", "state_copies", "state_trees",
+    "walk_failures", "contents", "items", "item_problems", "key_ptrs", "inodes", "inode_refs",
+    "dir_entries", "file_extents", "root_items", "extents", "extent_backrefs", "stale_items",
+    "stale_key_ptrs",
 )  # fmt: skip
 
 
@@ -323,6 +400,7 @@ def build_catalog(
     allow_unsupported: bool = False,
     rehash: bool = True,
     max_states: int = MAX_STATES,
+    max_maps: int = MAX_MAPS,
 ) -> Built:
     """Scan `image_path` once and write its evidence database to `db_path` (which must not exist).
 
@@ -338,7 +416,6 @@ def build_catalog(
             with conn:
                 _insert_run(conn, img, fs, before, options)
                 _insert_superblocks(conn, fs.selection)
-                _insert_chunks(conn, fs.chunk_map)
                 scan = scan_image(img, fs, full_sweep=full_sweep, workers=workers)
                 _insert_problems(conn, "scan_plan", scan.plan.problems)
                 _insert_problems(conn, "walk", scan.reach.problems)
@@ -364,9 +441,17 @@ def build_catalog(
                 found = discover(
                     img, index, ctx=ctx, chunk_map=fs.chunk_map, known=known_roots(fs.fields),
                     log_live=scan.reach.log_logical, walk_failures=scan.reach.walk_failures,
-                    max_states=max_states,
+                    max_states=max_states, max_maps=max_maps,
+                    num_devices=fs.fields["num_devices"],
                 )  # fmt: skip
-                _insert_discovery(conn, found)
+                _insert_discovery(conn, found, _insert_chunk_maps(conn, fs, found))
+                _insert_node_maps(conn, found, ctx.nodesize)
+                if found.chunk_root_candidates > len(found.chunk_maps):
+                    conn.execute(
+                        "INSERT INTO problems (source, detail) VALUES ('chunk_maps', ?)",
+                        (f"{found.chunk_root_candidates} chunk root candidates, only "
+                         f"{len(found.chunk_maps) - 1} built as historical maps",),
+                    )  # fmt: skip
                 if found.root_tree_candidates > len(found.states):
                     conn.execute(
                         "INSERT INTO problems (source, detail) VALUES ('roots', ?)",
