@@ -82,6 +82,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from btrfska.scan import chunkmaps
 from btrfska.scan.classify import reachability
 from btrfska.scan.kernel_numpy import NodeRecord, iter_candidate_nodes
 from btrfska.scan.regions import ScanPlan, plan_scan
@@ -108,6 +109,7 @@ from btrfska.substrate.roots import root_sets
 K = ondisk.ITEM_KEYS
 LOG = ondisk.TREE_LOG_OBJECTID
 MAX_STATES = 64
+MAX_MAPS = 4096  # historical chunk maps built; a bound that bites is reported by the caller
 MAX_LISTED = 16
 MAX_PROBLEMS = 32
 MAX_RAW = 256
@@ -372,6 +374,9 @@ class Discovery:
     logs: tuple[LogGeneration, ...]
     raw: list[dict]
     walk_failures: tuple[tuple[str, int, int, str], ...] = ()
+    chunk_root_candidates: int = 0
+    chunk_maps: tuple[chunkmaps.HistoricalMap, ...] = ()  # newest first, `dev_extents` last
+    current_witnesses: dict = field(default_factory=dict)  # as HistoricalMap.witnesses
     _index: BlockIndex | None = field(default=None, repr=False, compare=False)
     _candidate: np.ndarray | None = field(default=None, repr=False, compare=False)
 
@@ -763,7 +768,10 @@ class _Discoverer:
         return ChunkRoot(*chunk, differs_from_current=differs)
 
     def _historical_map(self, root: ChunkRoot) -> ChunkMap:
-        memo = (root.bytenr, root.generation, root.level)
+        return self._walked_map((root.bytenr, root.generation, root.level))[0]
+
+    def _walked_map(self, memo: tuple[int, int, int]) -> tuple[ChunkMap, int, int]:
+        """The map under one chunk root, with the chunk-tree blocks found and missing."""
         if memo not in self.maps:
             walked = _Walk(classify=False)
             self._walk(walked, memo, ondisk.CHUNK_TREE_OBJECTID, 0, K["CHUNK_ITEM"])
@@ -772,10 +780,62 @@ class _Discoverer:
                             origin=f"historical chunk tree leaf {leaf} slot {item.slot}")
                 for item, leaf in walked.items
             ]  # fmt: skip
-            self.maps[memo] = ChunkMap(
-                f"historical:{root.generation}", chunks, self.chunk_map.devices
-            )
+            found = ChunkMap(chunkmaps.map_name(memo[1], memo[0]), chunks, self.chunk_map.devices)
+            self.maps[memo] = (found, len(walked.found), len(walked.missing) + walked.unchecked)
         return self.maps[memo]
+
+    def _leaf_items(self, owners: tuple[int, ...]):
+        """(items, leaf bytenr, generation) of every indexed leaf of the trees `owners`."""
+        leaves = np.flatnonzero(np.isin(self.n_owner, owners) & (self.n_level == 0))
+        for node in leaves.tolist():
+            block = self._block(node)
+            if block is not None:
+                found, _ = parse_items(block, self.ctx.nodesize)
+                yield found, int(self.n_bytenr[node]), int(self.n_gen[node])
+
+    def chunk_maps(self, max_maps: int, num_devices: int):
+        """(candidate chunk roots, maps): one map per chunk-tree root other than the current
+        one, newest first and at most `max_maps`, then the map assembled from DEV_EXTENTs."""
+        roots = np.flatnonzero(self.candidate & (self.n_owner == ondisk.CHUNK_TREE_OBJECTID))
+        keys = {self.index.node(j)[:3]: () for j in roots.tolist()}
+        for root in self.known:
+            if root.tree == "chunk" and root.generation is not None and root.level is not None:
+                key = (root.bytenr, root.generation, root.level)
+                if self._resolve(*key, root.tree_id) is not None:
+                    keys[key] = (*keys.get(key, ()), root.source)
+        total = len(keys)
+        keys = {k: v for k, v in keys.items() if k[:2] != self.current_chunk}
+        # Roots a superblock slot names first, then the newest: the bound drops forged floods.
+        chosen = sorted(keys, key=lambda k: (not keys[k], -k[1], k[0]))[:max_maps]
+        extents = [
+            extent
+            for found, leaf, generation in self._leaf_items((ondisk.DEV_TREE_OBJECTID,))
+            for extent in chunkmaps.parse_dev_extents(found, leaf, generation)
+        ]
+        groups = [
+            group
+            for found, _, generation in self._leaf_items(
+                (ondisk.EXTENT_TREE_OBJECTID, ondisk.BLOCK_GROUP_TREE_OBJECTID)
+            )
+            for group in chunkmaps.parse_block_groups(found, generation)
+        ]
+        maps = []
+        for key in sorted(chosen, key=lambda k: (-k[1], k[0])):
+            walked, blocks, missing = self._walked_map(key)
+            maps.append(chunkmaps.HistoricalMap(
+                walked.source, "historical", walked, root=key, known_as=tuple(keys[key]),
+                blocks=blocks, missing=missing,
+                witnesses=chunkmaps.witnesses(walked, extents),
+            ))  # fmt: skip
+        rebuilt = chunkmaps.from_dev_extents(
+            extents, groups, num_devices=num_devices, devices=self.chunk_map.devices,
+            sectorsize=self.ctx.sectorsize,
+        )  # fmt: skip
+        maps.append(chunkmaps.HistoricalMap(
+            rebuilt.source, "dev_extents", rebuilt,
+            witnesses=chunkmaps.witnesses(rebuilt, extents),
+        ))  # fmt: skip
+        return total, tuple(maps), chunkmaps.witnesses(self.chunk_map, extents)
 
     def _placed(self, chunk_map: ChunkMap, bytenr: int, node: int) -> bool:
         try:
@@ -914,6 +974,8 @@ def discover(
     log_live: frozenset[int] = frozenset(),
     walk_failures: tuple[tuple[str, int, int, str], ...] = (),
     max_states: int = MAX_STATES,
+    max_maps: int = MAX_MAPS,
+    num_devices: int = 1,
 ) -> Discovery:
     """Groups, candidate roots, root-tree states, rediscovery and log generations of `index`.
 
@@ -922,6 +984,7 @@ def discover(
     """
     work = _Discoverer(img, index, ctx, chunk_map, known, log_live)
     total, states = work.states(max_states)
+    chunk_roots, maps, current_witnesses = work.chunk_maps(max_maps, num_devices)
     return Discovery(
         stats=dict(index.stats),
         groups=tuple(work.groups()),
@@ -931,6 +994,9 @@ def discover(
         logs=tuple(work.logs()),
         raw=index.raw,
         walk_failures=walk_failures,
+        chunk_root_candidates=chunk_roots,
+        chunk_maps=maps,
+        current_witnesses=current_witnesses,
         _index=index,
         _candidate=work.candidate,
     )
@@ -961,5 +1027,6 @@ def discover_image(
     discovery = discover(
         img, index, ctx=ctx, chunk_map=fs.chunk_map, known=known_roots(fs.fields),
         log_live=reach.log_logical, walk_failures=reach.walk_failures, max_states=max_states,
+        num_devices=fs.fields["num_devices"],
     )  # fmt: skip
     return RootsScan(plan, index, discovery, reach.problems)
