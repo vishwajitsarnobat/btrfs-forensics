@@ -21,6 +21,11 @@ a refused run leaves no file behind. Unchanged all-zero regions stay sparse.
       physical copy, and recompute the tree-block checksums: data hidden in node slack as in
       Toolan & Humphries 2026, which no honest image contains (EXP-005). The source needs an fs
       tree with an internal node (m3_wide).
+  uv run python corpus/mutate.py SRC DST lose-root-node
+      invert one byte in every physical copy of the oldest root-tree node (level 1 or above) that
+      still has a leaf on the image and is not the current root: that generation's root-tree
+      leaves lose their parent, as if it had been overwritten (EXP-004 §6.8). Checksums are left
+      stale, so the node no longer validates. The source needs a two-level root tree (m4_deep).
 """
 
 import argparse
@@ -29,10 +34,12 @@ import struct
 import sys
 from pathlib import Path
 
+from btrfska.scan.roots import discover_image
 from btrfska.substrate import csum, ondisk
 from btrfska.substrate import superblock as sb
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
+from btrfska.substrate.node import parse_key_ptrs
 from btrfska.substrate.roots import find_root_set, resolve_tree
 from btrfska.substrate.slack import slack_range
 from btrfska.substrate.tree import walk
@@ -133,6 +140,43 @@ def plant_slack(path: Path, message: bytes) -> dict[int, bytes]:
     return patches
 
 
+def lose_root_node(path: Path) -> tuple[dict[int, bytes], str]:
+    """Patches that break every copy of the oldest root-tree node whose loss orphans a leaf.
+
+    Root-tree leaves are shared between generations, so losing a node orphans only the children
+    that no other root-tree node on the image points to. The node chosen is the oldest one that
+    has such a child and is not the current root.
+    """
+    with open_image(path) as img:
+        fs = open_filesystem(img)
+        nodesize = fs.reader.ctx.nodesize
+        index = discover_image(img, fs, full_sweep=True).index
+        nodes = {}
+        for i in range(index.nodes):
+            bytenr, generation, level, owner = index.node(i)
+            if owner == ondisk.ROOT_TREE_OBJECTID and level > 0:
+                copies = index.copies(i)
+                block = bytes(img.mmap[copies[0] : copies[0] + nodesize])
+                children = {
+                    (ptr.blockptr, ptr.generation)
+                    for ptr in parse_key_ptrs(block, nodesize)[0]
+                    if index.find(ptr.blockptr, ptr.generation, level - 1)
+                }
+                nodes[generation, bytenr] = (level, copies, children)
+        for (generation, bytenr), (level, copies, children) in sorted(nodes.items()):
+            elsewhere = set().union(*(c for key, (_, _, c) in nodes.items()
+                                      if key != (generation, bytenr)))  # fmt: skip
+            only_here = children - elsewhere
+            if only_here and bytenr != fs.fields["root"]:
+                where = ondisk.HEADER.size + 8  # inside the first key pointer
+                patches = {p + where: bytes([img.mmap[p + where] ^ 0xFF]) for p in copies}
+                lost = ", ".join(f"{child} generation {gen}" for child, gen in sorted(only_here))
+                note = (f"root-tree node {bytenr} generation {generation} level {level}; "
+                        f"children that no other node points to: {lost}")  # fmt: skip
+                return patches, note
+    sys.exit(f"{path}: no superseded root-tree node whose loss would orphan a child")
+
+
 def check_patches(size: int, patches: dict[int, bytes]) -> None:
     for offset, block in patches.items():
         if offset < 0 or offset + len(block) > size:
@@ -186,6 +230,7 @@ def main(argv: list[str] | None = None) -> None:
     transplant.add_argument("generation", type=int)
     flip = ops.add_parser("flip-byte")
     flip.add_argument("offsets", type=int, nargs="+", metavar="OFFSET")
+    ops.add_parser("lose-root-node")
     plant = ops.add_parser("plant-slack")
     plant.add_argument("--message", default=MESSAGE)
     args = parser.parse_args(argv)
@@ -201,6 +246,8 @@ def main(argv: list[str] | None = None) -> None:
             patches = transplant_sb(src, size, args.donor, args.mirror, args.generation)
         elif args.op == "plant-slack":
             patches = plant_slack(args.src, args.message.encode())
+        elif args.op == "lose-root-node":
+            patches, note = lose_root_node(args.src)
         else:
             patches = flip_bytes(src, size, args.offsets)
         check_patches(size, patches)
@@ -208,6 +255,8 @@ def main(argv: list[str] | None = None) -> None:
         with open(dst, "xb") as out:
             write_patched(src, out, size, patches)
     print(f"{dst}: {args.op} {' '.join(str(o) for o in patches)}")
+    if args.op == "lose-root-node":
+        print(note)
 
 
 if __name__ == "__main__":
