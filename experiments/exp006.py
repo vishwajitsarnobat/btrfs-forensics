@@ -86,8 +86,8 @@ def measure(image: Path) -> dict:
         done = recover(image, work / "evidence.db", work / "out", roots=("all",), tree_id=None,
                        orphans=True)  # fmt: skip
         conn = db.open_readonly(work / "evidence.db")
-        rows = [dict(r) for r in conn.execute(
-            "SELECT source_kind, state_id, status, sha256 FROM artifacts WHERE kind = 'file'")]  # fmt: skip
+        query = "SELECT source_kind, state_id, status, sha256 FROM artifacts WHERE kind = 'file'"
+        rows = [dict(r) for r in conn.execute(query)]
         states = conn.execute("SELECT state_id, generation, known_as FROM states").fetchall()
         scan = conn.execute("SELECT generation FROM scan_runs").fetchone()
         capped = conn.execute("SELECT COUNT(*) FROM problems WHERE source = 'roots'").fetchone()[0]
@@ -138,8 +138,10 @@ def run(results: Path, builds: int, image: Path | None) -> None:
                 path.with_suffix(".log").unlink(missing_ok=True)
             out.write(json.dumps(record) + "\n")
             out.flush()
-            print(f"done   {record['image']}: generation {record['superblock_generation']}, "
-                  f"{record['states']} states, {record['orphan_leaves']} orphan leaves")  # fmt: skip
+            print(
+                f"done   {record['image']}: generation {record['superblock_generation']}, "
+                f"{record['states']} states, {record['orphan_leaves']} orphan leaves"
+            )
 
 
 def summary(record: dict) -> dict[str, int]:
@@ -158,7 +160,9 @@ def summary(record: dict) -> dict[str, int]:
         "victims only from an orphan leaf": sum(s == ["orphan"] for s in victims.values()),
         "victims not recovered": sum(not s for s in victims.values()),
         "flash files": len(flash),
-        "flash files from any root": sum(bool({"backup", "beyond"} & set(s)) for s in flash.values()),
+        "flash files from any root": sum(
+            bool({"backup", "beyond"} & set(s)) for s in flash.values()
+        ),
         "flash files only from an orphan leaf": sum(s == ["orphan"] for s in flash.values()),
         "flash files not recovered": sum(not s for s in flash.values()),
         "open-unlinked file as orphan_item": int("item" in orphan),
