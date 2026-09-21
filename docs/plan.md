@@ -1207,6 +1207,48 @@ which file that must be.
 
 **M4d status 2026-09-21: done** (catalog.md, M4d entry).
 
+**M4e: the beyond-4-generations image, and M4's definition of done** (design fixed 2026-09-21,
+before the image, its tests or the EXP-004 run were committed. The scenario was drafted during
+M4d: its trial builds are what exposed the 64-state bound recorded there.)
+
+*Image `m4_deep`* (scenario `deep`, `MOUNT_OPTS=commit=300`, no compression, no balance, 48
+subvolumes so that the root tree has two levels):
+- 24 rounds. Each creates one victim file, commits, prints its SHA-256, deletes it, commits,
+  rewrites a seventh of 400 inline padding files and commits. A victim exists in exactly one
+  committed generation; about 90 generations pass, so the four backup roots hold none but the
+  last. Odd victims are inline; even ones are regular, grow from round to round and get a small
+  separator file behind them before they are deleted, so that no later victim fits into the hole
+  and the data survives.
+- Every sixth round writes two **flash files**: written, fsynced and deleted within one
+  transaction. They reach the disk only through the log tree, which the next commit drops.
+- The last file is unlinked while open, and the guest powers off after the commit (sysrq `o`), so
+  the last committed fs tree lists it under ORPHAN_ITEM.
+The serial log is the ground truth (`=== VICTIM|FLASH|ORPHAN name sha256`).
+
+*What the tests must show, relative to that image and its log, never as constants:*
+- (a) anchored roots: the states beyond the current and backup roots recover victims that the
+  current and the four backup roots cannot, byte-identical to the logged hashes;
+- (b) orphan nodes: every flash file comes back, complete and hash-exact, as an `orphan_node`
+  artifact from a dropped log leaf, and **no** anchored artifact of `--root all` has that hash;
+- (c) orphan items: the open-unlinked file comes back as `orphan_item`, hash-exact, with the name
+  it had;
+- every artifact of the run carries one of the three source labels.
+Trial builds (5 on the dev host) gave the same outcome each time; the numbers go into the
+catalog with their range, and the tests assert the claims above, not the counts.
+
+*EXP-004 on the new image.* `experiments/exp004.py`, unchanged, runs on `m4_deep`. EXP-004's
+open case is a root-tree leaf whose parent node was lost. Trial builds contain none: every
+root-tree leaf of a two-level generation still has its node. A natural image is unlikely to
+produce one (the allocator places a generation's blocks side by side, and they are overwritten
+together), so the case is made the way `m1_badnode_both` was: `corpus/mutate.py lose-root-node`
+corrupts every physical copy of the oldest surviving root-tree node that still has leaves, giving
+`m4_deep_lost_parent`. The prediction for it is registered in EXP-004 (§6.8) before the script
+runs on it.
+
+*M4's definition of done* is then checked bullet by bullet, including the migration gate of §4.3,
+and recorded in the catalog. Tagging `legacy-final` and deleting `legacy/` is left to the
+maintainer: EXP-001 and EXP-005 regenerate numbers by running the prototype.
+
 ### M5 — Reconstruction & timelines (~2 weeks; novelty core — start early)
 - Orphan graph: reconcile scanned nodes + edges by owner/generation/
   key-range/csum into candidate historical subtrees; reattach fragments
