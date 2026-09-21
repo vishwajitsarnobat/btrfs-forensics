@@ -917,14 +917,32 @@ before implementation.
   `scan_image(...).summary` and the `roots` discovery on the sandbox and on every corpus image; the
   image hash is unchanged; a second build to the same path is refused.
 
-**M3b: content and reverse queries** (second pull request).
-- `contents`, `items` (key, raw bytes, per-type decode where `substrate/items.py` has one),
-  `key_ptrs`; view `tree_edges` (parent block to child block); parsed tables `inodes`,
-  `dir_entries`, `file_extents`, `extent_backrefs` (including EXTENT_OWNER_REF 172).
-- Reverse queries as SQL views or functions with a CLI (`btrfska catalog query …`): parents-of
-  (bytenr), owners-of (extent), trees-covering (key), items-in-generation (g).
+**M3b: content and reverse queries** (second pull request; details fixed 2026-09-21 before
+implementation).
+- `contents`: one row per distinct block content (SHA-256 of the nodesize bytes), with level,
+  item count and the first and last key. `nodes.content_id` points to it; a block cut by the image
+  end has none. Items are parsed when some node with that content is valid.
+- `items` (key, offset, size and the raw item bytes, inline file data included) and `key_ptrs`.
+  **Keys are stored twice:** as three readable integers, and as `key_sort`, the 17 bytes objectid
+  (big-endian), type, offset (big-endian). Signed storage (decision 5) keeps values but not their
+  order: objectid −6 sorts before 0. SQLite compares BLOBs bytewise, so `key_sort` orders keys as
+  btrfs does, and range queries use it.
+- View `tree_edges`: parent block to the child its pointer names, with whether a valid scanned
+  block matches the pointer's bytenr, generation and level.
+- Parsed tables: `inodes`, `inode_refs` (INODE_REF and INODE_EXTREF: the names and parents path
+  reconstruction needs in M4), `dir_entries` (DIR_ITEM, DIR_INDEX, XATTR_ITEM), `file_extents`,
+  `extents` (EXTENT_ITEM and METADATA_ITEM) and `extent_backrefs` (inline and standalone
+  TREE_BLOCK_REF, SHARED_BLOCK_REF, EXTENT_DATA_REF, SHARED_DATA_REF, EXTENT_OWNER_REF 172). A
+  payload that does not parse is kept in `items` and reported in `item_problems`; it never stops
+  the build. The extent-item parser is new (`substrate/items.py`): the logical address is the key
+  objectid and the key offset is the length, or the level for METADATA_ITEM (prototype defect #8).
+- Reverse queries in `catalog/query.py`, each also `btrfska catalog query DB …`:
+  parents-of (bytenr), owners-of (extent: file extents that point to it, and the extent tree's
+  back-references to it), trees-covering (key), items-in-generation (g).
 - **DoD:** the four reverse queries are answered from the database alone, with the image file
-  absent; results agree with `btrfska walk` on the current and backup roots of the sandbox.
+  deleted; results agree with `btrfska walk` on the current and backup roots of the sandbox; the
+  extent parser agrees with `btrfs inspect-internal dump-tree` where btrfs-progs is installed.
+  `schema_version` 2.
 
 The schema is the contract M9's GUI reads; a change bumps `schema_version` and is described in
 `docs/evidence-db.md`.
