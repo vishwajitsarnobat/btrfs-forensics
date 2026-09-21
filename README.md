@@ -13,13 +13,18 @@ classification, old-root discovery, discard experiments EXP-000 and EXP-002),
 M3 (the evidence catalog) and M4 (recovery) are done: `btrfska recover` extracts files from any
 cataloged root, from leaves no root tree leads to (dropped log trees included) and from inodes
 the kernel lists under ORPHAN_ITEM, each labelled with its source. M5 (reconstruction and
-timelines) has begun: the catalog keeps the chunk maps of superseded chunk-tree roots, and
-`recover` reads a state from before a balance through the map of its own time. The earlier prototype is frozen, still runnable, under `legacy/`.
+timelines): the catalog keeps the chunk maps of superseded chunk-tree roots and `recover` reads
+a state from before a balance through the map of its own time; `recover --graph` joins orphan
+blocks where a join can be justified; `btrfska timeline` follows every inode through every
+cataloged state. The earlier prototype is frozen, still runnable, under `legacy/`.
 - `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID|all]... [--tree ID|all] [--orphans|--graph]`
   extracts the files of a tree as the current, a backup or a discovered root saw them, and with
   `--orphans` also from leaves that no root tree leads to, one extent at a time, with a
   provenance record per file. It writes only below the new directory
   `DIR`, never to an image, and never passes off a partly read file as complete.
+- `btrfska timeline DB [--tree ID|all] [--inode N] [--uncommitted] [--json]` follows every inode
+  through every cataloged state: create, modify, rename, move, link, unlink, delete, by tree,
+  inode number and creation generation.
 - `btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` finds tree
   blocks of the filesystem anywhere on the image, including chunks that have
   since been removed. It classifies each one as `live`, `backup_reachable`,
@@ -533,6 +538,58 @@ sqlite3 -readonly images/scratch/sandbox.db \
   "SELECT status, outside_map, COUNT(*) FROM nodes WHERE orphan GROUP BY 1, 2"
 ```
 
+### `btrfska timeline`
+
+`btrfska timeline DB [--tree ID|all] [--inode N] [--uncommitted] [--json]` says what happened to
+every inode of every file tree, from the evidence database alone (the image is not needed, and
+nothing is written). Every state the catalog holds is compared, in generation order: the current
+root, the backup roots and the roots only the scan found.
+
+- **Identity is tree, inode number and creation generation.** btrfs reuses inode numbers: on
+  `sandbox.img` inode 257 is `target_file.txt`, created in generation 10 and deleted by 12, and
+  then `large_target.txt`, created in 13 and deleted by 14. The number alone would make that one
+  renamed file.
+- **Versions, then events.** Each walk of a tree gives every inode an observation (names, size,
+  mode, owner, link count, `transid`, extents). Equal consecutive observations are one version.
+  Events are the differences between consecutive versions: `create` (its transaction is the
+  INODE_ITEM's creation generation, exact), `rename`, `move`, `link`, `unlink`, `modify`, `attr`,
+  `touch` (the inode item changed and nothing else above: times, link count, a directory's
+  entries), and `delete` when a later state of the same tree, walked without a gap, no longer
+  holds the identity. When every later walk has gaps the event is `not_seen`: absence from an
+  incomplete walk proves nothing. `subvolume_deleted` is one event for a tree that a later
+  state, whose whole root tree was found, no longer names. Several changes between two surviving
+  states show as their net effect.
+- **`modify` lists the byte ranges whose extent differs** between the two versions (`delta`:
+  `offset`, `length`, `change` `added`, `removed` or `replaced`), comparing what the extent items
+  point at (address and offset into it, compression, inline bytes), not how they are cut, and
+  without reading data.
+- **Time.** Generations order everything. `times` (`otime`, `mtime`, `ctime` as `[sec, nsec]`) are
+  copied from the version's inode item: what the filesystem recorded, which a user can set.
+- **`--uncommitted`** adds what was never a committed state: fragments and lone leaves
+  (`recover --graph`'s sources) and log trees, each log tree filed under the subvolume that the
+  ROOT_ITEM of its log root tree names. Such observations sort before the committed state of
+  their generation, are marked `uncommitted_only`, and never prove a `delete`. A version whose
+  inode item is older than an extent (see `recover`) is marked `inconsistent`. An identity seen
+  only there ends with `never_committed`: a file written, fsynced and deleted within one
+  transaction, for instance.
+- When the database holds a recovery, an event carries the `sha256` of the complete artifact with
+  the same tree, inode, creation generation and extent signature.
+
+With `--json`, one object per event. Keys of every event: `event`, `tree_id`, `objectid`,
+`created` (the creation generation), `transaction` (the generation the event happened in, when the
+items say so exactly: the creation generation for `create`, the version's `transid` for a change;
+`null` otherwise), `between` (the two sources that bound the event, older first; `null` for
+`create`) and `generations` (theirs), `path`, `attached`, `kind`, `size`, `transid`,
+`extent_signature`, `inconsistent`, `times`, `first_seen` and `last_seen` (`source` and
+`generation` of the version the event leads to; for `delete` and `not_seen`, of the last version),
+`seen_in` (how many sources showed that version), `uncommitted_only`, `sha256`. Added by kind:
+`create` has `reused_inode_number` and `previous_creation_generations`; `rename` and `move` have
+`from` and `to` (`parent`, `name`, `path`); `link` and `unlink` have `name` (`parent`, `name`);
+`modify` has `size_before` and `delta`; `attr` has `before` and `after` (`mode`, `uid`, `gid`);
+`not_seen` has `reason`. A `subvolume_deleted` event has only `event`, `tree_id`, `between`,
+`generations` and `null` for `objectid`, `created` and `transaction`. The summary and the first
+gaps go to stderr.
+
 ### `btrfska recover`
 
 `btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--graph] [--maps own|current] [--no-dedup] [--no-rehash]`
@@ -627,8 +684,7 @@ skips the hash, and the run is recorded as not checked).
   `state_id`, `tree_id`, `root_bytenr`, `root_generation`, `objectid`, `inode_generation`,
   `inode_transid`, `kind`, `path`, `attached`, `names`, `size`, `mode`, `xattrs`,
   `symlink_target`, `status`, `bytes_written`, `sha256`, `extent_signature`, `duplicate_of`,
-  `output_path`, `in_current` (1 when the current tree still holds this inode with the same
-  creation generation, 0 when it was deleted since), `chunk_maps`, `joined`, `missing`, `problems`, and `inode` (the
+  `output_path`, `chunk_maps`, `joined`, `missing`, `problems`, and `inode` (the
   whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
 - Exit status 0 when every file is complete; 1 when any is `partial`, `refused_encrypted` or
   `failed`, or on an error (unknown root, wrong image, `DIR` exists); 2 for a refused format.
