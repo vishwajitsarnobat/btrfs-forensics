@@ -5,7 +5,7 @@ learned to one SQLite file. Everything after it (recovery, timelines, confidence
 queries that file and not the image. This document is the contract: every table and column is
 listed here, and a test fails when one is not (`tests/test_catalog.py`).
 
-- **Schema version: 1.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
+- **Schema version: 2.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
   the DDL in `src/btrfska/catalog/schema.py` bumps it and adds a line to [Versions](#versions).
 - **One database, one image, one pass.** The path given to `--db` must not exist. A database is
   never overwritten or updated; a rebuild is a new file. A pass that fails leaves no file.
@@ -21,6 +21,16 @@ listed here, and a test fails when one is not (`tests/test_catalog.py`).
   of 2^63 and above appears negative. That is how btrfs itself names the high objectids: `-6` is
   the log tree, `-9` the data-relocation tree. `btrfska.catalog.schema.u64()` converts back. Byte
   offsets into the image are below 2^63 and are stored as they are.
+- **Keys are stored twice.** Signed storage keeps a value but not its order: objectid `-6` sorts
+  before `0`, while btrfs sorts it last. Next to the readable `key_objectid`, `key_type` and
+  `key_offset`, every key has `key_sort`: 17 bytes, objectid (big-endian), type, offset
+  (big-endian). SQLite compares BLOBs bytewise, so `ORDER BY key_sort` and range conditions on it
+  follow the btrfs key order exactly. `btrfska.catalog.schema.key_sort()` builds one.
+- **Content is stored once.** DUP and RAID1 copies of a block are byte-identical. `contents` has
+  one row per distinct block content (SHA-256 of the nodesize bytes), and items, key pointers and
+  every parsed table hang off it. `nodes.content_id` says which content a physical copy holds; a
+  copy that differs from its mirror gets its own content, so the difference stays visible. Join
+  through the view `content_blocks` to get a content's logical identity and reachability.
 - **Booleans** are 0 or 1. A three-valued check is 1 (passed), 0 (failed) or NULL (not checked,
   because its reference value was unknown).
 - **Lists and maps** are JSON text (`problems`, `known_as`, `missing`, `gate_unsupported`).
@@ -130,6 +140,7 @@ recorded whether or not it validates.
 | `bytenr_mapped` | 1 when the current chunk map covers `bytenr` |
 | `maps_here` | 1 when a copy of `bytenr` lies at `physical`; 0 for stale blocks in removed chunks |
 | `problems` | JSON list, for example a block cut by the image end |
+| `content_id` | the content this copy holds; NULL for a block cut by the image end |
 
 ### `node_checks`: the validation record of every node
 
@@ -217,6 +228,121 @@ roots`).
 | `bytenr` | *u64* |
 | `failure_class` | as in `states.missing`; on an old backup root `reused` is expected, not damage |
 
+### `contents`: distinct block contents
+
+| Column | Meaning |
+|---|---|
+| `content_id` | row id |
+| `sha256` | of the block's nodesize bytes, hex |
+| `level`, `nritems` | from the header |
+| `parsed` | 1 when some node holding this content is valid, so its items or key pointers were read. The bytes of a content that never validates are hashed, not interpreted |
+| `first_key`, `last_key` | `key_sort` of the first and last item or key pointer; NULL when not parsed or empty |
+
+### `content_blocks` (view): what a content is
+
+One row per content held by a valid node: `content_id`, its `bytenr`, `generation`, `level`,
+`owner`, and as in `blocks`: `copies`, `first_physical`, `live`, `backup_reachable`,
+`outside_map`.
+
+### `items`: every item of every parsed leaf
+
+| Column | Meaning |
+|---|---|
+| `content_id`, `slot` | the leaf content and the item's slot |
+| `key_objectid`, `key_offset` | *u64* |
+| `key_type` | 0–255 |
+| `key_sort` | the key in btrfs order (see Conventions) |
+| `type_name` | the key type's name, for example `INODE_ITEM`, or `UNKNOWN.n` |
+| `data_offset`, `data_size` | where the payload lies in the block, relative to the end of the header, and its length |
+| `data` | the payload bytes, exactly as on disk. An inline file extent's data is in here |
+
+### `item_problems`: what did not parse
+
+| Column | Meaning |
+|---|---|
+| `content_id` | the content |
+| `slot` | the item; NULL for a finding about the block (an item that ends past the block, `nritems` above what fits) |
+| `detail` | why. The raw item is in `items` all the same; a bad payload never stops a build |
+
+### `key_ptrs` and `tree_edges` (view): internal nodes
+
+| Column | Meaning |
+|---|---|
+| `key_ptrs.content_id`, `key_ptrs.slot` | the internal node content and the pointer's slot |
+| `key_ptrs.key_objectid`, `key_ptrs.key_type`, `key_ptrs.key_offset`, `key_ptrs.key_sort` | the pointer's key: the first key of the child |
+| `key_ptrs.blockptr` | *u64*; the child's logical address |
+| `key_ptrs.ptr_generation` | *u64*; the generation the child must have |
+| `tree_edges.parent_bytenr`, `tree_edges.parent_generation`, `tree_edges.parent_level`, `tree_edges.owner` | the parent block |
+| `tree_edges.slot`, and the key columns | as in `key_ptrs` |
+| `tree_edges.child_bytenr`, `tree_edges.child_generation` | what the pointer names |
+| `tree_edges.child_found` | 1 when a valid scanned block has that address and generation, one level down |
+
+### Parsed items
+
+Each table has `content_id` and `slot` (the item it was parsed from); tables whose item packs
+several entries add `entry`, the position within the item.
+
+| Table and column | Meaning |
+|---|---|
+| `inodes.objectid` | *u64* inode number (the key objectid) |
+| `inodes.generation`, `inodes.transid` | *u64*; creation and last-change transaction |
+| `inodes.size`, `inodes.nbytes` | *u64* bytes |
+| `inodes.nlink`, `inodes.uid`, `inodes.gid`, `inodes.mode` | as in `stat` |
+| `inodes.rdev`, `inodes.flags`, `inodes.sequence` | *u64* |
+| `inodes.atime_sec`, `inodes.ctime_sec`, `inodes.mtime_sec`, `inodes.otime_sec` | *u64* seconds since the epoch; `otime` is the creation time |
+| `inodes.atime_nsec`, `inodes.ctime_nsec`, `inodes.mtime_nsec`, `inodes.otime_nsec` | nanoseconds |
+| `inode_refs.objectid` | *u64*; the inode the name belongs to |
+| `inode_refs.parent_objectid` | *u64*; the directory holding the name |
+| `inode_refs.dir_index` | *u64*; its index in that directory |
+| `inode_refs.name`, `inode_refs.name_raw` | the name as text (undecodable bytes replaced) and the exact bytes |
+| `inode_refs.extended` | 1 for INODE_EXTREF, 0 for INODE_REF |
+| `dir_entries.kind` | `DIR_ITEM`, `DIR_INDEX` or `XATTR_ITEM` |
+| `dir_entries.dir_objectid` | *u64*; the directory (for XATTR_ITEM, the inode carrying the attribute) |
+| `dir_entries.key_offset` | *u64*; the name hash, or the index for DIR_INDEX |
+| `dir_entries.child_objectid`, `dir_entries.child_key_type`, `dir_entries.child_offset` | the key the entry points to: an inode, or a ROOT_ITEM for a subvolume |
+| `dir_entries.file_type` | btrfs file type (1 regular, 2 directory, 7 symlink, 8 xattr) |
+| `dir_entries.transid` | *u64* |
+| `dir_entries.data_len` | bytes of xattr value following the name |
+| `dir_entries.name`, `dir_entries.name_raw` | as in `inode_refs` |
+| `file_extents.objectid`, `file_extents.file_offset` | *u64*; the inode and the offset in the file |
+| `file_extents.generation` | *u64*; transaction that wrote the extent |
+| `file_extents.ram_bytes` | *u64*; uncompressed size |
+| `file_extents.compression`, `file_extents.encryption`, `file_extents.other_encoding` | 0 none; compression 1 zlib, 2 lzo, 3 zstd |
+| `file_extents.extent_type`, `file_extents.extent_kind` | 0 `inline`, 1 `regular`, 2 `prealloc` |
+| `file_extents.disk_bytenr`, `file_extents.disk_num_bytes` | *u64*; the extent on disk; `disk_bytenr` 0 is a hole. NULL for inline |
+| `file_extents.extent_offset`, `file_extents.num_bytes` | *u64*; the part of the extent this file range uses. NULL for inline |
+| `file_extents.inline_size` | bytes of inline data in the item; NULL otherwise |
+| `root_items.tree_id`, `root_items.key_offset` | *u64*; the ROOT_ITEM key: which tree, and for a snapshot the transaction it was taken in |
+| `root_items.bytenr`, `root_items.generation`, `root_items.level` | the tree root it names |
+| `root_items.root_dirid`, `root_items.refs`, `root_items.flags`, `root_items.last_snapshot`, `root_items.bytes_used`, `root_items.drop_level` | from the item; `refs` 0 marks a deleted subvolume being cleaned up |
+| `root_items.uuid`, `root_items.parent_uuid`, `root_items.received_uuid` | hex; NULL when zero or absent (legacy items) |
+| `root_items.ctransid`, `root_items.otransid`, `root_items.otime_sec` | *u64*; NULL on legacy items |
+| `extents.bytenr` | *u64*; the extent's logical address (the key objectid) |
+| `extents.num_bytes` | *u64*; its length (the key offset). NULL for METADATA_ITEM, whose key offset is the level |
+| `extents.refs`, `extents.generation`, `extents.flags` | *u64* from the item; flag 1 data, 2 tree block |
+| `extents.tree_block`, `extents.level` | 1 for a tree block, and its level |
+| `extent_backrefs.extent_bytenr` | *u64*; the extent referred to |
+| `extent_backrefs.ref_type`, `extent_backrefs.ref_type_name` | 176 `TREE_BLOCK_REF`, 182 `SHARED_BLOCK_REF`, 178 `EXTENT_DATA_REF`, 184 `SHARED_DATA_REF`, 172 `EXTENT_OWNER_REF` |
+| `extent_backrefs.inline` | 1 when packed inside the extent item, 0 for an item of its own |
+| `extent_backrefs.root` | *u64*; the tree that references the extent (or, for an owner ref, that created it) |
+| `extent_backrefs.parent` | *u64*; for shared references, the tree block holding the reference |
+| `extent_backrefs.objectid`, `extent_backrefs.file_offset` | *u64*; for EXTENT_DATA_REF, the inode and file offset |
+| `extent_backrefs.ref_count` | how many references of this kind |
+
+## Reverse queries
+
+`btrfska catalog query DB …` and `btrfska.catalog.query` answer four questions from the database
+alone; the image is not needed. Rows are JSON objects, with integers as on-disk u64 values.
+
+| Query | Answers |
+|---|---|
+| `parents-of BYTENR [--generation G]` | what references a tree block: internal nodes (`referrer` `node`), ROOT_ITEMs naming it as a tree root (`root_item`), superblock and backup slots (`superblock`) |
+| `owners-of BYTENR` | what uses an extent: file extents of any generation pointing to it (`file_extent`), the extent tree's back-references (`extent_backref`), and, for a tree block, the blocks scanned at that address (`tree_block`) |
+| `trees-covering OBJECTID TYPE OFFSET` | the leaves, of every tree and generation, whose key range holds the key; `exact` when the key is an item there |
+| `items-in-generation G [--type T] [--limit N]` | the items of every leaf whose header generation is G |
+
+Block rows carry `reach`: `live`, `backup_reachable` or `unreferenced`, and `outside_map`.
+
 ## Examples
 
 ```sql
@@ -233,17 +359,35 @@ FROM states WHERE known_as = '[]' ORDER BY generation DESC;
 
 -- log-tree blocks: owner -6 is the log tree (see Conventions)
 SELECT generation, COUNT(*) FROM nodes WHERE owner = -6 GROUP BY generation;
+
+-- every name an inode ever had, in any surviving generation, live or not
+SELECT DISTINCT b.generation, r.parent_objectid, r.name,
+       CASE WHEN b.live THEN 'live' WHEN b.backup_reachable THEN 'backup' ELSE 'unreferenced' END
+FROM inode_refs r JOIN content_blocks b USING (content_id)
+WHERE r.objectid = 257 ORDER BY b.generation;
+
+-- the history of one data extent: who pointed to it, generation by generation
+SELECT b.generation, b.owner AS tree, f.objectid AS inode, f.file_offset, b.live
+FROM file_extents f JOIN content_blocks b USING (content_id)
+WHERE f.disk_bytenr = 13631488 ORDER BY b.generation;
+
+-- items of one leaf in btrfs key order (key_sort, not the signed columns)
+SELECT slot, type_name, key_objectid, key_offset FROM items WHERE content_id = 1 ORDER BY key_sort;
 ```
 
-## Not in version 1
+## Not stored yet
 
-Leaf items, key pointers, tree edges and the parsed inode, directory and extent tables arrive
-with the second half of the milestone (plan.md M3b), and `artifacts` and `provenance` with the
-milestones that first write them (M4, M6). Log generations and the (owner, generation, level)
-groups that `btrfska roots` prints are not stored: both are one `GROUP BY` over `nodes`.
+`artifacts` and `provenance` arrive with the milestones that first write them (plan.md M4, M6).
+Items beyond `nritems` and node slack are not parsed (M4). Log generations and the (owner,
+generation, level) groups that `btrfska roots` prints are one `GROUP BY` over `nodes`. Only the
+current chunk map is stored; historical maps come with M5 (`chunks.map_source`).
 
 ## Versions
 
 - **1** (2026-09-21): first version. `scan_runs`, `superblocks`, `problems`, `chunks`, `stripes`,
   `regions`, `nodes`, `node_checks`, `known_roots`, `states`, `state_copies`, `state_trees`,
   `walk_failures`; view `blocks`.
+- **2** (2026-09-21): `contents` and `nodes.content_id`; `items`, `item_problems`, `key_ptrs`; the
+  parsed tables `inodes`, `inode_refs`, `dir_entries`, `file_extents`, `root_items`, `extents`,
+  `extent_backrefs`; views `content_blocks` and `tree_edges`; `key_sort` on every key. Nothing of
+  version 1 changed meaning. A version-1 database is refused; rebuild it from the image.
