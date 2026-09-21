@@ -1018,7 +1018,7 @@ def test_cli_recover_all_states_with_orphans_reports_the_orphan_sources(capsys):
         conn = db.open_readonly(database)
         leaves = len(orphan_leaves(conn))
         conn.close()
-        assert line.startswith(f"orphan sources: {leaves} leaves no state reaches")
+        assert line.startswith(f"orphan sources: {leaves} leaves no root tree leads to")
         assert (d / "out" / "orphan_nodes").is_dir()
 
 

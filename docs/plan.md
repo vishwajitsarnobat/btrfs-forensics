@@ -1180,6 +1180,22 @@ every artifact with the one it came from (`artifacts.source_kind`):
 5. No schema change: `source_kind`, `state_id` (NULL for an orphan leaf), `root_bytenr` and
    `root_generation` (the leaf itself for an orphan leaf) already exist. The document is updated.
 
+*Changed during implementation (2026-09-21), because the first version fooled itself.* A trial
+image had 85 root-tree candidates, and the catalog evaluated the newest 64 (`MAX_STATES`, a bound
+meant for a terminal report). Six deleted files then looked "recoverable only from orphan
+leaves", when root trees that had simply not been evaluated reached them. Two corrections:
+- the catalog evaluates up to 4096 states (`catalog build --max-states`), and a bound that bites
+  is recorded in `problems` (source `roots`) instead of passing silently;
+- "orphan leaf" no longer depends on `states` at all: a file-tree leaf is an orphan when **no
+  ROOT_ITEM in any valid root-tree leaf the scan found**, of any generation, names a tree that
+  reaches it. That also covers root-tree leaves whose parent node is lost.
+With that, the trial image had no file that only an orphan file-tree leaf could give, which is
+the honest result for a sequential allocator: a victim's leaf and the root tree of its generation
+are allocated side by side and die together. What no root tree ever names is something else:
+**leaves of dropped log trees**. A file written, fsynced and deleted within one transaction
+reaches the disk only through the log tree, which the next commit drops. Those leaves (owner -6,
+not reached by the walk of the superblock's log root) are read as orphan leaves too.
+
 *Definition of done for M4d.* On synthetic trees: an orphan leaf's file is recovered and
 labelled; the same file reachable from a state is a duplicate, not a second copy; a file
 continuing in another leaf is partial; an ORPHAN_ITEM inode is labelled, keeps its content and
@@ -1188,6 +1204,8 @@ gets its former name only from a leaf with the same creation generation. On `san
 unchanged, and every artifact has a provenance chain. The file that only an orphan source can
 recover is shown on the beyond-4-generations image (next feature), where ground truth says
 which file that must be.
+
+**M4d status 2026-09-21: done** (catalog.md, M4d entry).
 
 ### M5 — Reconstruction & timelines (~2 weeks; novelty core — start early)
 - Orphan graph: reconcile scanned nodes + edges by owner/generation/

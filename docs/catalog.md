@@ -20,6 +20,57 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — M4d: recovery without an anchor: orphan leaves, dropped log trees, ORPHAN_ITEM
+
+- **Branch:** `feature/m4-orphan-recovery` (from `main` at `38fe338`). Changed
+  `recover/dbtree.py`, `recover/inodes.py`, `recover/engine.py`, `recover/cli.py`,
+  `catalog/build.py`, `catalog/cli.py`, `tests/test_recover.py`, `tests/test_catalog.py`,
+  `README.md`, `docs/evidence-db.md`, plan.md. No schema change: `source_kind`, a NULL `state_id`
+  and the leaf as `root_bytenr` were already there; the document now defines them.
+- **Planned first** (`3f527ad`), and the plan was corrected during the work; the correction is in
+  plan.md M4d, dated, because it matters to what the paper may claim.
+- **`recover --orphans`** reads, after the roots, every leaf that nothing anchors, one at a time
+  and never joined with another, and labels each artifact `orphan_node`. `--root all` names every
+  cataloged state. With deduplication on, what a root also gives is a `duplicate`, so after
+  `--root all --orphans` the `complete` orphan files are exactly the versions no root can give.
+  The last inode of a lone leaf may continue in the next leaf, and with NO_HOLES a range without
+  an item reads as a hole, so such a file is `partial` (`continues_elsewhere`), never complete.
+- **ORPHAN_ITEM** (objectid -5, type 48): an inode a tree lists there is labelled `orphan_item`.
+  It has no name left, so the database is searched for the names it had, in leaves of the same
+  tree holding its INODE_ITEM with the same creation generation (the inode number alone would
+  lend `sandbox.img`'s inode 257 the name of a different file).
+- **The first version fooled itself, and the fix is the main result of this entry.** Old-root
+  discovery evaluates at most 64 states (a bound written for `btrfska roots`' report). On a trial
+  image with 85 root-tree candidates, six deleted files looked "recoverable only from orphan
+  leaves". They were not: unevaluated root trees reached them. Now (a) the catalog evaluates up
+  to 4096 states (`catalog build --max-states`) and records a bound that bites in `problems`;
+  (b) an orphan leaf is one that **no ROOT_ITEM in any scanned root-tree leaf** leads to, which
+  does not depend on `states` and also covers a root-tree leaf whose parent is lost.
+- **What orphan file-tree leaves really hold.** On every image they exist (`sandbox.img` 4,
+  `m3_wide` 26, `s01_discard_none_r1` 22, `m2_logtree` 3), and what they add is **file versions
+  that were never committed**: `sync` writes the dirty leaves first and commits afterwards, and
+  the commit rewrites the leaves whose inodes change in between. On `sandbox.img` that is
+  `large_target.txt` at size 0, once without and once with its 5 MiB extent already attached.
+  145 such versions on `m3_wide`, all of size 0. No file on these images is recoverable *only*
+  from an orphan file-tree leaf, and with a sequential allocator that is to be expected: a
+  victim's leaf and the root tree of its generation are allocated side by side and are
+  overwritten together.
+- **What no root tree ever names: dropped log trees.** A file written, fsynced and deleted within
+  one transaction reaches the disk only through the log tree, which the next commit drops.
+  Leaves with owner -6 that the walk of the superblock's log root does not reach are read as
+  orphan leaves (`orphan_nodes/tree_log/`). The live log is left alone (M5). The image that shows
+  it is the next pull request.
+- **Verification.** `uv run pytest`: 892 passed, 0 skipped (10 new): an orphan leaf's files and
+  their labels; a root's copy makes the orphan copy a duplicate; `continues_elsewhere`; a leaf a
+  scanned ROOT_ITEM leads to is not an orphan even without a state; a dropped log leaf is, the
+  live log is not; ORPHAN_ITEM content, label and former name by creation generation; a bound
+  that bites is reported, relative to the image's own candidate count; on `sandbox.img` and
+  `m3_wide` every orphan leaf with inodes is read and every artifact has a chain. Ruff clean;
+  images unchanged. No corpus script changed.
+- **Limits.** One leaf at a time: no file spanning leaves, no parent paths beyond the leaf (M5's
+  orphan graph). A log leaf does not say which subvolume it logged. Former names are looked up
+  only for ORPHAN_ITEM inodes.
+
 ## 2026-09-21 — M4c: what lies beyond `nritems`, described and stored; a planted-slack image
 
 - **Branch:** `feature/m4-slack-describers` (from `main` at `5d4750e`). New

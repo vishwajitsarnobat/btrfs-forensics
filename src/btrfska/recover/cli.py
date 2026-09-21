@@ -69,7 +69,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
         found = {k: sum(n for (kind, _), n in done.by_source.items() if kind == k) for k in kinds}
         only = sum(done.by_source.get((k, "complete"), 0) for k in kinds)
         print(
-            f"orphan sources: {done.orphan_leaves} leaves no state reaches; artifacts from "
+            f"orphan sources: {done.orphan_leaves} leaves no root tree leads to; artifacts from "
             f"orphan_node {found['orphan_node']}, from orphan_item {found['orphan_item']}; "
             f"{only} complete and not a duplicate of anything the roots gave"
         )
