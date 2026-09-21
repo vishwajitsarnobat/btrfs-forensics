@@ -20,6 +20,57 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — EXP-005: the kernel zeroes tree-block slack; claim C1 narrowed
+
+- **Branch:** `feature/exp005-cow-slack` (from `main` at `6858a74`). New `experiments/EXP-005.md`,
+  `experiments/exp005.py`, `tests/test_exp005.py`; changed plan.md (§1 C1, §4.1, M4),
+  paper-draft.md (C1, C5, new N12, related work), research.md §10.13. No change under `src/`.
+- **Why first:** M4 was to port the prototype's slack and beyond-`nritems` mining. Toolan &
+  Humphries 2026 report that data in internal-node slack does not survive the node's next copy.
+  If that is general, the port recovers nothing and C1 is wrong as written.
+- **Read first, registered second, measured third** (`3dabb14` holds §1–§2, before the script
+  existed). Kernel v7.0: `btrfs_force_cow_block` copies the whole block
+  (`copy_extent_buffer_full`, `ctree.c:511`), so "slack is not copied" is not the mechanism. The
+  write path is: `prepare_eb_write` (`extent_io.c:2215`) zeroes everything beyond `nritems`, in
+  internal nodes and in leaves, before the checksum. Two commits by Liu Bo, September 2016, both
+  in v4.9 and not in v4.8.
+- **Result** ([EXP-005](../experiments/EXP-005.md)). 14 manifest images and `sandbox.img`, full
+  sweep, every valid physical copy:
+  - kernel-written blocks: 2 078 (2 044 leaves, 34 internal nodes on `m3_wide`), 28.8 MB of
+    slack, **0 non-zero bytes**; live, backup-reachable and unreferenced, inside and outside the
+    chunk map. 1 484 leaf and 16 internal superseded-successor pairs: all empty (P1, P2 hold);
+  - **a registered prediction failed (P3):** `mkfs.btrfs` leaves stale items in the slack of
+    about a third of the blocks it writes (8 of 28 in a never-mounted control; 81 of 329
+    mkfs-written blocks on the images). mkfs 6.6.3 ends at generation 6, mkfs 7.1 at 8, not at 1
+    as the method assumed; never-mounted controls were added after the first run to measure that,
+    and EXP-005 §6.6 says so;
+  - the stale content decodes to BLOCK_GROUP_ITEM, TREE_BLOCK_REF, METADATA_ITEM, CHUNK_ITEM,
+    DEV_EXTENT and FREE_SPACE_EXTENT headers: mkfs's own bookkeeping, never a file's item;
+  - 24 pairs where the kernel rewrote an mkfs leaf with stale slack: the successor is empty in
+    all 24. An mkfs block the kernel never rewrites keeps its content (the chunk-tree leaf of
+    generation 6 is still live on `m3_wide`);
+  - the prototype on `sandbox.img`: 0 orphan items, 0 internal residuals, 4 saved leaf slacks,
+    which are those mkfs remnants (P4 half right). research.md §10.13 said it had recovered
+    remnants of deleted items there; corrected.
+- **What changed in the claims.** C1 no longer lists items beyond `nritems` and node slack as a
+  recovery source; it keeps whole superseded blocks and the kernel's ORPHAN_ITEM, and names slack
+  mining as prior work for pre-4.9 filesystems, untested here. C5 gains a rule: a checksum-valid
+  block with non-zero slack was not written by the kernel, and a detector must recognise mkfs
+  remnants or it flags every honest image. New N12 in the paper draft. M4's definition of done
+  now says "(c) orphan items" means ORPHAN_ITEM (0x30).
+- **What it means for the rest of M4.** The slack and beyond-`nritems` parsers are still ported,
+  as describers ("what is here, and which writer explains it"), tested on mkfs remnants and on an
+  image with planted slack. They will not be the source of the file that anchored roots cannot
+  recover; unreferenced blocks and ORPHAN_ITEMs have to be.
+- **Verification:** `uv run pytest` 822 passed, 0 skipped (12 new: the slack range on leaves,
+  empty leaves, internal nodes and a hostile `nritems`; decoding; pairing; the writer split; and
+  the claim on `m3_wide` relative to a control formatted during the test). Ruff and format clean.
+  `sandbox.img` and the 15 corpus images unchanged after the run. No corpus script changed.
+- **Limits.** One kernel, one nodesize, 34 internal nodes on one image. Kernels 4.9 to 6.x were
+  read from the commit history, not run. Other btrfs-progs writers are UNVERIFIED. Bhat & Wani
+  2018 do not name their kernel; that their orphan items need a pre-4.9 kernel is likely
+  (their dataset paper used 4.2) and UNVERIFIED.
+
 ## 2026-09-21 — Checkpoint: M0 to M3 confirmed done before M4
 
 - **Branch:** `docs/mark-m0-m3-done` (from `main` at `45c08db`). plan.md only: status lines for M0
