@@ -30,12 +30,10 @@ from btrfska.catalog.schema import s64
 from btrfska.recover.dbtree import (
     Leaf,
     Root,
-    RootNotCataloged,
     every_state,
     former_names,
     fragment_roots,
     orphan_leaves,
-    resolve_root,
     resolve_roots,
     tree_leaves,
 )
@@ -257,7 +255,7 @@ class _Run:
         return "orphan_graph" if root.kind != "anchored_root" and record.joins else root.kind
 
     # ---- one artifact -------------------------------------------------------------------
-    def artifact(self, recovery_id: int, root: Root, record: InodeRecord, where, in_current):
+    def artifact(self, recovery_id: int, root: Root, record: InodeRecord, where):
         parts, attached = where
         kind, inode = record.kind, record.inode
         problems = list(record.problems)
@@ -300,7 +298,6 @@ class _Run:
             "extent_signature": None,
             "duplicate_of": None,
             "output_path": None,
-            "in_current": in_current,
             "chunk_maps": "[]",
             "joined": json.dumps(record.joins),
         }
@@ -474,22 +471,6 @@ def _join_lone_leaf(conn, run: _Run, root: Root, leaf: Leaf, inodes: dict, secto
     return named
 
 
-def _current_inodes(conn: sqlite3.Connection, tree_id: int) -> set[tuple[int, int]] | None:
-    """(objectid, creation generation) of every inode of the current tree; None if unknown."""
-    try:
-        current = resolve_root(conn, "current", tree_id)
-    except RootNotCataloged:
-        return None
-    leaves, gaps = tree_leaves(conn, current)
-    if gaps:
-        return None
-    return {
-        (objectid, record.inode["generation"])
-        for objectid, record in collect(conn, leaves).items()
-        if record.inode is not None
-    }
-
-
 def recover_roots(
     conn: sqlite3.Connection,
     readers: Readers | NodeReader,
@@ -511,8 +492,6 @@ def recover_roots(
     if isinstance(readers, NodeReader):
         readers = Readers(conn, readers, own=False)
     run = _Run(conn, readers.current, out, note, no_holes=no_holes, dedup=dedup)
-    trees = {root.tree_id for root in (*roots, *fragments)} | {r.tree_id for r, _ in orphans}
-    current = {tree: _current_inodes(conn, tree) for tree in trees}
     gaps = {}
     sectorsize = readers.current.ctx.sectorsize
     covered: set[int] = set()  # leaves read under a fragment are not read again on their own
@@ -542,12 +521,7 @@ def recover_roots(
             named = _join_lone_leaf(conn, run, root, leaf, inodes, sectorsize)
         located = paths(inodes, named)
         for objectid in sorted(located):
-            record = inodes[objectid]
-            in_current = None
-            if current[root.tree_id] is not None and record.inode is not None:
-                present = (objectid, record.inode["generation"]) in current[root.tree_id]
-                in_current = int(present)
-            run.artifact(recovery_id, root, record, located[objectid], in_current)
+            run.artifact(recovery_id, root, inodes[objectid], located[objectid])
         conn.commit()
     return run, gaps
 
