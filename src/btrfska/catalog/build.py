@@ -301,7 +301,7 @@ TABLES = (
     "scan_runs", "superblocks", "problems", "chunks", "stripes", "regions", "nodes",
     "node_checks", "known_roots", "states", "state_copies", "state_trees", "walk_failures",
     "contents", "items", "item_problems", "key_ptrs", "inodes", "inode_refs", "dir_entries",
-    "file_extents", "root_items", "extents", "extent_backrefs",
+    "file_extents", "root_items", "extents", "extent_backrefs", "stale_items", "stale_key_ptrs",
 )  # fmt: skip
 
 
@@ -341,7 +341,7 @@ def build_catalog(
                 )
 
                 ctx = fs.reader.ctx
-                contents = ContentWriter(conn, ctx.nodesize)
+                contents = ContentWriter(conn, ctx.nodesize, ctx.sectorsize)
 
                 def written() -> Iterator[NodeRecord]:
                     for item in scan.classified:

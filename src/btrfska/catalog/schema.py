@@ -16,7 +16,7 @@ exactly as btrfs_comp_cpu_keys does; range and ordering queries use it.
 
 import struct
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # The tables a recovery appends to after the build (plan.md M4b). Every other table is written
 # by the one pass of `catalog build` and never again; catalog/db.py enforces that.
@@ -141,7 +141,11 @@ CREATE TABLE contents (
     nritems     INTEGER NOT NULL,
     parsed      INTEGER NOT NULL,
     first_key   BLOB,
-    last_key    BLOB
+    last_key    BLOB,
+    slack_start    INTEGER,
+    slack_len      INTEGER,
+    slack_nonzero  INTEGER,
+    slack_class    TEXT
 );
 CREATE INDEX contents_by_range ON contents (level, first_key, last_key);
 
@@ -423,6 +427,36 @@ CREATE TABLE extent_backrefs (
     FOREIGN KEY (content_id, slot) REFERENCES items(content_id, slot)
 );
 CREATE INDEX extent_backrefs_by_extent ON extent_backrefs (extent_bytenr);
+
+CREATE TABLE stale_items (
+    content_id    INTEGER NOT NULL REFERENCES contents(content_id),
+    position      INTEGER NOT NULL,
+    slot          INTEGER NOT NULL,
+    key_objectid  INTEGER NOT NULL,
+    key_type      INTEGER NOT NULL,
+    key_offset    INTEGER NOT NULL,
+    key_sort      BLOB    NOT NULL,
+    type_name     TEXT    NOT NULL,
+    data_offset   INTEGER NOT NULL,
+    data_size     INTEGER NOT NULL,
+    data_state    TEXT    NOT NULL,
+    data          BLOB,
+    PRIMARY KEY (content_id, position)
+);
+CREATE INDEX stale_items_by_type ON stale_items (key_type, key_objectid);
+
+CREATE TABLE stale_key_ptrs (
+    content_id      INTEGER NOT NULL REFERENCES contents(content_id),
+    position        INTEGER NOT NULL,
+    slot            INTEGER NOT NULL,
+    key_objectid    INTEGER NOT NULL,
+    key_type        INTEGER NOT NULL,
+    key_offset      INTEGER NOT NULL,
+    key_sort        BLOB    NOT NULL,
+    blockptr        INTEGER NOT NULL,
+    ptr_generation  INTEGER NOT NULL,
+    PRIMARY KEY (content_id, position)
+);
 
 CREATE TABLE recovery_runs (
     recovery_id    INTEGER PRIMARY KEY,

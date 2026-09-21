@@ -14,7 +14,7 @@ import sqlite3
 
 from btrfska.catalog.schema import key_sort, s64
 from btrfska.substrate import items as item_parsers
-from btrfska.substrate import ondisk
+from btrfska.substrate import ondisk, slack
 from btrfska.substrate.node import Item, parse_items, parse_key_ptrs
 
 K = ondisk.ITEM_KEYS
@@ -47,6 +47,8 @@ _INSERT = {
     "root_items": 19,
     "extents": 9,
     "extent_backrefs": 12,
+    "stale_items": 12,
+    "stale_key_ptrs": 9,
 }
 
 
@@ -59,8 +61,8 @@ def _text(name: str) -> tuple[str, bytes]:
 class ContentWriter:
     """Assigns content ids and writes every table that hangs off `contents`."""
 
-    def __init__(self, conn: sqlite3.Connection, nodesize: int) -> None:
-        self.conn, self.nodesize = conn, nodesize
+    def __init__(self, conn: sqlite3.Connection, nodesize: int, sectorsize: int = 4096) -> None:
+        self.conn, self.nodesize, self.sectorsize = conn, nodesize, sectorsize
         self.ids: dict[bytes, int] = {}
         self.parsed: set[int] = set()
         self.rows: dict[str, list[tuple]] = {table: [] for table in _INSERT}
@@ -99,13 +101,31 @@ class ContentWriter:
             keys = [ptr.key for ptr in entries]
         self.rows["item_problems"].extend((content_id, None, detail) for detail in problems)
         first, last = (key_sort(*keys[0]), key_sort(*keys[-1])) if keys else (None, None)
+        beyond = slack.describe(block, self.nodesize, self.sectorsize)
+        self._stale(content_id, beyond)
         self.conn.execute(
-            "UPDATE contents SET parsed = 1, first_key = ?, last_key = ? WHERE content_id = ?",
-            (first, last, content_id),
-        )
+            "UPDATE contents SET parsed = 1, first_key = ?, last_key = ?, slack_start = ?,"
+            " slack_len = ?, slack_nonzero = ?, slack_class = ? WHERE content_id = ?",
+            (first, last, beyond.start, beyond.length, beyond.nonzero, beyond.slack_class,
+             content_id),
+        )  # fmt: skip
         self.pending += len(entries)
         if self.pending >= BATCH:
             self.flush()
+
+    def _stale(self, content_id: int, beyond: slack.SlackReport) -> None:
+        """What lies beyond nritems (substrate/slack.py): kept as found, never as live items."""
+        for item in beyond.items:
+            name = item_parsers.KEY_TYPE_NAMES[item.key.type]
+            self.rows["stale_items"].append(
+                (content_id, item.position, item.slot, *map(s64, item.key), key_sort(*item.key),
+                 name, item.data_offset, item.data_size, item.data_state, item.data)
+            )  # fmt: skip
+        for ptr in beyond.key_ptrs:
+            self.rows["stale_key_ptrs"].append(
+                (content_id, ptr.position, ptr.slot, *map(s64, ptr.key), key_sort(*ptr.key),
+                 s64(ptr.blockptr), s64(ptr.generation))
+            )  # fmt: skip
 
     def _item(self, content_id: int, item: Item) -> None:
         key = item.key
