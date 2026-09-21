@@ -247,3 +247,29 @@ def test_plant_slack_changes_only_the_slack_and_checksum_of_the_blocks_it_names(
             assert all(i < ondisk.CSUM_SIZE or start <= i < start + 9 for i in differing)
             a = a[:offset] + new + a[offset + nodesize :]
         assert a == b  # nothing else in the image changed
+
+
+def test_lose_root_items_refuses_a_tree_no_superseded_leaf_names_and_leaves_no_file():
+    with scratch_dir("test_mutate_") as d:
+        before = sha256(REPO_ROOT / "sandbox.img")
+        result = run(REPO_ROOT / "sandbox.img", d / "lost.img", "lose-root-items", "999")
+        assert result.returncode != 0 and "no superseded root-tree leaf" in result.stderr
+        assert not (d / "lost.img").exists()
+        assert sha256(REPO_ROOT / "sandbox.img") == before
+
+
+def test_lose_root_items_flips_one_byte_per_copy_and_never_touches_the_current_root():
+    src = REPO_ROOT / "images" / "scenarios" / "m5_delsubvol.img"
+    if not src.exists():
+        pytest.skip("m5_delsubvol.img absent: build it with corpus/build.py")
+    with scratch_dir("test_mutate_") as d:
+        result = run(src, d / "lost.img", "lose-root-items", "257")
+        assert result.returncode == 0, result.stderr
+        offsets = [int(word) for word in result.stdout.splitlines()[0].split()[2:]]
+        with open_image(src) as old, open_image(d / "lost.img") as new:
+            assert old.size == new.size and offsets
+            for offset in offsets:
+                assert old.mmap[offset] ^ 0xFF == new.mmap[offset]
+            fields = sb.read_superblock(new).selected.fields
+            assert sb.read_superblock(old).selected.fields["root"] == fields["root"]
+        assert "root-tree leaves that named tree 257" in result.stdout

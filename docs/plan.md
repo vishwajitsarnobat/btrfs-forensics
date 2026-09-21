@@ -1663,7 +1663,7 @@ EXP-008) and M5d (timelines), after the prior-art re-run (research.md §11). Bul
     and files each under the subvolume its log root names; `recover` still leaves the live log
     alone and reads dropped log leaves without saying which subvolume they logged. `m2_logtree`
     has the ground truth for it (two fsynced files and one appended file, hashes logged).
-  - *deleted-subvolume recovery as a tested feature.* A subvolume tree that no ROOT_ITEM names is
+  - *deleted-subvolume recovery as a tested feature* (**done since: M5e-2, 2026-09-22**). A subvolume tree that no ROOT_ITEM names is
     a fragment for `recover --graph`, and a subvolume that a later state no longer names gives
     `subvolume_deleted` in the timeline, but no corpus image deletes a subvolume, so neither was
     exercised on a real one. It needs a scenario and, as for `m4_deep_lost_parent`, a mutated
@@ -1736,6 +1736,10 @@ it. On `m5_delsubvol_lost_items`: no scanned ROOT_ITEM names the tree; `recover 
 all` gives none of its files; `recover --graph` gives both logged files hash-exact, as
 `orphan_graph`, with the doomed tree's id and their paths. Tests assert this relative to the
 images and their log. Whatever does not hold is reported as a finding, not tuned away.
+
+**M5e-2 status 2026-09-22: done** (catalog.md, M5e-2 entry; `tests/test_delsubvol.py`). Every
+bullet held on the first build; no recovery code had to change. What is left of M5's list is
+the btrfscue comparison, which waits for M7's baseline builds.
 
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree

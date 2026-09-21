@@ -20,6 +20,44 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-22 — M5e-2: a deleted subvolume on real images
+
+- **Branch:** `feature/m5-deleted-subvolume` (from `main` at `a426d9e`). New
+  `corpus/vm/scenarios/delsubvol.guest.sh`, `tests/test_delsubvol.py`; changed
+  `corpus/manifest.tsv` (`m5_delsubvol`, `m5_delsubvol_lost_items`: 20 images), `corpus/mutate.py`
+  (`lose-root-items TREE`), `tests/test_mutate.py`, `tests/test_vm_images.py`, plan.md.
+- **Planned first** (plan.md "M5e-2"). It closes the second of the three items M5's status left
+  open. No recovery code changed: the point was to run what exists on a deleted subvolume, which
+  the corpus did not have.
+- **`m5_delsubvol`** (scenario `delsubvol`, `commit=300`): a subvolume with a directory, a regular
+  and an inline file (SHA-256 logged) and 300 small files, so that its tree has a root node above
+  its leaves; commit; `btrfs subvolume delete` and `btrfs subvolume sync`, so the cleaner drops
+  the tree and removes the ROOT_ITEM; three more commits elsewhere; unmount. On this host's
+  build the superblock is at generation 12, the root trees of generations 7 and 8 still name
+  tree 257, and the later ones do not.
+- **`m5_delsubvol_lost_items`**: `corpus/mutate.py lose-root-items 257` breaks every physical copy
+  of every superseded root-tree leaf that holds a ROOT_ITEM of tree 257 (four leaves, eight
+  copies on this build). No root tree of any generation names the subvolume afterwards. A
+  natural history is unlikely to produce that (EXP-006: a tree's blocks and its root-tree leaf
+  die together), so it is made, as `m4_deep_lost_parent` was.
+- **What the images show.**
+  - From a state that still names it, `recover --root all --tree all` gives both logged files
+    back hash-exact with their paths; the current state gives none. That was M4b's code, run on
+    a deleted subvolume for the first time.
+  - The timeline has one `subvolume_deleted` for tree 257, bounded by two states, and no `delete`
+    per file inside it.
+  - On the mutated image `recover --root all --tree all` gives none of the subvolume's files, and
+    `recover --graph` gives both logged files hash-exact, with their paths, as `orphan_graph` from
+    a fragment of tree 257: the subvolume's own root node, which nothing names any more. No file
+    under that tree that is called `complete` contradicts the log.
+- **Verification.** `uv run pytest`: 1 028 passed, 0 skipped (9 new), everything asserted against
+  the images and their log. Ruff clean; `sandbox.img` and the 18 older corpus images unchanged.
+  **Corpus scripts changed, so a fresh clone of the branch ran `./setup.sh`** (result below).
+- **Limits.** One subvolume, deleted seconds before the end, no snapshot of it, no discard. How
+  long a dropped subvolume's blocks survive under churn was not measured. The btrfscue v0.7
+  comparison is still open: its release ships an arm64 binary only, and building it means
+  pinning a Go toolchain, which belongs with M7's baselines.
+
 ## 2026-09-22 — M5e-1: log trees in recovery: which subvolume, and a read-only replay
 
 - **Branch:** `feature/m5-log-trees` (from `main` at `9004d5f`). New `src/btrfska/recover/logs.py`,
