@@ -34,7 +34,7 @@ re-checked against new prior art in research.md §10.1–§10.2):
 
 | Claim | Gap | Beats prior art how |
 |---|---|---|
-| C1. **Btrfs** orphan-item & slack archaeology as a recovery source (beyond-`nritems` items, node slack, kernel ORPHAN_ITEM 0x30 resurrection) | G1 | Beyond Carving scans whole valid blocks only — deep leaf scanning is *their stated future work*; SecurityRonin only *lists* kernel ORPHAN_ITEMs. Node-slack recovery exists for **ReFS** (`forefst`, Bonnet 2026; Prade et al. 2020) — cited as the CoW analog, not claimed |
+| C1. **Btrfs** recovery from what no current tree references: whole superseded blocks (orphan nodes) and kernel ORPHAN_ITEM 0x30 resurrection. Narrowed by EXP-005 (2026-09-21): beyond-`nritems` items and node slack are empty on every block the kernel has written since v4.9, so they are a recovery source for older filesystems only and a tampering signal (C5) everywhere else | G1 | Beyond Carving scans whole valid blocks only — deep leaf scanning is *their stated future work*, and EXP-005 shows there is nothing to find there on a modern filesystem; SecurityRonin only *lists* kernel ORPHAN_ITEMs. Node-slack recovery exists for **ReFS** (`forefst`, Bonnet 2026; Prade et al. 2020) — cited as the CoW analog, not claimed |
 | C2. Free-space-tree forensics: prove blocks were freed; overwrite-risk scoring | G2 | Zero tools, zero papers (re-swept 2026-09-15) |
 | C3. **Full-state, multi-source, per-inode lifecycle timelines**: diffs across backup roots *and* scan-discovered old roots *and* reconstructed orphan fragments → create/modify/rename/move/delete with content deltas | G3 | Beyond Carving diffs objectid *sets* over the historical root trees it discovers by scanning the chunk-mapped tree regions, so it is **not** bounded by the backup roots (research.md §10.12, corrected 2026-09-15); SecurityRonin `recover_deleted()` is backup-root-bounded (all four backup slots, FS tree 5 only). Both are existence-only; neither "diffing generations" nor discovering roots beyond the backups is claimed per se |
 | C4. **Evidence-rule-derived confidence tiers** (Confirmed/Probable/Unattached) with a per-artifact provenance chain spanning anchored *and* unanchored artifacts, csum-tree-verified content | G4 | SecurityRonin has severity grades (no provenance, no evidence rules); Beyond Carving has an extent-resolvability taxonomy for anchored recoveries only; `forefst` has ReFS recoverability verdicts; X-Ways has a binary flag. None scores unanchored orphan/slack artifacts or records cross-mode provenance |
@@ -420,7 +420,7 @@ logic — port carefully with byte-identical behaviour, golden-tested),
 | `utils/chunk_parser.py` — chunk map + logical→physical | ~200 of 281 | **REWRITE** | `substrate/chunks.py`: all RAID stripe math for healthy reads, map objects keyed by source (current / historical) so M5 can add reconstructed maps. |
 | `utils/chunk_parser.py` — `build_scan_regions()` (typed chunks + unmapped gaps) | ~80 of 281 | **MIGRATE** | Novel: the typed-region + relocated-chunk-gap logic behind the 21/71 finding. Port to `scan/regions.py`, add the MIXED_GROUPS fix and block-group-tree (tree 11) input. |
 | `utils/btree.py` — raw sweep loop | ~200 of 968 | **REWRITE** | Concept (strided FSID+csum sweep) survives; replaced by the numpy/mmap kernel (`scan/kernel_numpy.py`). |
-| `utils/btree.py` — orphan-item scan (beyond `nritems`), internal key-ptr scan, leaf/internal slack mining | ~400 of 968 | **MIGRATE** | **The crown jewels** — the capability Beyond Carving dismisses as an "edge case" and SecurityRonin lacks. Port to `recover/orphans.py` + `recover/slack.py`, golden-tested against legacy output. |
+| `utils/btree.py` — orphan-item scan (beyond `nritems`), internal key-ptr scan, leaf/internal slack mining | ~400 of 968 | **MIGRATE** | Once called the crown jewels. EXP-005 (2026-09-21) showed the kernel zeroes this area on every write since v4.9: on `sandbox.img` the prototype finds 0 orphan items and 0 residuals, and its 4 saved leaf slacks are `mkfs.btrfs` leftovers. Still ported to `recover/orphans.py` + `recover/slack.py`, as the input of the C5 detector and for pre-4.9 filesystems; golden-tested against legacy output (which is those leftovers) and against a planted-slack image. |
 | `utils/btree.py` — item parsing + inline/regular extract | ~350 of 968 | **REWRITE** | Parsing on our item tables; extraction via `substrate/extents.py` + `compress.py` (the prototype saved compressed extents raw). **Keep the ideas:** `(inode, generation)` keying, move/rename tagging, extent dedup. **Defect #8** (EXTENT_ITEM logical address is the key *objectid*; the key offset is the length) must be fixed in the rewrite and must **not** be frozen into golden tests. |
 | `utils/orphan_scan.py` — live-metadata set via extent tree | 109 | **MIGRATE** | The "currently allocated" complement that defines orphan territory. Reparent onto `substrate/tree.py` in `scan/live_set.py`; also read tree 11. |
 | `utils/recovery_report.py` | 230 | **REWRITE** | Flat counters → the SQLite evidence catalog + provenance/confidence report (M3/M6). |
@@ -984,15 +984,19 @@ report. File *content* (`cat`) is not stored; extracting files is M4.
   node-slack residual mining, kernel ORPHAN_ITEM (0x30) resurrection —
   golden-tested against legacy outputs (with defect #8 corrected).
 - Cross-generation dedup of recovered content (by extent tuple + sha256).
-- Settle whether copy-on-write zeroes node slack (research.md §10.13): Toolan &
-  Humphries 2026 report that a message in internal-node slack does not survive
-  the node's next copy. Read `btrfs_cow_block` at v7.0 and compare the slack of
-  superseded and live copies of the same node on the corpus, for internal nodes
-  and for leaves, before claiming slack as a recovery source (C1).
+- Settle whether copy-on-write zeroes node slack (research.md §10.13). **Done 2026-09-21,
+  EXP-005:** copy-on-write copies the slack, and the write path zeroes it before every write
+  (`prepare_eb_write`, v7.0 `extent_io.c:2215`, since v4.9), in leaves and in internal nodes. No
+  kernel-written block of the corpus has a non-zero slack byte; `mkfs.btrfs` leaves stale items
+  of its own in about a third of the blocks it writes. Consequences for this milestone: the
+  beyond-`nritems` and slack parsers report *what is there and who can have written it* (mkfs
+  remnant, or not explainable by any known writer), they are not expected to recover files, and
+  they are tested on the mkfs remnants and on an image with planted slack.
 - **DoD:**
   - migration-done criterion (§4.3) met;
   - deleted files recoverable from (a) anchored historical roots,
-    (b) orphan nodes and (c) orphan items, each labeled with its source;
+    (b) orphan nodes and (c) orphan items, each labeled with its source. After EXP-005, (c)
+    means the kernel's ORPHAN_ITEM (0x30): an inode unlinked but not yet cleaned up;
   - on the beyond-4-generations image (§6.2) (b)/(c) recover a file that
     (a) cannot.
 
