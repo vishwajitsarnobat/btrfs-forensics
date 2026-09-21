@@ -47,10 +47,12 @@ timelines) has begun: the catalog keeps the chunk maps of superseded chunk-tree 
   (exit 2, `UNSUPPORTED_INCOMPAT <name>`; override with
   `--allow-unsupported`).
 - `btrfska walk IMAGE --root {current,backup:GEN,bytenr:N}
-  [--tree fs|root|chunk|extent|dev|csum|ID]` walks one tree through the chunk
-  map and prints one JSON line per item. Each line carries the root it was
-  reached from and the validation record of every physical copy (DUP mirrors
-  included); invalid nodes are reported instead of items.
+  [--tree fs|root|chunk|extent|dev|csum|ID] [--linkage enforce|report]` walks
+  one tree through the chunk map and prints one JSON line per item. Each line
+  carries the root it was reached from and the validation record of every
+  physical copy (DUP mirrors included); invalid nodes are reported instead of
+  items. With `--linkage report`, a walk from an old root also uses blocks that
+  are sound but are not the blocks their parents named, and flags them.
 - `btrfska cat IMAGE --inode N [--root …] [--tree fs|ID]` reads one file of
   the current state, a backup root, a subvolume or a snapshot. It handles
   inline, regular and prealloc extents and holes, and zlib, zstd and LZO
@@ -114,6 +116,9 @@ Every record has these keys:
   - `level`, `generation` and `owner`: from the header of the copy used,
     else of the first readable copy (`null` when no copy was read).
   - `valid`: `true` when some copy passed every check.
+  - `linkage_mismatch`: empty, except with `--linkage report` for a node that is
+    used although it is not valid: the linkage checks its used copy fails
+    (`level`, `owner`, `parent_generation`, `first_key`). See below.
   - `copies`: one object per physical copy, in mirror order.
   - `problems`: every failed check, as `mirror N: check: detail`, plus
     node-level findings such as a valid mirror that differs from the one
@@ -134,8 +139,24 @@ Each entry of `copies` has these keys:
 - `problems`: `check: detail` for each failed check, or
   `readable: detail`.
 
+**Integrity and linkage.** The checks answer two questions. Integrity: is this a
+well-formed block of this filesystem (`csum`, `bytenr`, `fsid`,
+`chunk_tree_uuid`, `generation`, `nritems`, `written`, `layout`, and a `level`
+below 8)? Linkage: is it the block the referrer meant (`owner`,
+`parent_generation`, `first_key`, and the `level` the referrer expects)? The
+kernel uses a block only when both hold, and so does `walk` by default
+(`--linkage enforce`). A walk from an old root often meets a sound block that is
+newer than the old pointer says, because the address was written again. With
+`--linkage report` such a block is used when no copy passes every check: its
+items are emitted with `valid` `false` and `linkage_mismatch` naming the failed
+checks, and its children are followed, each checked against its own pointer. A
+copy that fails any integrity check is never used. What a flagged block holds
+belongs to another state than the root's, so `--linkage report` is refused for
+`--root current`, and `cat`, `tree`, `recover` and `catalog` never use it: a
+recovery reports such a pointer as a gap and names the block that lies there.
+
 Keys added by each record type:
-- `item`: one leaf item of a valid leaf.
+- `item`: one leaf item of a valid leaf, or with `--linkage report` of a flagged one.
   - `slot`.
   - `key`: `objectid`, `type`, `type_name` and `offset`.
   - `size`: the item's data size.
@@ -527,6 +548,8 @@ skips the hash, and the run is recorded as not checked).
 - **Metadata comes from the database, file data from the image.** The tree is walked in the
   database, so blocks the current chunk map no longer places are reached too. A pointer to a
   block that was not scanned as valid is reported as a `gap`; the files below it are absent.
+  When a valid block of another generation, level or tree lies at that address, the gap names it
+  and the linkage checks it fails. It is never followed: it belongs to another state.
 - **`--maps`: which chunk map file data is read through.** A balance gives every chunk a new
   address and removes the old chunks, so the current chunk map cannot place what a state from
   before the balance points at. The chunk-tree blocks that could are usually still on the disk,

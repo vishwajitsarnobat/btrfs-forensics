@@ -378,7 +378,9 @@ RECORD_KEYS = {
     "walk_problem": COMMON_KEYS | {"parent", "parent_slot", "problems"},
 }
 ROOT_KEYS = {"source", "tree", "tree_id", "bytenr", "level", "generation", "via"}
-NODE_KEYS = {"bytenr", "level", "generation", "owner", "valid", "copies", "problems"}
+NODE_KEYS = {
+    "bytenr", "level", "generation", "owner", "valid", "linkage_mismatch", "copies", "problems",
+}  # fmt: skip
 COPY_KEYS = {"mirror", "devid", "physical", "readable", "used", "valid", "checks", "problems"}
 KEY_KEYS = {"objectid", "type", "type_name", "offset"}
 

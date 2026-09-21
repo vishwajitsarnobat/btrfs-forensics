@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from btrfska.catalog.schema import s64, u64
-from btrfska.substrate.node import Item, Key, is_subvolume_tree
+from btrfska.substrate.node import Item, Key, is_subvolume_tree, owner_ok
 from btrfska.substrate.ondisk import FS_TREE_OBJECTID as FS_TREE
 from btrfska.substrate.ondisk import ROOT_TREE_OBJECTID as ROOT_TREE
 from btrfska.substrate.ondisk import TREE_LOG_OBJECTID as LOG_TREE
@@ -174,6 +174,35 @@ def _block(conn: sqlite3.Connection, bytenr: int, generation: int, level: int):
     ).fetchone()
 
 
+def _mismatched(conn: sqlite3.Connection, tree_id: int, bytenr: int, generation: int, level: int):
+    """What the database holds at `bytenr` instead of the block a pointer names: a sentence for
+    the gap line, or "". Such a block passes every integrity check (it is valid as scanned) and
+    fails linkage checks against this pointer (node.py, plan.md M5b). It is another block,
+    usually a newer one, and it is never followed: read as part of this tree it would show a
+    state that did not exist."""
+    rows = conn.execute(
+        "SELECT DISTINCT generation, level, owner FROM nodes WHERE valid = 1 AND bytenr = ?"
+        " ORDER BY generation DESC LIMIT 3",
+        (s64(bytenr),),
+    ).fetchall()
+    found = []
+    for other_generation, other_level, owner in rows:
+        failed = []
+        if other_level != level:
+            failed.append("level")
+        if owner_ok(tree_id, u64(owner)) is False:
+            failed.append("owner")
+        if u64(other_generation) != generation:
+            failed.append("parent_generation")
+        found.append(
+            f"generation {u64(other_generation)} level {other_level} owner {u64(owner)} "
+            f"(linkage mismatch: {', '.join(failed)})"
+        )
+    if not found:
+        return ""
+    return "; a valid block lies at that address, not followed: " + "; ".join(found)
+
+
 def tree_leaves(conn: sqlite3.Connection, root: Root) -> tuple[list[Leaf], list[str]]:
     """The leaves of `root`'s tree in key order, and one line per gap."""
     leaves, gaps, seen = [], [], set()
@@ -190,11 +219,15 @@ def tree_leaves(conn: sqlite3.Connection, root: Root) -> tuple[list[Leaf], list[
             continue
         found = _block(conn, bytenr, generation, level)
         if found is None:
-            gaps.append(f"{where}: not among the valid scanned blocks")
+            other = _mismatched(conn, root.tree_id, bytenr, generation, level)
+            gaps.append(f"{where}: not among the valid scanned blocks{other}")
             continue
         content_id, physical, status, first_key = found
         if expected_key is not None and first_key is not None and first_key != expected_key:
-            gaps.append(f"{where}: its first key is not the key its parent points to")
+            gaps.append(
+                f"{where}: its first key is not the key its parent points to (linkage mismatch: "
+                "first_key); not followed"
+            )
             continue
         if level == 0:
             leaves.append(Leaf(content_id, bytenr, generation, physical, status))

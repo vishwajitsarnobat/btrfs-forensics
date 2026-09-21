@@ -179,6 +179,7 @@ def _node_record(node: ValidatedNode) -> dict:
         "generation": node.generation,
         "owner": node.owner,
         "valid": node.valid,
+        "linkage_mismatch": list(node.linkage_mismatch),
         "copies": [
             {
                 "mirror": copy.mirror,
@@ -264,8 +265,14 @@ def cmd_walk(args: argparse.Namespace) -> int:
             "chunk_map": fs.chunk_map.source,
             "unsupported_format": fs.unsupported_format,
         }
-        nodes = invalid = item_count = hop_problems = 0
-        for visit in walk(fs.reader, start.bytenr, start.expect()):
+        if args.linkage == "report" and root["source"] == "current":
+            note(
+                "btrfska: error: --linkage report is for walks from old roots; the current state "
+                "is walked by the kernel's rule (use --root backup:GEN or bytenr:N)"
+            )
+            return EXIT_ERROR
+        nodes = invalid = mismatched = item_count = hop_problems = 0
+        for visit in walk(fs.reader, start.bytenr, start.expect(), args.linkage):
             node, nodes = visit.node, nodes + 1
             node_record = _node_record(node)
             where = {"parent": visit.parent, "parent_slot": visit.slot}
@@ -280,10 +287,11 @@ def cmd_walk(args: argparse.Namespace) -> int:
                         "problems": list(visit.problems),
                     }
                 )
-            if not node.valid:
+            if not node.usable:
                 invalid += 1
                 emit({"record": "invalid_node", **common, "node": node_record, **where})
                 continue
+            mismatched += bool(node.linkage_mismatch)
             for item in node.items if node.level == 0 else ():
                 item_count += 1
                 key = item.key
@@ -304,9 +312,12 @@ def cmd_walk(args: argparse.Namespace) -> int:
                         "summary": summary(key, item.data),
                     }
                 )
+    flagged = ""
+    if args.linkage == "report":
+        flagged = f"; {mismatched} nodes used although a linkage check failed (--linkage report)"
     note(
         f"btrfska walk: {nodes} nodes ({invalid} invalid), {item_count} items, "
-        f"{hop_problems} walk problems"
+        f"{hop_problems} walk problems{flagged}"
     )
     return 0
 
@@ -607,6 +618,15 @@ def build_parser() -> argparse.ArgumentParser:
             f"{', '.join(TREE_IDS)} or a tree id (default fs); with bytenr:N it only sets the "
             "expected owner"
         ),
+    )
+    walk_cmd.add_argument(
+        "--linkage",
+        choices=("enforce", "report"),
+        default="enforce",
+        help="enforce (default): a block is used only when every check holds, as in the kernel; "
+        "report: for walks from old roots, a block whose integrity checks hold but which is not "
+        "the block its parent named is used too, flagged with the linkage checks it fails "
+        "(linkage_mismatch). Refused for --root current",
     )
     walk_cmd.add_argument(
         "--allow-unsupported",
