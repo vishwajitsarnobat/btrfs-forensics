@@ -1139,6 +1139,9 @@ pre-4.9-style leaves give back a deleted file's name and inline content from sta
 hostile-input tests; every new column documented; a fresh clone builds the new image with
 `./setup.sh`.
 
+**M4c status 2026-09-21: done** (catalog.md, M4c entry; tests in `tests/test_slack.py` and
+`tests/test_mutate.py`).
+
 ### M5 — Reconstruction & timelines (~2 weeks; novelty core — start early)
 - Orphan graph: reconcile scanned nodes + edges by owner/generation/
   key-range/csum into candidate historical subtrees; reattach fragments
