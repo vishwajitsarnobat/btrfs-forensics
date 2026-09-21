@@ -23,7 +23,7 @@ import pytest
 from btrfska.catalog import db
 from btrfska.catalog.build import build_catalog
 from btrfska.catalog.content import ContentWriter
-from btrfska.catalog.schema import RECOVERY_TABLES, SCHEMA_VERSION
+from btrfska.catalog.schema import RECOVERY_TABLES, SCHEMA_VERSION, s64, u64
 from btrfska.cli import main
 from btrfska.recover.dbtree import (
     Root,
@@ -280,16 +280,32 @@ def _catalog(conn, trees: dict[str, list], loose: tuple[list, ...] = ()) -> None
             "INSERT INTO state_trees VALUES (?, 0, 5, 0, ?, ?, 0, ?, 0, 'found', 1, 0)",
             (number, bytenr, generation, 9000 + number),
         )
-    for number, items in enumerate(loose, start=len(trees) + 1):
+        # the root-tree leaf of that state, whose ROOT_ITEM names the fs tree
+        item = bytearray(ondisk.ROOT_ITEM.size)
+        for name, value in (("bytenr", bytenr), ("generation", generation), ("refs", 1)):
+            struct.pack_into("<Q", item, ondisk.ROOT_ITEM.offset(name), value)
+        root_leaf = make_node(9000 + number, items=[((5, K["ROOT_ITEM"], 0), bytes(item))],
+                              owner=1, generation=generation)  # fmt: skip
+        conn.execute(
+            "INSERT INTO nodes (physical, region_id, bytenr, generation, owner, level, nritems,"
+            " valid, status, orphan, outside_map, legacy_orphan, log_tree, bytenr_mapped,"
+            " maps_here, problems, content_id)"
+            " VALUES (?, 1, ?, ?, 1, 0, 1, 1, 'live', 0, 0, 0, 0, 1, 1, '[]', ?)",
+            (8 * MIB + number * NODESIZE, 9000 + number, generation, writer.add(root_leaf, True)),
+        )
+    for number, entry in enumerate(loose, start=len(trees) + 1):
+        entry = entry if isinstance(entry, dict) else {"items": entry}
+        items, owner = entry["items"], entry.get("owner", 5)
         bytenr, generation = META_LOGICAL + number * NODESIZE, 7 + number
-        leaf = make_node(bytenr, items=sorted(items, key=lambda e: e[0]), owner=5,
+        leaf = make_node(bytenr, items=sorted(items, key=lambda e: e[0]), owner=owner,
                          generation=generation)  # fmt: skip
         conn.execute(
             "INSERT INTO nodes (physical, region_id, bytenr, generation, owner, level, nritems,"
             " valid, status, orphan, outside_map, legacy_orphan, log_tree, bytenr_mapped,"
             " maps_here, problems, content_id)"
-            " VALUES (?, 1, ?, ?, 5, 0, ?, 1, 'unreferenced', 1, 0, 1, 0, 1, 1, '[]', ?)",
-            (META_PHYS + number * NODESIZE, bytenr, generation, len(items),
+            " VALUES (?, 1, ?, ?, ?, 0, ?, 1, ?, 1, 0, 1, ?, 1, 1, '[]', ?)",
+            (META_PHYS + number * NODESIZE, bytenr, generation, s64(owner), len(items),
+             "live" if entry.get("log_tree") else "unreferenced", int(entry.get("log_tree", 0)),
              writer.add(leaf, True)),
         )  # fmt: skip
     writer.flush()
@@ -651,6 +667,44 @@ def test_a_leaf_no_state_reaches_gives_its_files_labelled_as_such():
     with synthetic({"current": current}, loose=(lost,)) as (conn, reader, out):
         run(conn, reader, out)
         assert files_under(out) == {"current/tree_5/kept": b"still here"}
+
+
+def test_a_leaf_some_scanned_root_item_leads_to_is_not_an_orphan_even_without_a_state():
+    """A root tree that was scanned but not evaluated as a state (the catalog's bound, or a
+    root-tree leaf whose parent is lost) still anchors its trees."""
+    named = [*ROOT_DIR_ITEMS, *file_items(300, b"reachable", b"x")]
+    with synthetic({"current": list(ROOT_DIR_ITEMS)}, loose=(named,)) as (conn, _reader, _out):
+        ((_, leaf),) = orphan_leaves(conn)
+        item = bytearray(ondisk.ROOT_ITEM.size)
+        for name, value in (("bytenr", leaf.bytenr), ("generation", leaf.generation)):
+            struct.pack_into("<Q", item, ondisk.ROOT_ITEM.offset(name), value)
+        root_leaf = make_node(7777 * NODESIZE, items=[((5, K["ROOT_ITEM"], 0), bytes(item))],
+                              owner=1, generation=leaf.generation)  # fmt: skip
+        writer = ContentWriter(conn, NODESIZE)
+        conn.execute(
+            "INSERT INTO nodes (physical, region_id, bytenr, generation, owner, level, nritems,"
+            " valid, status, orphan, outside_map, legacy_orphan, log_tree, bytenr_mapped,"
+            " maps_here, problems, content_id)"
+            " VALUES (?, 1, ?, ?, 1, 0, 1, 1, 'unreferenced', 1, 0, 1, 0, 1, 1, '[]', ?)",
+            (12 * MIB, 7777 * NODESIZE, leaf.generation, writer.add(root_leaf, True)),
+        )
+        writer.flush()
+        assert orphan_leaves(conn) == []
+
+
+def test_a_dropped_log_tree_leaf_is_an_orphan_and_the_live_log_is_not():
+    """What fsync wrote between two commits: no root tree ever named it."""
+    flash = [*file_items(261, b"flash.txt", b"written, fsynced, deleted")]
+    log = ondisk.TREE_LOG_OBJECTID
+    loose = ({"items": flash, "owner": log}, {"items": flash[:2], "owner": log, "log_tree": 1})
+    with synthetic({"current": list(ROOT_DIR_ITEMS)}, loose=loose) as (conn, reader, out):
+        ((root, leaf),) = orphan_leaves(conn)
+        assert root.tree_id == log and leaf.status == "unreferenced"
+        run(conn, reader, out, orphans=True)
+        base = f"orphan_nodes/tree_log/leaf_{leaf.bytenr}_gen{leaf.generation}"
+        assert files_under(out) == {f"{base}/flash.txt": b"written, fsynced, deleted"}
+        row = by_source(conn)["orphan_node", 261]
+        assert (u64(row["tree_id"]), row["status"], row["in_current"]) == (log, "complete", None)
 
 
 def test_what_a_root_also_gives_is_a_duplicate_so_the_rest_is_what_only_orphans_give():

@@ -362,3 +362,21 @@ def test_a_refused_format_creates_no_database_unless_overridden(capsys):
         )
         assert tuple(run.fetchone()) == ("OVERRIDDEN", 1, '["UNKNOWN_BIT_40"]')
         conn.close()
+
+
+def test_more_root_trees_than_the_bound_are_reported_not_silently_dropped():
+    with scratch_dir("test_catalog_") as d:
+        build.build_catalog(SANDBOX, d / "all.db", full_sweep=True)
+        build.build_catalog(SANDBOX, d / "two.db", full_sweep=True, max_states=2)
+        counts = {}
+        for name in ("all.db", "two.db"):
+            conn = db.open_readonly(d / name)
+            counts[name] = conn.execute("SELECT COUNT(*) FROM states").fetchone()[0]
+            rows = conn.execute("SELECT detail FROM problems WHERE source = 'roots'").fetchall()
+            conn.close()
+            if name == "all.db":
+                assert rows == []
+            else:  # the superblock's and the backup slots' root trees are always evaluated
+                assert counts[name] < counts["all.db"] and len(rows) == 1
+                wanted = f"{counts['all.db']} root tree candidates, only the newest {counts[name]}"
+                assert wanted in rows[0][0]

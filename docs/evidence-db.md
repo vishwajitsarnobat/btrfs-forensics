@@ -86,7 +86,7 @@ listed here, and a test fails when one is not (`tests/test_catalog.py`).
 | Column | Meaning |
 |---|---|
 | `problem_id` | row id |
-| `source` | `superblock` (copies disagree), `chunk_map`, `scan_plan` or `walk` |
+| `source` | `superblock` (copies disagree), `chunk_map`, `scan_plan`, `walk`, or `roots` (more root-tree candidates than `--max-states`: the older ones are in `nodes` and `root_items` but not in `states`) |
 | `detail` | the message |
 
 ### `chunks` and `stripes`: the current chunk map
@@ -382,7 +382,7 @@ and ATTACH. Rows are never deleted: a second recovery adds a second run.
 |---|---|
 | `artifact_id` | row id |
 | `recovery_id` | the run |
-| `source_kind` | how the inode was reached. `anchored_root`: a walk down from a cataloged root tree. `orphan_node`: a file-tree leaf that no cataloged state reaches, read on its own (`recover --orphans`). `orphan_item`: found by an anchored walk, in a tree that lists the inode under the kernel's ORPHAN_ITEM (unlinked while open) |
+| `source_kind` | how the inode was reached. `anchored_root`: a walk down from a cataloged root tree. `orphan_node`: a leaf read on its own (`recover --orphans`), either a file-tree leaf that no ROOT_ITEM in any scanned root-tree leaf leads to, or a leaf of a dropped log tree (`tree_id` -6). `orphan_item`: found by an anchored walk, in a tree that lists the inode under the kernel's ORPHAN_ITEM (unlinked while open) |
 | `source` | the root as the user names it: `current`, `backup:GEN` or `state:ID`; `orphan_node:BYTENR` for a lone leaf |
 | `state_id` | the row of `states` that root is; NULL for `orphan_node` |
 | `tree_id` | *u64*; the fs or subvolume tree (for a lone leaf, the owner in its header) |
