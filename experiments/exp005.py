@@ -38,6 +38,7 @@ from btrfska.substrate import ondisk
 from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat, open_filesystem
 from btrfska.substrate.image import open_image
 from btrfska.substrate.items import KEY_TYPE_NAMES
+from btrfska.substrate.slack import slack_range
 
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "images" / "scratch" / "exp" / "EXP-005"
@@ -63,28 +64,6 @@ def sha256(path: Path) -> str:
         while block := f.read(1 << 20):
             digest.update(block)
     return digest.hexdigest()
-
-
-def slack_range(block, nodesize: int) -> tuple[int, int]:
-    """[start, end) of the bytes no current item or key pointer uses, as the kernel defines them.
-
-    Internal node: from the end of key pointer `nritems` to the end of the block. Leaf: from the
-    end of item `nritems` to the lowest item data offset; the whole block after the header when
-    it is empty. The same two ranges prepare_eb_write zeroes. On a block that does not validate
-    the range can be empty or inverted; callers measure valid blocks only.
-    """
-    header = ondisk.HEADER.unpack_from(block)
-    count = header["nritems"]
-    if header["level"] > 0:
-        return min(HEADER + count * ondisk.KEY_PTR.size, nodesize), nodesize
-    start = min(HEADER + count * ondisk.ITEM.size, nodesize)
-    if count == 0:
-        return start, nodesize
-    offsets = (
-        ondisk.ITEM.unpack_from(block, HEADER + slot * ondisk.ITEM.size)["offset"]
-        for slot in range(min(count, (nodesize - HEADER) // ondisk.ITEM.size))
-    )
-    return start, min(HEADER + min(offsets), nodesize)
 
 
 def measure_slack(block, nodesize: int) -> dict:
