@@ -1,9 +1,11 @@
 """Extent reads and file assembly: EXTENT_DATA items to file bytes, with a record per extent.
 
 `read_extent(reader, item, leaf)` turns one EXTENT_DATA item into its file bytes and an
-`ExtentRead` record. Physical reads go through `reader.chunk_map`, whichever map that is (current
-now; historical or reconstructed in M5). `read_file(reader, root, inode, no_holes=)` walks an fs
-tree for the inode and assembles its content in file order.
+`ExtentRead` record; `stream_extent` gives the same record and the bytes in pieces of at most
+1 MiB, for writers that must not hold an extent in memory (recover/). Physical reads go through
+`reader.chunk_map`, whichever map that is (current now; historical or reconstructed in M5).
+`read_file(reader, root, inode, no_holes=)` walks an fs tree for the inode and assembles its
+content in file order; `FileAssembly` is that assembly, one extent at a time.
 
 Extent kinds (btrfs_tree.h btrfs_file_extent_item; kernel read path inode.c:7129-7196 and
 btrfs_get_extent):
@@ -26,7 +28,8 @@ Hostile lengths are bounded before any read or allocation:
   aliasing. btrfska does not assume the kernel allocator's 128 MiB limit (BTRFS_MAX_EXTENT_SIZE,
   fs.h:66): the tree checker does not enforce it (tree-checker.c:306-321 checks only alignment
   and end overflow), so an image may hold a longer extent that the kernel still accepts.
-Ranges are mapped and read one piece at a time, stopping at the first unmapped or unreadable one.
+Ranges are mapped one piece at a time, stopping at the first unmapped or unreadable one, and the
+whole extent is mapped before any of it is read, so a read never fails halfway.
 
 Every physical range records all copies (DUP, RAID1*): the first readable copy is used and every
 other readable copy is compared with it, a divergent copy being reported. Failures are records,
@@ -48,6 +51,7 @@ from btrfska.substrate.tree import walk
 
 K = ondisk.ITEM_KEYS
 _ZEROS = 1 << 20  # zero runs are yielded in pieces of at most this size
+_WINDOW = 1 << 20  # bytes of an extent read, compared or yielded at a time
 
 
 class IncompleteRead(Exception):
@@ -96,10 +100,25 @@ class ExtentRead:
     problems: tuple[str, ...] = ()  # findings that do not make the content wrong
 
 
-def _read(reader: NodeReader, logical: int, length: int):
-    """(bytes or None, ranges, problems, (error kind, detail) or None) for a logical range."""
+def _same(img, first: int, second: int, size: int) -> bool:
+    """Whether two physical ranges hold the same bytes, compared a window at a time."""
+    for offset in range(0, size, _WINDOW):
+        step = min(_WINDOW, size - offset)
+        a, b = first + offset, second + offset
+        if img.mmap[a : a + step] != img.mmap[b : b + step]:
+            return False
+    return True
+
+
+def _map(reader: NodeReader, logical: int, length: int):
+    """(ranges, segments, problems, (error kind, detail) or None) for a logical range.
+
+    `segments` holds (physical, size) of the copy used for each piece, in order. Nothing of the
+    content is kept: this is where `unmapped` and `unreadable` are decided, so a caller that then
+    reads the segments cannot fail halfway through an extent.
+    """
     chunk_map, img = reader.chunk_map, reader.img
-    out, ranges, problems = bytearray(), [], []
+    ranges, segments, problems = [], [], []
     pieces = chunk_map.pieces(logical, length)
     while True:  # one piece at a time: stop at the first unmapped or unreadable one
         try:
@@ -109,34 +128,44 @@ def _read(reader: NodeReader, logical: int, length: int):
             start, size = piece
             copies = chunk_map.copies(start, size)
         except MappingError as exc:
-            return None, tuple(ranges), tuple(problems), ("unmapped", str(exc))
-        blocks = [
-            None
-            if copy.missing_device or copy.physical + size > img.size
-            else bytes(img.mmap[copy.physical : copy.physical + size])
-            for copy in copies
-        ]
-        used = next((i for i, block in enumerate(blocks) if block is not None), None)
+            return tuple(ranges), [], tuple(problems), ("unmapped", str(exc))
+        readable = [not copy.missing_device and copy.physical + size <= img.size for copy in copies]
+        used = next((i for i, ok in enumerate(readable) if ok), None)
         records = []
         for i, copy in enumerate(copies):
-            compared = used is not None and i != used and blocks[i] is not None
-            matches = blocks[i] == blocks[used] if compared else None
+            compared = used is not None and i != used and readable[i]
+            matches = _same(img, copies[used].physical, copy.physical, size) if compared else None
             if matches is False:
                 problems.append(
                     f"logical {start}+{size}: mirror {copy.mirror} differs from mirror "
                     f"{copies[used].mirror}"
                 )
             records.append(
-                DataCopy(copy.mirror, copy.devid, copy.physical, blocks[i] is not None, i == used,
-                         matches)
-            )  # fmt: skip
+                DataCopy(copy.mirror, copy.devid, copy.physical, readable[i], i == used, matches)
+            )
         ranges.append(DataRange(start, size, tuple(records)))
         if used is None:
-            return None, tuple(ranges), tuple(problems), (
+            return tuple(ranges), [], tuple(problems), (
                 "unreadable", f"no readable copy of logical {start}+{size}",
             )  # fmt: skip
-        out += blocks[used]
-    return bytes(out), tuple(ranges), tuple(problems), None
+        segments.append((copies[used].physical, size))
+    return tuple(ranges), segments, tuple(problems), None
+
+
+def _pieces(img, segments: list[tuple[int, int]]) -> Iterator[bytes]:
+    """The bytes of mapped segments, at most `_WINDOW` at a time."""
+    for physical, size in segments:
+        for offset in range(0, size, _WINDOW):
+            step = min(_WINDOW, size - offset)
+            yield bytes(img.mmap[physical + offset : physical + offset + step])
+
+
+def _read(reader: NodeReader, logical: int, length: int):
+    """(bytes or None, ranges, problems, (error kind, detail) or None) for a logical range."""
+    ranges, segments, problems, error = _map(reader, logical, length)
+    if error:
+        return None, ranges, problems, error
+    return b"".join(_pieces(reader.img, segments)), ranges, problems, None
 
 
 def _nonzero(data: bytes) -> int:
@@ -145,13 +174,36 @@ def _nonzero(data: bytes) -> int:
 
 def read_extent(reader: NodeReader, item: Item, leaf: int) -> tuple[ExtentRead, bytes | None]:
     """One EXTENT_DATA item: its record and its bytes (None for zeros or on error)."""
+    record, data, segments = _extent(reader, item, leaf)
+    if segments is not None:
+        data = b"".join(_pieces(reader.img, segments))
+    return record, data
+
+
+def stream_extent(
+    reader: NodeReader, item: Item, leaf: int
+) -> tuple[ExtentRead, Iterator[bytes] | None]:
+    """As `read_extent`, with the bytes as an iterator of pieces of at most 1 MiB.
+
+    The record is complete before the first piece is read: an uncompressed extent is mapped in
+    full first, so iterating cannot fail. A compressed or inline extent is one piece (at most
+    128 KiB and one sector). None for zeros and on error, as in `read_extent`.
+    """
+    record, data, segments = _extent(reader, item, leaf)
+    if segments is not None:
+        return record, _pieces(reader.img, segments)
+    return record, None if data is None else iter((data,))
+
+
+def _extent(reader: NodeReader, item: Item, leaf: int):
+    """(record, bytes or None, segments or None): segments for an uncompressed regular extent."""
     sectorsize = reader.ctx.sectorsize
     where = {"file_offset": item.key.offset, "leaf": leaf, "slot": item.slot}
     try:
         fe = items.file_extent(item.data)
     except items.ItemError as exc:
         return ExtentRead("invalid", length=0, error_kind="malformed_item",
-                          error_detail=str(exc), **where), None  # fmt: skip
+                          error_detail=str(exc), **where), None, None  # fmt: skip
     code = fe["compression"]
     info = where | {
         "generation": fe["generation"],
@@ -165,10 +217,11 @@ def read_extent(reader: NodeReader, item: Item, leaf: int) -> tuple[ExtentRead, 
         }
     length = fe.get("num_bytes", 0) if kind != "inline" else min(fe["ram_bytes"], sectorsize)
 
-    def failed(error: str, detail: str, **extra) -> tuple[ExtentRead, None]:
+    def failed(error: str, detail: str, **extra) -> tuple[ExtentRead, None, None]:
         record_kind = "hole" if kind == "regular" and fe.get("disk_bytenr") == 0 else kind
-        return ExtentRead(record_kind, length=length if kind != "invalid" else 0,
-                          error_kind=error, error_detail=detail, **info, **extra), None  # fmt: skip
+        record = ExtentRead(record_kind, length=length if kind != "invalid" else 0,
+                            error_kind=error, error_detail=detail, **info, **extra)  # fmt: skip
+        return record, None, None
 
     if kind == "invalid":
         return failed("invalid_extent", f"extent type {fe['type']}")
@@ -183,9 +236,9 @@ def read_extent(reader: NodeReader, item: Item, leaf: int) -> tuple[ExtentRead, 
     if kind == "inline":
         return _inline(item, fe, info, length, sectorsize, failed)
     if kind == "prealloc":
-        return ExtentRead("prealloc", length=length, **info), None
+        return ExtentRead("prealloc", length=length, **info), None, None
     if fe["disk_bytenr"] == 0:
-        return ExtentRead("hole", length=length, **info), None
+        return ExtentRead("hole", length=length, **info), None, None
 
     info["chunk_map"] = reader.chunk_map.source
     offset, ram, disk_bytes = fe["offset"], fe["ram_bytes"], fe["disk_num_bytes"]
@@ -198,10 +251,11 @@ def read_extent(reader: NodeReader, item: Item, leaf: int) -> tuple[ExtentRead, 
         if offset + length > disk_bytes:
             return failed("invalid_extent", f"offset {offset} + num_bytes {length} > "
                           f"disk_num_bytes {disk_bytes}")  # fmt: skip
-        data, ranges, problems, error = _read(reader, fe["disk_bytenr"] + offset, length)
+        ranges, segments, problems, error = _map(reader, fe["disk_bytenr"] + offset, length)
         if error:
             return failed(*error, ranges=ranges, problems=problems)
-        return ExtentRead("regular", length=length, ranges=ranges, problems=problems, **info), data
+        record = ExtentRead("regular", length=length, ranges=ranges, problems=problems, **info)
+        return record, None, segments
 
     if not 0 < ram <= compress.BTRFS_MAX_UNCOMPRESSED:
         return failed("invalid_extent", f"compressed ram_bytes {ram} outside (0, 128 KiB]")
@@ -222,7 +276,7 @@ def read_extent(reader: NodeReader, item: Item, leaf: int) -> tuple[ExtentRead, 
         problems += (f"{count} non-zero bytes after the end of the compressed stream",)
     record = ExtentRead("regular", length=length, ranges=ranges, decoded_bytes=len(decoded.data),
                         problems=problems, **info)  # fmt: skip
-    return record, decoded.data[offset : offset + length]
+    return record, decoded.data[offset : offset + length], None
 
 
 def _inline(item: Item, fe: dict, info: dict, length: int, sectorsize: int, failed):
@@ -237,7 +291,8 @@ def _inline(item: Item, fe: dict, info: dict, length: int, sectorsize: int, fail
             return failed("invalid_extent", f"inline data of {len(data)} bytes < {length}")
         if len(data) != fe["ram_bytes"]:
             problems.append(f"inline item holds {len(data)} bytes, ram_bytes {fe['ram_bytes']}")
-        return ExtentRead("inline", length=length, problems=tuple(problems), **info), data[:length]
+        record = ExtentRead("inline", length=length, problems=tuple(problems), **info)
+        return record, data[:length], None
     try:
         decoded = compress.decompress(fe["compression"], data, min_out=length, max_out=sectorsize,
                                       sectorsize=sectorsize, inline=True)  # fmt: skip
@@ -249,7 +304,7 @@ def _inline(item: Item, fe: dict, info: dict, length: int, sectorsize: int, fail
         problems.append(f"{count} non-zero bytes after the end of the compressed stream")
     record = ExtentRead("inline", length=length, decoded_bytes=len(decoded.data),
                         problems=tuple(problems), **info)  # fmt: skip
-    return record, decoded.data[:length]
+    return record, decoded.data[:length], None
 
 
 @dataclass(frozen=True)
@@ -331,34 +386,70 @@ def read_file(reader: NodeReader, root: TreeRoot, inode: int, *, no_holes: bool)
     elif stat.S_ISDIR(inode_fields["mode"]):
         errors.append(f"inode {inode} is a directory")
 
-    extents, data, pos = [], [], 0
-    sectorsize = reader.ctx.sectorsize
-
-    def hole(start: int, end: int) -> None:
-        extents.append(ExtentRead("implicit_hole", file_offset=start, length=end - start))
-        data.append(None)
-        if not no_holes:
-            problems.append(f"no extent item covers [{start}, {end}) and NO_HOLES is not set")
-
-    for item, leaf in found:
-        record, content = read_extent(reader, item, leaf)
-        start, end = record.file_offset, record.file_offset + record.length
-        if start < pos:
-            errors.append(f"extent at file offset {start} overlaps the extent ending at {pos}")
-        elif start > pos and (size is None or pos < size):
-            hole(pos, start if size is None else min(start, size))
-        if size is not None and end > size:
-            kept = max(0, size - start)
-            found = record.problems
-            if end > -(-size // sectorsize) * sectorsize:  # reaches past the sector holding EOF
-                found = (*found, f"clipped from {record.length} to {kept} bytes by i_size {size}")
-            record = replace(record, length=kept, problems=found)
-            content = None if content is None else content[:kept]
+    assembly = FileAssembly(reader, found, size, no_holes=no_holes)
+    extents, data = [], []
+    for record, pieces in assembly:
+        content = None if pieces is None else b"".join(pieces)
         if content is not None:
             record = replace(record, sha256=hashlib.sha256(content).hexdigest())
         extents.append(record)
         data.append(content)
-        pos = max(pos, end)
-    if size is not None and pos < size:
-        hole(pos, size)
+    errors += assembly.errors
+    problems += assembly.problems
     return FileRead(root, inode, size, tuple(extents), tuple(errors), tuple(problems), tuple(data))
+
+
+def _clipped(pieces: Iterator[bytes], kept: int) -> Iterator[bytes]:
+    for piece in pieces:
+        if kept <= 0:
+            return
+        yield piece[:kept]
+        kept -= len(piece)
+
+
+class FileAssembly:
+    """A file's extents in file order, one at a time: (record, pieces or None for zeros/errors).
+
+    `found` holds (EXTENT_DATA item, logical address of its leaf) in key order; `size` is i_size,
+    or None when the inode item is missing. Implicit holes are inserted, content is clipped to
+    i_size, overlaps are errors. `errors` and `problems` are complete once iteration has ended.
+    Only one extent's record is alive at a time, and an uncompressed extent's bytes arrive in
+    pieces, so a consumer that writes as it iterates never holds a file in memory.
+    """
+
+    def __init__(self, reader: NodeReader, found, size: int | None, *, no_holes: bool) -> None:
+        self.reader, self.found, self.size, self.no_holes = reader, found, size, no_holes
+        self.errors: list[str] = []
+        self.problems: list[str] = []
+
+    def _hole(self, start: int, end: int) -> tuple[ExtentRead, None]:
+        if not self.no_holes:
+            self.problems.append(f"no extent item covers [{start}, {end}) and NO_HOLES is not set")
+        return ExtentRead("implicit_hole", file_offset=start, length=end - start), None
+
+    def __iter__(self) -> Iterator[tuple[ExtentRead, Iterator[bytes] | None]]:
+        size, pos = self.size, 0
+        sectorsize = self.reader.ctx.sectorsize
+        for item, leaf in self.found:
+            record, pieces = stream_extent(self.reader, item, leaf)
+            start, end = record.file_offset, record.file_offset + record.length
+            if start < pos:
+                self.errors.append(
+                    f"extent at file offset {start} overlaps the extent ending at {pos}"
+                )
+            elif start > pos and (size is None or pos < size):
+                yield self._hole(pos, start if size is None else min(start, size))
+            if size is not None and end > size:
+                kept = max(0, size - start)
+                noted = record.problems
+                if end > -(-size // sectorsize) * sectorsize:  # reaches past the sector of EOF
+                    noted = (
+                        *noted,
+                        f"clipped from {record.length} to {kept} bytes by i_size {size}",
+                    )
+                record = replace(record, length=kept, problems=noted)
+                pieces = None if pieces is None else _clipped(pieces, kept)
+            yield record, pieces
+            pos = max(pos, end)
+        if size is not None and pos < size:
+            yield self._hole(pos, size)
