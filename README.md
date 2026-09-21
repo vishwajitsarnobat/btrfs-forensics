@@ -518,7 +518,8 @@ whole suite, the `vm` tests included.
 CI costs nothing: GitHub Actions is free for public repositories on the
 standard hosted runners both jobs use. A pull request takes about four runner
 minutes in total. The workflow still keeps usage small: it does not run for
-changes under `docs/` only, a newer push cancels the run it supersedes, and
+changes under `docs/` only, a newer push to a pull request cancels the run it
+supersedes (a run on `main` is never cancelled), and
 the jobs stop after 10 and 15 minutes (GitHub's default limit is six hours).
 
 ### Test policy

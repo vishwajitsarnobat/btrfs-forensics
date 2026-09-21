@@ -29,7 +29,9 @@ pull request; do not work around it. Background and reasons live in
    anything surprising).
 7. **Review it** before merging, even when you wrote it: read the whole diff
    on GitHub, check that nothing unrelated slipped in, and wait for CI to
-   pass. A failing check is fixed on the branch, never merged over.
+   pass. GitHub can take a few minutes to start a run: "no checks reported"
+   means wait, not merge, unless the change touches only `docs/` (which starts
+   no run). A failing check is fixed on the branch, never merged over.
 8. **Merge** with a merge commit and delete the branch.
 
 Ask the maintainer when a decision is really theirs to make: a change of

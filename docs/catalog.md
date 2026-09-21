@@ -20,6 +20,24 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — Fix: a CI run on main could be cancelled
+
+- **Branch:** `fix/ci-never-cancel-main` (from `main` at `2b41949`). `.github/workflows/ci.yml`, one
+  sentence each in `CONTRIBUTING.md` and `README.md`.
+- **What happened.** The addendum above was merged while GitHub still showed "no checks reported"
+  for its pull request: the run had not been created yet. It was created 90 seconds after the merge,
+  and 15 seconds later the `corpus` job of the run on `main` was cancelled mid-build (`test` had
+  already passed). The cause is the guard added on 2026-09-21: `cancel-in-progress: true` applied
+  to every ref, `main` included, so a run on `main` could be cancelled and leave a commit without
+  a completed verification. The merged change was three Markdown files, so nothing was at risk,
+  but the guard was wrong.
+- **Fix.** Runs are grouped by pull-request number, or by ref for pushes, and only pull-request
+  runs cancel what they supersede. A run on `main` is never cancelled.
+- **Rule added** (`CONTRIBUTING.md` §1): "no checks reported" means wait, not merge, unless the
+  change touches only `docs/`.
+- **Verification:** the workflow parses; both jobs pass on this pull request, and the run on
+  `main` after the merge completes both jobs.
+
 ## 2026-09-21 — EXP-004 addendum: the two-level root tree
 
 - **Branch:** `docs/exp004-multilevel-addendum` (from `main` at `6c944a2`). `experiments/EXP-004.md`
