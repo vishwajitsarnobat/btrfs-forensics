@@ -64,11 +64,12 @@ Maintenance rules:
   hold. Three items of M5's scope are open and moved to a follow-up instead of being claimed:
   replay of the live log in `recover`, deleted-subvolume recovery on a real image (it needs a
   scenario), and the btrfscue comparison (no x86-64 binary to pin).
-- **Verification.** `uv run pytest`: 1 010 passed, 0 skipped (14 new in `tests/test_timeline.py`):
+- **Verification.** `uv run pytest`: 1 011 passed, 0 skipped (15 new in `tests/test_timeline.py`):
   each event kind on synthetic trees with the states that bound it; a reused inode number is two
   files; hard links; one version across unchanged states; deltas compare what extents point at,
   not how they are cut; a walk with a gap gives `not_seen`; uncommitted sources never delete;
-  same-generation states; payloads that do not parse and parent cycles; the sandbox's history;
+  same-generation states; 300 states of one unchanged tree; payloads that do not parse and parent
+  cycles; the sandbox's history;
   `m4_deep` against its log; README keys against the command's JSON. Ruff clean; images
   unchanged. No corpus script changed.
 - **Limits.** Several changes between two surviving states show as their net effect. A delete is

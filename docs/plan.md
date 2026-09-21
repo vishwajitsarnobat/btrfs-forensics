@@ -1628,7 +1628,8 @@ between one backup slot and the current tree (SecurityRonin) or over discovered 
   logged SHA-256; with `--uncommitted` the flash files appear as `never_committed`;
 - synthetic trees: rename, move, link and unlink, modify with the changed ranges, attribute
   change, reuse of an inode number, a walk with a gap (`not_seen`), a deleted subvolume;
-- hostile input: payloads that do not parse, cycles, 4096 states: no crash, bounded;
+- hostile input: payloads that do not parse, cycles, hundreds of states: no crash, bounded (the
+  catalog bounds the states at 4096);
 - README documents the command and every key of its JSON records (the schema tests compare).
 
 **M5d status 2026-09-21: done** (catalog.md, M5d entry). Each bullet of its definition of done is

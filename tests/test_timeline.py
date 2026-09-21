@@ -183,6 +183,16 @@ def test_payloads_that_do_not_parse_and_parent_cycles_do_not_stop_a_timeline():
     assert not [e for e in events if e["objectid"] == 258][0]["attached"]
 
 
+def test_hundreds_of_states_cost_one_walk_per_distinct_tree_root_and_give_one_version():
+    same = [*ROOT_DIR_ITEMS, *file_items(257, b"f", b"x")]
+    trees = {f"backup:{n}": same for n in range(8, 308)} | {"current": list(ROOT_DIR_ITEMS)}
+    with synthetic(trees) as (conn, _, _):
+        timeline = Timeline(conn)
+        events = [e for e in timeline.events(5) if e["objectid"] == 257]
+    assert [e["event"] for e in events] == ["create", "delete"]
+    assert events[0]["seen_in"] == 300 and len(timeline.trees[5]) == 301
+
+
 # ---------------------------------------------------------------------------
 # sandbox.img: the known history of generations 11 to 14
 # ---------------------------------------------------------------------------
