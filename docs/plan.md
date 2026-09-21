@@ -662,6 +662,10 @@ corpus/vm/fetch_vm.sh && corpus/vm/build_initramfs.sh && corpus/vm/make_image.sh
   test output only under `images/scratch/`.
 - CI green on the PR.
 
+**Status 2026-09-15: done** (catalog.md, M0 entry). One item recorded there as done was not:
+`recovery_output/` stayed tracked until 2026-09-21 (catalog.md, "Repository layout and paper
+library").
+
 ### M1 — Substrate trust layer + anchored walking (~1.5 weeks)
 
 **Goal:** a validated read path we own (§3.5), with backup-root states walked
@@ -946,6 +950,27 @@ implementation).
 
 The schema is the contract M9's GUI reads; a change bumps `schema_version` and is described in
 `docs/evidence-db.md`.
+
+**Status 2026-09-21: done.** M3a delivered the schema, the single write site, the one-pass build
+and the chain of custody; M3b the block contents, the parsed tables, the tree edges and the
+reverse queries (catalog.md, M3a and M3b entries). Every DoD bullet is met, each by a test:
+- one pass fills the database, and it equals independent `scan` and `roots` runs row for row on
+  `sandbox.img` and 13 corpus images
+  (`test_sandbox_database_equals_scan_and_roots_and_the_golden_numbers`,
+  `test_corpus_database_equals_scan_and_roots`);
+- the image hash is unchanged, a second build to the same path is refused and a failed build
+  leaves no file (`test_a_second_build_is_refused_and_a_failed_build_leaves_no_file`);
+- the four reverse queries are answered with the image file deleted and agree with anchored
+  walks of the current and the four backup roots, on the sandbox and four corpus images
+  (`test_sandbox_reverse_queries_agree_with_walks_with_the_image_deleted` and its corpus
+  counterpart);
+- the extent parser agrees with `btrfs inspect-internal dump-tree`
+  (`test_extent_back_references_equal_btrfs_dump_tree`);
+- every table and column is documented (`test_every_table_and_column_is_documented`);
+  `schema_version` is 2.
+
+What "all M1/M2 outputs flow through it" covers: everything `info`, `walk`, `scan` and `roots`
+report. File *content* (`cat`) is not stored; extracting files is M4.
 
 ### M4 — Recovery engines (~1–2 weeks)
 - Anchored recovery: extract files from any cataloged root via
