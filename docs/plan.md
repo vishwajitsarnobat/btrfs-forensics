@@ -1000,6 +1000,88 @@ report. File *content* (`cat`) is not stored; extracting files is M4.
   - on the beyond-4-generations image (§6.2) (b)/(c) recover a file that
     (a) cannot.
 
+**M4b: anchored recovery, `btrfska recover`** (design fixed 2026-09-21, before implementation).
+
+*What it is.* `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID]...
+[--tree ID]` extracts the files of one tree as one cataloged root saw them. Every root the
+catalog knows is a row of `states` (`known_as` names the current and backup roots; the rest were
+discovered), and `state_trees` names each tree's root block, so one selector covers all three
+kinds. Default: `--root current --tree 5`.
+
+*Decisions.*
+1. **Metadata comes from the database, file data from the image.** The tree is walked in the
+   database: root block, `key_ptrs`, child blocks by (bytenr, generation, level), leaf `items`.
+   That reaches blocks the current chunk map no longer places, which a walk through the image
+   cannot, and it is the rule of §2 ("scan once, query forever"). A child that was not scanned as
+   a valid block is a gap: recorded, and the files under it are simply absent. Item payloads are
+   parsed with the `substrate/items.py` parsers, not read from the parsed tables, so recovery
+   and `walk` share one parser. The image must be the one the database was built from: its
+   SHA-256 is compared with `scan_runs.image_sha256_before` (skipped with `--no-rehash`, and
+   recorded as not checked).
+2. **Streaming.** `substrate/extents.py` gains `stream_extent`: the extent is mapped first (every
+   piece, every copy, no data read), which is where `unmapped` and `unreadable` are decided; then
+   an uncompressed extent is yielded in pieces of at most 1 MiB. A compressed extent is at most
+   128 KiB in, 128 KiB out, and is decoded whole. `read_extent` is rebuilt on the same mapping
+   step so there is one read path. The writer hashes as it writes; memory use does not depend on
+   file size. Data extents are read through the current chunk map (historical maps: M5), so an
+   old state's extent in a removed chunk fails as `unmapped`, and says so.
+3. **A file that cannot be read completely is never passed off as complete.** Every extent
+   failure leaves a hole of the extent's length, the file is written as `NAME.partial`, and the
+   artifact row says which ranges are missing and why. An encrypted extent is refused: a report
+   line on stderr (`refused: encrypted extent ...`), status `refused_encrypted`, no bytes written
+   for that file. `FT_ENCRYPTED` (0x80) is masked out of directory-entry types and reported.
+4. **Names.** Paths are built from INODE_REF and INODE_EXTREF (parent, name) up to the tree's root
+   directory; every name of a hard-linked inode is recorded, the file is written once, under its
+   first name in key order. An inode whose parent chain does not reach the root directory
+   (a gap, or a cycle, which is bounded) goes under `_unattached/INODE`. Names are bytes from an
+   untrusted image: `/`, NUL, `.` and `..` components are replaced and reported, and no path
+   leaves `DIR`.
+5. **The output writer is one module, `recover/output.py`, and it joins the read-only test's
+   allowlist explicitly.** It creates `DIR` (which must not exist), creates directories and
+   files relative to a directory descriptor with `O_CREAT | O_EXCL | O_NOFOLLOW`, never follows a
+   symlink and never overwrites anything, so it cannot write to an image or to any existing
+   file. It does not import the image layer; a test checks both. Symlinks, devices, FIFOs and
+   sockets are **recorded, not created**: a symlink from a hostile image is a way out of `DIR`.
+   Mode (permission bits only, never setuid, setgid or sticky) and mtime/atime are applied;
+   ownership is recorded, not applied (no root). Extended attributes are recorded in the
+   database and the manifest, not set (most need privileges the tool must not have).
+6. **The database records every recovery** (schema version 3). `catalog/db.py` stays the only
+   place a database is opened: `open_for_recovery` opens an existing version-3 database for
+   appending, with an SQLite authorizer that allows INSERT and UPDATE on `recovery_runs`,
+   `artifacts` and `provenance` and nothing else. The scan's rows cannot change after the build;
+   M3's "written once" holds for them. A version-2 database is refused: rebuild it.
+   - `recovery_runs`: one row per invocation (times, tool version, image hash check, output
+     directory, options, counts).
+   - `artifacts`: one row per inode recovered or refused: source, tree, root block, inode,
+     kind, path and all names, size, mode, owner, times, xattrs, status, bytes written,
+     SHA-256, the extent signature, `duplicate_of`, output path, symlink target, problems.
+   - `provenance`: the evidence chain, one row per item an artifact was built from (role, leaf
+     content and slot, leaf block, and for an extent its read record: kind, compression,
+     address, the physical ranges and copies used, SHA-256, failure).
+   `DIR/manifest.jsonl` repeats the artifact records, so the output directory explains itself
+   without the database.
+7. **Deduplication across roots.** Several `--root` give one subdirectory per root. An artifact
+   whose extent signature (size plus every extent's address, offset, length, compression, or
+   inline bytes) equals a complete artifact already written in this run is not read again: its
+   row has `duplicate_of` and no output file. `--no-dedup` writes every copy.
+8. `artifacts.in_current`: whether the current tree of the same id holds the same inode with
+   the same creation generation. It is the label "deleted since", and M5's timelines replace it.
+
+*Definition of done for M4b.*
+- on `sandbox.img` and the corpus images, every regular file of the current fs tree comes out
+  byte-identical to `btrfska cat` (and so to the oracle tests behind it), from `current` and
+  from every backup root; on `m1_lzo` and `m1_zlib` that covers compressed extents;
+- a file deleted before the last commit is recovered from a backup root and from a discovered
+  state, with `in_current` 0 and a provenance chain that names the leaf and slot of every item;
+- peak memory while recovering a file much larger than 1 MiB stays bounded (test with a
+  synthetic large extent and `tracemalloc`);
+- hostile input: names with `/`, `..`, NUL and 255+ bytes, parent cycles, an inode without
+  INODE_ITEM, overlapping extents, a symlink, an encrypted extent, random item payloads: no
+  crash, nothing written outside `DIR`;
+- the image hash is unchanged; the authorizer refuses a write to a scan table; every new column
+  is documented (`test_every_table_and_column_is_documented`); README documents the command and
+  its records.
+
 ### M5 — Reconstruction & timelines (~2 weeks; novelty core — start early)
 - Orphan graph: reconcile scanned nodes + edges by owner/generation/
   key-range/csum into candidate historical subtrees; reattach fragments
