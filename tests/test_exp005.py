@@ -11,6 +11,7 @@ import subprocess
 import pytest
 
 from btrfska.substrate import ondisk
+from btrfska.substrate.slack import slack_range
 from experiments import exp005
 from tests.helpers import NODESIZE, SCENARIOS, make_node, scratch_dir
 
@@ -20,17 +21,17 @@ INODE = (257, 1, 0)
 
 def test_leaf_slack_lies_between_the_item_array_and_the_lowest_item_data():
     block = make_node(0x100000, items=[(INODE, b"a" * 160), ((257, 12, 256), b"b" * 20)])
-    assert exp005.slack_range(block, NODESIZE) == (HEADER + 2 * 25, NODESIZE - 180)
+    assert slack_range(block, NODESIZE) == (HEADER + 2 * 25, NODESIZE - 180)
 
 
 def test_an_empty_leaf_is_all_slack_after_the_header():
-    assert exp005.slack_range(make_node(0x100000), NODESIZE) == (HEADER, NODESIZE)
+    assert slack_range(make_node(0x100000), NODESIZE) == (HEADER, NODESIZE)
 
 
 def test_internal_node_slack_runs_from_the_last_key_pointer_to_the_end_of_the_block():
     ptrs = [((256 + i, 1, 0), 0x200000 + i * NODESIZE, 7) for i in range(3)]
     block = make_node(0x100000, level=1, ptrs=ptrs)
-    assert exp005.slack_range(block, NODESIZE) == (HEADER + 3 * 33, NODESIZE)
+    assert slack_range(block, NODESIZE) == (HEADER + 3 * 33, NODESIZE)
 
 
 def test_a_block_as_the_kernel_writes_it_has_no_non_zero_slack():
@@ -54,16 +55,16 @@ def test_a_stale_item_header_beyond_nritems_is_counted_and_decoded():
 def test_stale_headers_stop_at_the_first_all_zero_slot_and_skip_internal_nodes():
     block = bytearray(make_node(0x100000, items=[(INODE, b"a" * 160)]))
     struct.pack_into(ondisk.ITEM.format, block, HEADER + 3 * 25, 300, 1, 0, 9000, 160)
-    start, end = exp005.slack_range(block, NODESIZE)
+    start, end = slack_range(block, NODESIZE)
     assert exp005.stale_headers(block, start, end) == []  # slot 1 is zero: nothing is read
     node = make_node(0x100000, level=1, ptrs=[((256, 1, 0), 0x200000, 7)])
-    assert exp005.stale_headers(node, *exp005.slack_range(node, NODESIZE)) == []
+    assert exp005.stale_headers(node, *slack_range(node, NODESIZE)) == []
 
 
 def test_a_hostile_leaf_gives_a_range_inside_the_block():
     block = bytearray(make_node(0x100000, items=[(INODE, b"a" * 160)]))
     struct.pack_into("<I", block, ondisk.HEADER.offset("nritems"), 0xFFFFFFFF)
-    start, end = exp005.slack_range(block, NODESIZE)
+    start, end = slack_range(block, NODESIZE)
     assert 0 <= start <= NODESIZE and 0 <= end <= NODESIZE
     assert exp005.measure_slack(block, NODESIZE)["slack_len"] == max(0, end - start)
 

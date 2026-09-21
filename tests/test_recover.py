@@ -176,7 +176,7 @@ def test_the_recovery_connection_cannot_change_what_the_scan_wrote():
         conn.close()
 
 
-def test_a_version_2_database_is_refused():
+def test_a_database_of_an_older_schema_version_is_refused():
     with scratch_dir("test_recover_") as d:
         path = _sandbox_db(d)
         raw = sqlite3.connect(path)
@@ -185,7 +185,7 @@ def test_a_version_2_database_is_refused():
         raw.close()
         with pytest.raises(db.CatalogError, match="schema version 2"):
             db.open_for_recovery(path)
-    assert SCHEMA_VERSION == 3 and set(RECOVERY_TABLES) == {
+    assert SCHEMA_VERSION >= 3 and set(RECOVERY_TABLES) == {
         "recovery_runs", "artifacts", "provenance"
     }  # fmt: skip
 

@@ -5,7 +5,7 @@ learned to one SQLite file. Everything after it (recovery, timelines, confidence
 queries that file and not the image. This document is the contract: every table and column is
 listed here, and a test fails when one is not (`tests/test_catalog.py`).
 
-- **Schema version: 3.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
+- **Schema version: 4.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
   the DDL in `src/btrfska/catalog/schema.py` bumps it and adds a line to [Versions](#versions).
 - **One database, one image, one pass.** The path given to `--db` must not exist. A database is
   never overwritten; a rebuild is a new file. A pass that fails leaves no file. What the pass
@@ -240,6 +240,9 @@ roots`).
 | `level`, `nritems` | from the header |
 | `parsed` | 1 when some node holding this content is valid, so its items or key pointers were read. The bytes of a content that never validates are hashed, not interpreted |
 | `first_key`, `last_key` | `key_sort` of the first and last item or key pointer; NULL when not parsed or empty |
+| `slack_start`, `slack_len` | the block's slack: the bytes no current item or key pointer uses, as an offset in the block and a length. Internal node: from the end of key pointer `nritems` to the end of the block. Leaf: from the end of item `nritems` to the lowest item data. NULL when not parsed |
+| `slack_nonzero` | non-zero bytes in the slack. The kernel zeroes the slack before every tree-block write (since v4.9; EXP-005), so anything above 0 was not written by a current kernel |
+| `slack_class` | `zero`; `stale_structures`: the slack begins with a valid stale entry of the block's own kind, which is what `mkfs.btrfs` and kernels before 4.9 leave behind; `other`: non-zero bytes that do not begin with one, which is what data hidden in slack looks like. A description, not a verdict: forged stale entries would read as `stale_structures` (plan.md M6 decides) |
 
 ### `content_blocks` (view): what a content is
 
@@ -266,6 +269,27 @@ One row per content held by a valid node: `content_id`, its `bytenr`, `generatio
 | `content_id` | the content |
 | `slot` | the item; NULL for a finding about the block (an item that ends past the block, `nritems` above what fits) |
 | `detail` | why. The raw item is in `items` all the same; a bad payload never stops a build |
+
+### `stale_items` and `stale_key_ptrs`: what lies beyond `nritems`
+
+Entries found in the slack of a parsed block (`substrate/slack.py`), on the 25-byte item grid and
+on the 33-byte key-pointer grid, both anchored at the end of the block header and both searched
+in leaves and in internal nodes (a leaf can be reallocated as a node, and the reverse). They are
+**not** part of any tree: they are what an earlier state of the block left behind. On the
+project's corpus every one of them is `mkfs.btrfs` bookkeeping (EXP-005); on a filesystem last
+written by a kernel older than 4.9 they can be items of deleted files.
+
+| Column | Meaning |
+|---|---|
+| `stale_items.content_id`, `stale_items.position` | the block content, and the header's byte offset in the block |
+| `stale_items.slot` | its index on the item grid; at least `nritems` in a leaf |
+| `stale_items.key_objectid`, `stale_items.key_type`, `stale_items.key_offset`, `stale_items.key_sort`, `stale_items.type_name` | the key, as in `items` |
+| `stale_items.data_offset`, `stale_items.data_size` | where the header says its payload lies (relative to the end of the block header), and its length. A header counts only when its type is known and that range lies inside the block and behind the header |
+| `stale_items.data_state` | `in_slack`: the payload still lies wholly in the slack; `overlaps_live`: live items now use that space; `empty`: a type without payload |
+| `stale_items.data` | the payload bytes when `in_slack`; NULL otherwise |
+| `stale_key_ptrs.content_id`, `stale_key_ptrs.position`, `stale_key_ptrs.slot` | as above, on the key-pointer grid |
+| `stale_key_ptrs.key_objectid`, `stale_key_ptrs.key_type`, `stale_key_ptrs.key_offset`, `stale_key_ptrs.key_sort` | the pointer's key |
+| `stale_key_ptrs.blockptr`, `stale_key_ptrs.ptr_generation` | *u64*; the child it named. A pointer counts only when the address is non-zero and sector-aligned and the generation is non-zero and not above the block's own |
 
 ### `key_ptrs` and `tree_edges` (view): internal nodes
 
@@ -420,6 +444,10 @@ Block rows carry `reach`: `live`, `backup_reachable` or `unreferenced`, and `out
 ## Examples
 
 ```sql
+-- blocks the kernel cannot have written as they are: what is in their slack?
+SELECT b.bytenr, b.generation, b.owner, b.live, c.slack_class, c.slack_nonzero
+FROM contents c JOIN content_blocks b USING (content_id) WHERE c.slack_nonzero > 0;
+
 -- orphans by class and by whether the current chunk map still places them
 SELECT status, outside_map, COUNT(*) FROM nodes WHERE orphan GROUP BY 1, 2;
 
@@ -451,8 +479,8 @@ SELECT slot, type_name, key_objectid, key_offset FROM items WHERE content_id = 1
 
 ## Not stored yet
 
-Confidence tiers on `artifacts` arrive with plan.md M6. Items beyond `nritems` and node slack are
-not parsed yet (M4; EXP-005 shows what to expect there). Log generations and the (owner,
+Confidence tiers on `artifacts` arrive with plan.md M6, and with them the decision whether a
+block's slack content is tampering (`slack_class` only describes it). Log generations and the (owner,
 generation, level) groups that `btrfska roots` prints are one `GROUP BY` over `nodes`. Only the
 current chunk map is stored; historical maps come with M5 (`chunks.map_source`).
 
@@ -468,3 +496,7 @@ current chunk map is stored; historical maps come with M5 (`chunks.map_source`).
 - **3** (2026-09-21): `recovery_runs`, `artifacts` and `provenance`, appended by `btrfska recover`
   through a connection that can change nothing else. Nothing of version 2 changed meaning. A
   version-2 database is refused; rebuild it from the image.
+- **4** (2026-09-21): `contents.slack_start`, `slack_len`, `slack_nonzero`, `slack_class`; tables
+  `stale_items` and `stale_key_ptrs`. Nothing of version 3 changed meaning. A version-3 database
+  is refused; rebuild it from the image.
+

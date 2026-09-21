@@ -16,6 +16,11 @@ a refused run leaves no file behind. Unchanged all-zero regions stay sparse.
   uv run python corpus/mutate.py SRC DST flip-byte OFFSET [OFFSET ...]
       invert (XOR 0xFF) the byte at each physical OFFSET, checksums left stale
       (a corrupt tree-block copy; see corpus/manifest.tsv for which copies m1_badnode* hit)
+  uv run python corpus/mutate.py SRC DST plant-slack [--message TEXT]
+      hide TEXT in the slack of the current fs tree's root node and of its first leaf, in every
+      physical copy, and recompute the tree-block checksums: data hidden in node slack as in
+      Toolan & Humphries 2026, which no honest image contains (EXP-005). The source needs an fs
+      tree with an internal node (m3_wide).
 """
 
 import argparse
@@ -26,9 +31,16 @@ from pathlib import Path
 
 from btrfska.substrate import csum, ondisk
 from btrfska.substrate import superblock as sb
+from btrfska.substrate.fs import open_filesystem
+from btrfska.substrate.image import open_image
+from btrfska.substrate.roots import find_root_set, resolve_tree
+from btrfska.substrate.slack import slack_range
+from btrfska.substrate.tree import walk
 
 IMAGES = Path(__file__).resolve().parents[1] / "images"
 CHUNK = 1 << 20
+MESSAGE = "hidden in node slack, after Toolan & Humphries 2026"
+MARGIN = 64  # bytes of slack left zero before the message: it does not start on an entry
 
 
 def read_valid_copy(f, size: int, mirror: int, what: str) -> bytearray:
@@ -93,6 +105,34 @@ def flip_bytes(src, size: int, offsets: list[int]) -> dict[int, bytes]:
     return patches
 
 
+def plant_slack(path: Path, message: bytes) -> dict[int, bytes]:
+    """Patches that put `message` into the slack of the fs tree's root node and first leaf."""
+    patches = {}
+    with open_image(path) as img:
+        fs = open_filesystem(img)
+        ctx = fs.reader.ctx
+        root = resolve_tree(fs.reader, find_root_set(fs.fields, "current"), "fs")
+        targets = {}
+        for visit in walk(fs.reader, root.bytenr, root.expect()):
+            kind = "node" if visit.node.level else "leaf"
+            if visit.node.valid and kind not in targets:
+                targets[kind] = visit.node
+        if set(targets) != {"node", "leaf"}:
+            sys.exit(f"{path}: the current fs tree has no internal node and leaf to plant in")
+        for node in targets.values():
+            for copy in node.copies:
+                block = bytearray(img.mmap[copy.physical : copy.physical + ctx.nodesize])
+                start, end = slack_range(block, ctx.nodesize)
+                if end - start < MARGIN + len(message):
+                    sys.exit(f"block {node.logical}: {end - start} bytes of slack is too little")
+                block[start + MARGIN : start + MARGIN + len(message)] = message
+                block[: ondisk.CSUM_SIZE] = bytes(ondisk.CSUM_SIZE)
+                digest = csum.compute(ctx.csum_type, block[ondisk.CSUM_SIZE :])
+                block[: len(digest)] = digest
+                patches[copy.physical] = bytes(block)
+    return patches
+
+
 def check_patches(size: int, patches: dict[int, bytes]) -> None:
     for offset, block in patches.items():
         if offset < 0 or offset + len(block) > size:
@@ -146,6 +186,8 @@ def main(argv: list[str] | None = None) -> None:
     transplant.add_argument("generation", type=int)
     flip = ops.add_parser("flip-byte")
     flip.add_argument("offsets", type=int, nargs="+", metavar="OFFSET")
+    plant = ops.add_parser("plant-slack")
+    plant.add_argument("--message", default=MESSAGE)
     args = parser.parse_args(argv)
 
     dst = checked_output(args.src, args.dst)
@@ -157,6 +199,8 @@ def main(argv: list[str] | None = None) -> None:
             patches = set_incompat_bit(src, size, args.bit)
         elif args.op == "transplant-sb":
             patches = transplant_sb(src, size, args.donor, args.mirror, args.generation)
+        elif args.op == "plant-slack":
+            patches = plant_slack(args.src, args.message.encode())
         else:
             patches = flip_bytes(src, size, args.offsets)
         check_patches(size, patches)

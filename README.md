@@ -30,7 +30,9 @@ prototype is frozen, still runnable, under `legacy/`.
 - `btrfska catalog build IMAGE --db PATH` reads the image once and writes an
   SQLite evidence database: every candidate tree block with its validation
   record, the chunk map, the superblock copies, the historical states and the
-  chain of custody, and every item of every valid block, parsed. `btrfska
+  chain of custody, every item of every valid block, parsed, and what lies
+  beyond `nritems` in each block (its slack, and the stale items and key
+  pointers in it). `btrfska
   catalog query DB …` answers reverse questions (what points to this block,
   what used this extent, which leaves hold this key, what was written in this
   generation) from the database alone. `btrfska catalog info DB` prints a

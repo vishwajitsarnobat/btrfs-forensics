@@ -1,0 +1,45 @@
+{
+  "image": "sandbox.img",
+  "sha256": "07ca38d42b11062f5461f97a572134a1b56cbf94e1138183d6e74502f5876418",
+  "captured": "2026-09-21",
+  "oracle": "the frozen prototype: `python main.py ../sandbox.img -o OUT --full-sweep` in legacy/ (experiments/exp005.py legacy runs it). Counters from its recovery_report.json; the leaf slacks are the files it saved, named by the physical offset of the leaf copy.",
+  "stats": {
+    "orphan_nodes_found": 71,
+    "orphan_items_found": 0,
+    "leaf_slacks_found": 4,
+    "internal_orphan_ptrs_found": 0,
+    "internal_slack_residuals": 0,
+    "extent_backrefs_found": 0
+  },
+  "leaf_slacks": [
+    {
+      "physical": 22036480,
+      "generation": 8,
+      "size": 15781,
+      "nonzero": 70,
+      "sha256": "47ae2dc3302931063b6f5b3f6bf1cee61a420cdbdcf631609d517cc2e0fec065"
+    },
+    {
+      "physical": 30425088,
+      "generation": 8,
+      "size": 15781,
+      "nonzero": 70,
+      "sha256": "47ae2dc3302931063b6f5b3f6bf1cee61a420cdbdcf631609d517cc2e0fec065"
+    },
+    {
+      "physical": 38846464,
+      "generation": 7,
+      "size": 16250,
+      "nonzero": 135,
+      "sha256": "c2c5b7e6568bb4e71c2970e14f573e48bb54a9712350541fc6418ec7aecb0824"
+    },
+    {
+      "physical": 72400896,
+      "generation": 7,
+      "size": 16250,
+      "nonzero": 135,
+      "sha256": "c2c5b7e6568bb4e71c2970e14f573e48bb54a9712350541fc6418ec7aecb0824"
+    }
+  ],
+  "note": "EXP-005: these slacks hold what mkfs.btrfs left behind, not remnants of deleted files. The prototype does not look at the slack of extent-tree leaves, so it misses a third block (logical 5357568)."
+}

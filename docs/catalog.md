@@ -20,6 +20,60 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — M4c: what lies beyond `nritems`, described and stored; a planted-slack image
+
+- **Branch:** `feature/m4-slack-describers` (from `main` at `5d4750e`). New
+  `src/btrfska/substrate/slack.py`, `tests/test_slack.py`,
+  `tests/ground_truth/sandbox_legacy_archaeology.json`; changed `catalog/schema.py` (version 4),
+  `catalog/content.py`, `catalog/build.py`, `corpus/mutate.py` (`plant-slack`),
+  `corpus/manifest.tsv` (`m4_planted_slack`), `experiments/exp005.py` (imports `slack_range`),
+  `tests/test_mutate.py`, `tests/test_vm_images.py`, `docs/evidence-db.md`, `README.md`, plan.md.
+- **Planned first** (`3e2865b`). EXP-005 decided the shape: this is the port of the prototype's
+  beyond-`nritems` scan, key-pointer scan and slack mining, but as **describers**. They say what
+  a block's slack holds; they do not promise deleted files, because on a filesystem a current
+  kernel wrote there are none to find there.
+- **`substrate/slack.py`.** Stale items on the 25-byte grid and stale key pointers on the 33-byte
+  grid, both anchored at the end of the block header and both searched in leaves and in
+  internal nodes. A stale item counts when its type is known, its data range lies in the block
+  and behind its own header, and size 0 only for the four payload-free types. `slack_class`:
+  `zero`, `stale_structures` (the slack begins with a valid stale entry of the block's kind:
+  what mkfs and old kernels leave), `other` (what a hidden message looks like).
+- **Two prototype defects not carried over.** Its internal-node slack scan slid a 25-byte window
+  from the *start of the slack*, which is off the item grid unless `33 × nritems` is a multiple
+  of 25; a test reuses a leaf as a node with two pointers and gets the old names back from slot 3
+  on. It also never looked at the slack of extent-tree leaves, so on `sandbox.img` it missed one
+  of the three blocks that carry content. Defect #8 is asserted the right way round, relative to
+  the image: a data back-reference naming an inode and offset carries the `disk_bytenr` of that
+  inode's extent, never the length.
+- **A bug the tests found:** plain text passed as a stale item, because a header of size 0 with
+  data offset 0 satisfied "data range inside the block". The two structural rules above came
+  from that.
+- **Schema version 4**, written at build time, once per distinct content: `contents.slack_start`,
+  `slack_len`, `slack_nonzero`, `slack_class`; tables `stale_items` (with the payload when it
+  still lies in the slack) and `stale_key_ptrs`. Every column documented.
+- **New image `m4_planted_slack`** (16 images now): `corpus/mutate.py plant-slack` finds the root
+  node and the first leaf of `m3_wide`'s fs tree by walking it, writes a message 64 bytes into
+  the slack of every physical copy and recomputes the checksums, as Toolan & Humphries 2026 did
+  by hand. The catalog classes exactly those two blocks `other`; every other block equals
+  `m3_wide`. **`btrfs check --readonly` (6.6.3) reports no error on it**, which reproduces their
+  "no tool detected anything" for internal-node slack and extends it to leaf slack.
+- **Numbers.** `sandbox.img`: 3 of 52 parsed contents have slack content (248 non-zero bytes),
+  all `stale_structures`; 24 stale items (METADATA_ITEM 17, TREE_BLOCK_REF 5, CHUNK_ITEM 2), none
+  of a file-tree type, no stale key pointer. The four leaf slacks the prototype saved have our
+  lengths and non-zero counts, and the bytes hash the same. `m3_wide`: 6 of 250, 21 stale items.
+  The database grows by about 15 % on `sandbox.img` (364 to 416 KiB).
+- **Verification.** `uv run pytest`: 882 passed, 0 skipped (19 new). EXP-005's claim is now a
+  database query, asserted on `m3_wide`, `s01_discard_none_r1`, `m2_logtree` and `m1_lzo`
+  against a control formatted during the test: no block above the mkfs generation has a non-zero
+  slack byte, and every block that has any is `stale_structures` with no file-tree item. 1 500
+  hostile blocks: no exception, nothing outside the block. Ruff clean; `sandbox.img` and all 16
+  corpus images unchanged. A fresh clone of the branch built all 16 images and passed with
+  `./setup.sh`.
+- **Limits.** `slack_class` describes, it does not decide: forged stale entries read as
+  `stale_structures` (M6). No image written by a pre-4.9 kernel exists in the corpus, so recovery
+  of deleted items from slack is shown on synthetic leaves only. Stale entries are not turned into
+  artifacts by `recover`.
+
 ## 2026-09-21 — M4b: `btrfska recover`, anchored recovery from any cataloged root
 
 - **Branch:** `feature/m4-anchored-recovery` (from `main` at `7f4a78f`). New package
