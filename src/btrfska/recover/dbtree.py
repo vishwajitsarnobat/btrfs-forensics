@@ -1,4 +1,5 @@
-"""Walk a tree in the evidence database, from any cataloged root (plan.md M4b, decision 1).
+"""Walk a tree in the evidence database, from any cataloged root (plan.md M4b, decision 1), and
+find the leaves no cataloged root reaches (M4d).
 
 The database holds every valid block the scan found, at whatever physical offset, with its items
 or key pointers. A tree is therefore walked without the image and without a chunk map: root block,
@@ -17,6 +18,8 @@ from dataclasses import dataclass
 from btrfska.catalog.schema import s64, u64
 from btrfska.substrate.node import Item, Key, is_subvolume_tree
 from btrfska.substrate.ondisk import FS_TREE_OBJECTID as FS_TREE
+from btrfska.substrate.ondisk import ROOT_TREE_OBJECTID as ROOT_TREE
+from btrfska.substrate.ondisk import TREE_LOG_OBJECTID as LOG_TREE
 
 
 class RootNotCataloged(LookupError):
@@ -27,12 +30,13 @@ class RootNotCataloged(LookupError):
 class Root:
     """One tree as one cataloged root tree names it."""
 
-    source: str  # current, backup:GEN or state:ID
-    state_id: int
+    source: str  # current, backup:GEN or state:ID; orphan_node:BYTENR for a leaf on its own
+    state_id: int | None
     tree_id: int
     bytenr: int
     generation: int
     level: int
+    kind: str = "anchored_root"  # or orphan_node: `bytenr` is then a leaf no state reaches
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,74 @@ def resolve_roots(conn: sqlite3.Connection, spec: str, tree_id: int | None) -> l
         Root(spec, state_id, tree, u64(trees[tree][1]), u64(trees[tree][2]), trees[tree][3])
         for tree in wanted
     ]
+
+
+def every_state(conn: sqlite3.Connection) -> list[str]:
+    """`state:ID` for every cataloged root tree, in the catalog's order (newest first)."""
+    rows = conn.execute("SELECT state_id FROM states ORDER BY state_id")
+    return [f"state:{row[0]}" for row in rows]
+
+
+def orphan_leaves(conn: sqlite3.Connection) -> list[tuple[Root, Leaf]]:
+    """Valid file-tree leaves that no scanned root tree leads to, and leaves of dropped log
+    trees, each as a root of its own.
+
+    Reached means: among the leaves of a file tree whose root some ROOT_ITEM names, in any valid
+    root-tree leaf the scan found, of any generation. That covers every cataloged state, root
+    trees beyond the number evaluated as states, and root-tree leaves whose parent node is lost;
+    `nodes.status` knows the current and the backup roots only.
+    """
+    named = conn.execute(
+        "SELECT DISTINCT r.tree_id, r.bytenr, r.generation, r.level FROM root_items r"
+        " JOIN content_blocks b USING (content_id) WHERE b.owner = ? AND r.bytenr != 0",
+        (ROOT_TREE,),
+    ).fetchall()
+    reached: set[int] = set()
+    for tree, bytenr, generation, level in named:
+        if is_subvolume_tree(u64(tree)):
+            root = Root("root_item", None, u64(tree), u64(bytenr), u64(generation), level)
+            reached.update(leaf.content_id for leaf in tree_leaves(conn, root)[0])
+    rows = conn.execute(
+        "SELECT content_id, bytenr, generation, owner, MIN(physical), MAX(status = 'live'),"
+        " MAX(status = 'backup_reachable'), MAX(log_tree) FROM nodes"
+        " WHERE valid = 1 AND level = 0 AND content_id IS NOT NULL"
+        " GROUP BY content_id, bytenr, generation, owner ORDER BY owner, generation DESC, bytenr"
+    ).fetchall()
+    found = []
+    for content_id, bytenr, generation, owner, physical, live, backup, in_live_log in rows:
+        tree = u64(owner)
+        if tree == LOG_TREE:
+            # A leaf of a log tree: what fsync wrote between two commits. The log the superblock
+            # still names is not orphaned (replaying it is reconstruction, plan.md M5); a log
+            # tree dropped by a later commit is, and no root tree ever pointed to it.
+            if in_live_log:
+                continue
+        elif content_id in reached or not is_subvolume_tree(tree):
+            continue
+        status = "live" if live else "backup_reachable" if backup else "unreferenced"
+        leaf = Leaf(content_id, u64(bytenr), u64(generation), physical, status)
+        root = Root(
+            f"orphan_node:{leaf.bytenr}", None, tree, leaf.bytenr, leaf.generation, 0,
+            kind="orphan_node",
+        )  # fmt: skip
+        found.append((root, leaf))
+    return found
+
+
+def former_names(conn: sqlite3.Connection, tree_id: int, objectid: int, created: int):
+    """Names `objectid` had in tree `tree_id`, from leaves of any generation that also hold its
+    INODE_ITEM with creation generation `created` (inode numbers are reused; the pair is not).
+    Rows of (parent, name bytes, index, extended, leaf generation), newest leaf first."""
+    rows = conn.execute(
+        "SELECT DISTINCT r.parent_objectid, r.name_raw, r.dir_index, r.extended, b.generation"
+        " FROM inode_refs r"
+        " JOIN inodes i ON i.content_id = r.content_id AND i.objectid = r.objectid"
+        " JOIN content_blocks b ON b.content_id = r.content_id"
+        " WHERE r.objectid = ? AND i.generation = ? AND b.owner = ?"
+        " ORDER BY b.generation DESC, r.dir_index",
+        (s64(objectid), s64(created), s64(tree_id)),
+    ).fetchall()
+    return [(u64(row[0]), bytes(row[1]), u64(row[2]), bool(row[3]), u64(row[4])) for row in rows]
 
 
 def resolve_root(conn: sqlite3.Connection, spec: str, tree_id: int) -> Root:

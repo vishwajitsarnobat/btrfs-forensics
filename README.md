@@ -455,7 +455,7 @@ the class earliest in the list above wins:
 
 ### `btrfska catalog`
 
-`btrfska catalog build IMAGE --db PATH [--full-sweep] [--workers N] [--no-rehash]`
+`btrfska catalog build IMAGE --db PATH [--full-sweep] [--workers N] [--max-states N] [--no-rehash]`
 scans the image once, read-only, and writes everything `scan` and `roots`
 compute, plus the superblock copies, the chunk map and the scanned regions, to
 one SQLite file. Later analysis queries that file instead of reading the image
@@ -472,6 +472,9 @@ column, with example queries.
 - A refused format (exit 2) or an image without a valid superblock (exit 2)
   creates no database. `--allow-unsupported` continues and marks the whole
   run with `unsupported_format`.
+- Up to 4096 root trees are evaluated as states (`--max-states`; `btrfska roots` reports 64).
+  A root tree that is not a state cannot be named to `recover`, so when an image has more
+  candidates than the bound, `problems` says so.
 - btrfs u64 values are stored as signed 64-bit integers, so the high objectids
   read as btrfs names them: owner `-6` is the log tree.
 
@@ -507,13 +510,13 @@ sqlite3 -readonly images/scratch/sandbox.db \
 
 ### `btrfska recover`
 
-`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--no-dedup] [--no-rehash]`
+`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--no-dedup] [--no-rehash]`
 extracts files. `DB` is the evidence database built from `IMAGE` (`catalog build`, best with
 `--full-sweep`); the image's size and SHA-256 must match the ones recorded there (`--no-rehash`
 skips the hash, and the run is recorded as not checked).
 
-- `--root` is `current`, `backup:GEN` or `state:ID` and may be repeated; the default is
-  `current`. Every root tree the catalog knows is a state (`btrfska roots`, table `states`), so a
+- `--root` is `current`, `backup:GEN`, `state:ID`, or `all` for every cataloged state, and may
+  be repeated; the default is `current`. Every root tree the catalog knows is a state (`btrfska roots`, table `states`), so a
   root that only the scan discovered is recovered exactly like a backup root. `--tree` is a tree
   id (default 5, the top-level fs tree; 256 and above for a subvolume or snapshot) or `all` for
   every file tree the root names.
@@ -522,6 +525,21 @@ skips the hash, and the run is recorded as not checked).
   block that was not scanned as valid is reported as a `gap`; the files below it are absent.
   Data extents are read through the *current* chunk map: an old state's extent in a chunk that
   has since been removed fails as `unmapped` (historical chunk maps are plan.md M5).
+- **`--orphans`: recovery without an anchor.** After the roots, every valid file-tree leaf that
+  **no scanned root tree leads to** is read on its own (`source_kind` `orphan_node`): no
+  ROOT_ITEM in any root-tree leaf the scan found, of any generation, names a tree that reaches
+  it. Such leaves are versions written out in the middle of a transaction and replaced before
+  its commit, or leaves whose root tree is gone. Leaves of **dropped log trees** count too: what
+  `fsync` wrote between two commits, which no root tree ever named (the log the superblock still
+  names is left alone; replaying it is plan.md M5). They go to `orphan_nodes/tree_log/`. One leaf at a time, never joined with another: a file whose
+  items may continue in the next leaf is `partial` with the reason `continues_elsewhere`. Files
+  go to `DIR/orphan_nodes/tree_ID/leaf_BYTENR_genG/`. With deduplication on, an orphan copy of
+  something a root also gives is a `duplicate`, so after `--root all --orphans` the `complete`
+  `orphan_node` files are exactly the versions no cataloged root can give. An inode a tree lists
+  under the kernel's ORPHAN_ITEM (unlinked while open, not yet cleaned up) is labelled
+  `orphan_item` with or without `--orphans`: its content is intact and it has no name, so the
+  database is searched for the name it had (same inode number *and* creation generation), and it
+  is written as `.btrfska-orphan-items/INODE_NAME`.
 - **One extent at a time.** An extent is mapped in full first, then read and written in pieces
   of at most 1 MiB; memory does not grow with file size. Inline, regular and prealloc extents,
   holes (left sparse in the output), zlib, zstd and LZO are handled as in `cat`.

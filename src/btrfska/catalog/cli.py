@@ -5,7 +5,7 @@ import json
 import sys
 
 from btrfska.catalog import db, query
-from btrfska.catalog.build import TABLES, build_catalog, row_counts
+from btrfska.catalog.build import MAX_STATES, TABLES, build_catalog, row_counts
 from btrfska.scan.kernel_numpy import MAX_WORKERS
 from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat
 
@@ -33,6 +33,7 @@ def cmd_build(args: argparse.Namespace) -> int:
             workers=args.workers,
             allow_unsupported=args.allow_unsupported,
             rehash=not args.no_rehash,
+            max_states=args.max_states,
         )
     except NoValidSuperblock:
         _note("NO_VALID_SUPERBLOCK")
@@ -141,6 +142,14 @@ def add_parser(sub) -> None:
         type=_workers,
         default=1,
         help=f"worker processes for the scan, 1 to {MAX_WORKERS} (default 1)",
+    )
+    build.add_argument(
+        "--max-states",
+        type=int,
+        default=MAX_STATES,
+        metavar="N",
+        help=f"evaluate at most the N newest root trees as states (default {MAX_STATES}); more "
+        "candidates than that are reported in `problems`",
     )
     build.add_argument(
         "--no-rehash",

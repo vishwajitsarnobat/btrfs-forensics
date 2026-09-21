@@ -86,7 +86,7 @@ listed here, and a test fails when one is not (`tests/test_catalog.py`).
 | Column | Meaning |
 |---|---|
 | `problem_id` | row id |
-| `source` | `superblock` (copies disagree), `chunk_map`, `scan_plan` or `walk` |
+| `source` | `superblock` (copies disagree), `chunk_map`, `scan_plan`, `walk`, or `roots` (more root-tree candidates than `--max-states`: the older ones are in `nodes` and `root_items` but not in `states`) |
 | `detail` | the message |
 
 ### `chunks` and `stripes`: the current chunk map
@@ -373,8 +373,8 @@ and ATTACH. Rows are never deleted: a second recovery adds a second run.
 | `image_path` | the image path as given |
 | `image_checked` | 1 when the image's SHA-256 was compared with `scan_runs.image_sha256_before` and matched (a mismatch stops the run before anything is written); 0 with `--no-rehash`. The size is always compared |
 | `output_dir` | the directory that was created |
-| `options` | JSON: `roots` (as given), `tree_id` (a number or `all`), `dedup` |
-| `summary` | JSON: `artifacts` (count per status), `bytes_written`, `gaps` (per root and tree, the blocks the tree walk could not follow) |
+| `options` | JSON: `roots` (as given), `tree_id` (a number or `all`), `dedup`, `orphans` |
+| `summary` | JSON: `artifacts` (count per status), `by_source` (count per source kind and status), `orphan_leaves` (lone leaves read), `bytes_written`, `gaps` (per root and tree, the blocks the tree walk could not follow) |
 
 ### `artifacts`: one row per inode that was recovered, recorded or refused
 
@@ -382,17 +382,17 @@ and ATTACH. Rows are never deleted: a second recovery adds a second run.
 |---|---|
 | `artifact_id` | row id |
 | `recovery_id` | the run |
-| `source_kind` | how the inode was reached: `anchored_root` (a walk down from a cataloged root tree). Other sources arrive with the rest of plan.md M4 |
-| `source` | the root as the user names it: `current`, `backup:GEN` or `state:ID` |
-| `state_id` | the row of `states` that root is |
-| `tree_id` | *u64*; the fs or subvolume tree |
-| `root_bytenr`, `root_generation` | *u64*; that tree's root block under this root |
+| `source_kind` | how the inode was reached. `anchored_root`: a walk down from a cataloged root tree. `orphan_node`: a leaf read on its own (`recover --orphans`), either a file-tree leaf that no ROOT_ITEM in any scanned root-tree leaf leads to, or a leaf of a dropped log tree (`tree_id` -6). `orphan_item`: found by an anchored walk, in a tree that lists the inode under the kernel's ORPHAN_ITEM (unlinked while open) |
+| `source` | the root as the user names it: `current`, `backup:GEN` or `state:ID`; `orphan_node:BYTENR` for a lone leaf |
+| `state_id` | the row of `states` that root is; NULL for `orphan_node` |
+| `tree_id` | *u64*; the fs or subvolume tree (for a lone leaf, the owner in its header) |
+| `root_bytenr`, `root_generation` | *u64*; that tree's root block under this root; for `orphan_node`, the leaf itself |
 | `objectid` | *u64*; the inode number |
 | `inode_generation`, `inode_transid` | *u64*; the transaction that created the inode, and the one that last changed it. NULL without an INODE_ITEM. Inode numbers are reused; (`objectid`, `inode_generation`) identifies a file |
 | `kind` | `file`, `dir`, `symlink`, `other` (device, FIFO, socket), or `unknown` (items but no INODE_ITEM) |
 | `path`, `path_raw` | the path inside the tree, as text (undecodable bytes replaced) and as the exact bytes, after the changes `problems` lists |
 | `attached` | 1 when the parent chain reaches the tree's root directory; 0 for a path under `.btrfska-unattached/` (a missing parent, no name, or a cycle) |
-| `names` | JSON list of every name: `parent`, `name`, `name_hex`, `index`, `extended` (1 from INODE_EXTREF). The file is written once, under the first |
+| `names` | JSON list of every name: `parent`, `name`, `name_hex`, `index`, `extended` (1 from INODE_EXTREF). The file is written once, under the first. For an `orphan_item` inode, which has no name left, the names it had in other leaves of the same tree that hold its INODE_ITEM with the same creation generation, marked `former` with `leaf_generation` |
 | `size` | *u64*; `i_size` |
 | `mode` | file type and permission bits as in `stat`. Only the permission bits are applied to the output; setuid, setgid and sticky never are. Ownership is not applied: join `provenance` (role `inode_item`) to `inodes` for uid, gid and the four timestamps |
 | `xattrs` | JSON list of `name` and `value_hex`. Recorded, not set on the output file |
@@ -404,7 +404,7 @@ and ATTACH. Rows are never deleted: a second recovery adds a second run.
 | `duplicate_of` | the artifact of this run that holds the same tree, inode, `inode_generation` and `extent_signature` |
 | `output_path` | relative to `output_dir`: `SOURCE/tree_ID/PATH`; NULL when nothing was written |
 | `in_current` | 1 when the current tree of the same id holds this `objectid` with this `inode_generation`; 0 when it does not (deleted since, or the number was reused); NULL when the current tree could not be read completely |
-| `missing` | JSON list of `[file offset, length, reason]`: an extent failure class of `substrate/extents.py` (`unmapped`, `unreadable`, a decode error, …), `overlap`, or `short` |
+| `missing` | JSON list of `[file offset, length, reason]`: an extent failure class of `substrate/extents.py` (`unmapped`, `unreadable`, a decode error, …), `overlap`, `short`, or `continues_elsewhere` (the last inode of a lone leaf: its remaining extent items may be in the next leaf, and with NO_HOLES a range without an item looks like a hole) |
 | `problems` | JSON list: names that had to be changed, FT_ENCRYPTED on the directory entry, item payloads that did not parse, findings of the extent reader |
 
 ### `provenance`: the items each artifact was built from
@@ -447,6 +447,10 @@ Block rows carry `reach`: `live`, `backup_reachable` or `unreferenced`, and `out
 -- blocks the kernel cannot have written as they are: what is in their slack?
 SELECT b.bytenr, b.generation, b.owner, b.live, c.slack_class, c.slack_nonzero
 FROM contents c JOIN content_blocks b USING (content_id) WHERE c.slack_nonzero > 0;
+
+-- after `recover --root all --orphans`: file versions that no cataloged root can give
+SELECT source, path, size, inode_generation, inode_transid FROM artifacts
+WHERE source_kind = 'orphan_node' AND kind = 'file' AND status = 'complete';
 
 -- orphans by class and by whether the current chunk map still places them
 SELECT status, outside_map, COUNT(*) FROM nodes WHERE orphan GROUP BY 1, 2;

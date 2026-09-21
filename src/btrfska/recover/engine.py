@@ -28,13 +28,17 @@ from btrfska import __version__
 from btrfska.catalog import db
 from btrfska.catalog.schema import s64
 from btrfska.recover.dbtree import (
+    Leaf,
     Root,
     RootNotCataloged,
+    every_state,
+    former_names,
+    orphan_leaves,
     resolve_root,
     resolve_roots,
     tree_leaves,
 )
-from btrfska.recover.inodes import InodeRecord, collect, paths, safe_component
+from btrfska.recover.inodes import ORPHAN_ITEMS, InodeRecord, collect, paths, safe_component
 from btrfska.recover.output import PARTIAL, FileSink, OutputError, OutputTree
 from btrfska.substrate import items, ondisk
 from btrfska.substrate.extents import FileAssembly, stream_extent
@@ -42,7 +46,6 @@ from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
 from btrfska.substrate.node import NodeReader
 
-SOURCE_KIND = "anchored_root"
 MAX_SYMLINK = 4096  # PATH_MAX: a longer target is not a symlink the kernel would have made
 
 
@@ -61,6 +64,8 @@ class Recovered:
     gaps: dict[str, tuple[str, ...]]  # per "SOURCE tree ID": blocks the walk could not follow
     counts: dict[str, int]  # artifacts by status
     bytes_written: int
+    orphan_leaves: int = 0  # file-tree leaves no cataloged state reaches, read one by one
+    by_source: dict[tuple[str, str], int] | None = None  # (source kind, status) -> artifacts
 
 
 def _now() -> str:
@@ -116,7 +121,9 @@ class _Run:
         self.used: set[tuple[bytes, ...]] = set()
         self.first_copy: dict[tuple[int, int, int | None, str], int] = {}
         self.counts: Counter[str] = Counter()
+        self.by_source: Counter[tuple[str, str]] = Counter()  # (source kind, status)
         self.bytes_written = 0
+        self.last_objectid: int | None = None  # of the orphan leaf being read, else None
 
     # ---- output names -------------------------------------------------------------------
     def _claim(self, parts: tuple[bytes, ...], objectid: int) -> tuple[bytes, ...]:
@@ -131,14 +138,19 @@ class _Run:
         return candidate
 
     @staticmethod
-    def _base(root: Root) -> tuple[bytes, bytes]:
-        return root.source.replace(":", "_").encode(), f"tree_{root.tree_id}".encode()
+    def _base(root: Root) -> tuple[bytes, ...]:
+        log = root.tree_id == ondisk.TREE_LOG_OBJECTID
+        tree = b"tree_log" if log else f"tree_{root.tree_id}".encode()
+        if root.kind == "orphan_node":
+            return b"orphan_nodes", tree, f"leaf_{root.bytenr}_gen{root.generation}".encode()
+        return root.source.replace(":", "_").encode(), tree
 
     def start_root(self, root: Root) -> None:
         """The root's own directory, which exists even when the tree holds nothing."""
         base = self._base(root)
-        self.used.update({base[:1], base})
-        self.out.make_dir(base, None, None)
+        self.used.update(base[:n] for n in range(1, len(base) + 1))
+        if root.kind != "orphan_node":  # an orphan leaf gets a directory only if it yields a file
+            self.out.make_dir(base, None, None)
 
     # ---- one file -----------------------------------------------------------------------
     def _write(self, sink: FileSink, record: InodeRecord) -> tuple[list, list, list]:
@@ -147,7 +159,13 @@ class _Run:
         found = [(item, leaf.bytenr) for item, leaf in record.extents]
         assembly = FileAssembly(self.reader, found, size, no_holes=self.no_holes)
         reads, missing = [], []
+        # The last inode of an orphan leaf: its remaining extent items may be in the next leaf,
+        # and with NO_HOLES a range without an item looks exactly like a hole.
+        cut = record.objectid == self.last_objectid
         for extent, pieces in assembly:
+            tail = size is not None and extent.file_offset + extent.length == size
+            if cut and tail and extent.kind == "implicit_hole":
+                missing.append([extent.file_offset, extent.length, "continues_elsewhere"])
             if extent.file_offset != sink.written:  # an overlap: FileAssembly reports it
                 missing.append([extent.file_offset, extent.length, "overlap"])
                 reads.append((extent, None))
@@ -170,7 +188,9 @@ class _Run:
         if size is None:
             problems.append("no INODE_ITEM: the file's size is unknown")
         elif sink.written != size:
-            missing.append([sink.written, size - sink.written, "short"])
+            missing.append(
+                [sink.written, size - sink.written, "continues_elsewhere" if cut else "short"]
+            )
         return reads, missing, problems
 
     def _symlink_target(self, record: InodeRecord) -> tuple[str | None, list[str]]:
@@ -192,9 +212,16 @@ class _Run:
             _, changed = safe_component(name.name, record.objectid)
             if changed:
                 problems.append(changed)
+        names = [
+            {"parent": n.parent, "name": _text(n.name), "name_hex": n.name.hex(),
+             "index": n.index, "extended": n.extended}
+            for n in record.names
+        ]  # fmt: skip
+        if record.orphan_item:
+            parts, names = self._orphan_item(root, record, names, problems)
         row = {
             "recovery_id": recovery_id,
-            "source_kind": SOURCE_KIND,
+            "source_kind": "orphan_item" if record.orphan_item else root.kind,
             "source": root.source,
             "state_id": root.state_id,
             "tree_id": s64(root.tree_id),
@@ -205,18 +232,7 @@ class _Run:
             "inode_transid": None if inode is None else s64(inode["transid"]),
             "kind": kind,
             "attached": int(attached),
-            "names": json.dumps(
-                [
-                    {
-                        "parent": n.parent,
-                        "name": _text(n.name),
-                        "name_hex": n.name.hex(),
-                        "index": n.index,
-                        "extended": n.extended,
-                    }
-                    for n in record.names
-                ]
-            ),  # fmt: skip
+            "names": json.dumps(names),
             "size": None if inode is None else s64(inode["size"]),
             "mode": None if inode is None else inode["mode"],
             "xattrs": json.dumps(
@@ -235,7 +251,9 @@ class _Run:
         mode = None if inode is None else inode["mode"]
         base = self._base(root)
 
-        if kind == "dir":
+        if kind == "dir" and root.kind == "orphan_node":
+            pass  # recorded: a directory inode in a lone leaf says nothing about its content
+        elif kind == "dir":
             parts = self._claim((*base, *parts), record.objectid)
             try:
                 self.out.make_dir(parts, mode, _times(inode))
@@ -280,7 +298,10 @@ class _Run:
                     if row["status"] != "complete":
                         parts = (*parts[:-1], parts[-1] + PARTIAL)
                     row["output_path"] = _text(b"/".join(parts))
-        row["path"], row["path_raw"] = _text(b"/".join(where[0])), b"/".join(where[0])
+        tree_path = parts[len(base) :] if row["output_path"] else where[0]
+        if record.orphan_item and not row["output_path"]:
+            tree_path = parts
+        row["path"], row["path_raw"] = _text(b"/".join(tree_path)), b"/".join(tree_path)
         row["missing"], row["problems"] = json.dumps(missing), json.dumps(problems)
 
         columns = ", ".join(row)
@@ -292,6 +313,7 @@ class _Run:
         if row["status"] == "complete" and same is not None:
             self.first_copy.setdefault(same, artifact_id)
         self.counts[row["status"]] += 1
+        self.by_source[row["source_kind"], row["status"]] += 1
         self._provenance(artifact_id, record, reads)
         self.out.record(
             {k: v for k, v in row.items() if k != "path_raw"}
@@ -308,6 +330,28 @@ class _Run:
                 "inode": inode,
             }
         )
+
+    def _orphan_item(self, root: Root, record: InodeRecord, names: list, problems: list):
+        """Where an ORPHAN_ITEM inode is written, and its names with the former ones added."""
+        inode = record.inode
+        if inode is not None and inode["nlink"]:
+            problems.append(f"listed under ORPHAN_ITEM although nlink is {inode['nlink']}")
+        label = str(record.objectid).encode()
+        if inode is not None and not record.names:
+            seen = set()
+            for parent, name, index, extended, generation in former_names(
+                self.conn, root.tree_id, record.objectid, inode["generation"]
+            ):
+                if (parent, name) in seen:
+                    continue
+                seen.add((parent, name))
+                names.append(
+                    {"parent": parent, "name": _text(name), "name_hex": name.hex(), "index": index,
+                     "extended": extended, "former": True, "leaf_generation": generation}
+                )  # fmt: skip
+                if len(seen) == 1:
+                    label += b"_" + safe_component(name, record.objectid)[0]
+        return (ORPHAN_ITEMS, label), names
 
     def _provenance(self, artifact_id: int, record: InodeRecord, reads: list) -> None:
         by_item = {(extent.leaf, extent.slot): (extent, digest) for extent, digest in reads}
@@ -361,19 +405,27 @@ def recover_roots(
     *,
     no_holes: bool,
     dedup: bool = True,
+    orphans: tuple[tuple[Root, Leaf], ...] = (),
     note: Callable[[str], None] = lambda line: None,
 ):
-    """Recover every root into `out`; the run (counts, bytes) and the gaps per root source."""
+    """Recover every root, then every orphan leaf, into `out`: the run (counts, bytes) and the
+    gaps per root. Anchored roots come first, so that an orphan leaf's copy of a file a root
+    also gives is recognised as the duplicate."""
     run = _Run(conn, reader, out, note, no_holes=no_holes, dedup=dedup)
-    current = {tree: _current_inodes(conn, tree) for tree in {root.tree_id for root in roots}}
+    trees = {root.tree_id for root in roots} | {root.tree_id for root, _ in orphans}
+    current = {tree: _current_inodes(conn, tree) for tree in trees}
     gaps = {}
-    for root in roots:
+    for root, leaf in (*((root, None) for root in roots), *orphans):
         run.start_root(root)
-        leaves, found = tree_leaves(conn, root)
-        gaps[f"{root.source} tree {root.tree_id}"] = tuple(found)
-        for line in found:
-            note(f"gap: {root.source} tree {root.tree_id}: {line}")
+        if leaf is None:
+            leaves, found = tree_leaves(conn, root)
+            gaps[f"{root.source} tree {root.tree_id}"] = tuple(found)
+            for line in found:
+                note(f"gap: {root.source} tree {root.tree_id}: {line}")
+        else:
+            leaves = [leaf]
         inodes = collect(conn, leaves)
+        run.last_objectid = max(inodes, default=None) if leaf is not None else None
         located = paths(inodes)
         for objectid in sorted(located):
             record = inodes[objectid]
@@ -394,12 +446,15 @@ def recover(
     roots: tuple[str, ...] = ("current",),
     tree_id: int | None = ondisk.FS_TREE_OBJECTID,
     dedup: bool = True,
+    orphans: bool = False,
     rehash: bool = True,
     note: Callable[[str], None] = lambda line: None,
 ) -> Recovered:
     """Recover tree `tree_id` under each of `roots` into the new directory `output_dir`.
 
-    `tree_id` None means every file tree each root names (the fs tree and all subvolumes).
+    `tree_id` None means every file tree each root names (the fs tree and all subvolumes). A root
+    `all` stands for every cataloged state. `orphans` adds, after the roots, every file-tree leaf
+    that no cataloged state reaches, each read on its own.
     Raises RecoveryError, db.CatalogError, output.OutputError or dbtree.RootNotCataloged before
     anything is written. `note` receives report lines (refusals, gaps).
     """
@@ -408,8 +463,16 @@ def recover(
         scan = conn.execute(
             "SELECT image_size, image_sha256_before, unsupported_format FROM scan_runs"
         ).fetchone()
-        resolved = tuple(
-            root for spec in dict.fromkeys(roots) for root in resolve_roots(conn, spec, tree_id)
+        specs = list(dict.fromkeys(roots))
+        if "all" in specs:  # every cataloged state, where `all` stands
+            at = specs.index("all")
+            specs[at : at + 1] = [s for s in every_state(conn) if s not in specs]
+        resolved = tuple(root for spec in specs for root in resolve_roots(conn, spec, tree_id))
+        lone = tuple(
+            (root, leaf)
+            for root, leaf in (orphan_leaves(conn) if orphans else ())
+            # a log leaf does not say which subvolume it logged, so it goes with any --tree
+            if tree_id in (None, root.tree_id) or root.tree_id == ondisk.TREE_LOG_OBJECTID
         )
         with open_image(image) as img:
             if img.size != scan["image_size"]:
@@ -423,7 +486,7 @@ def recover(
             no_holes = bool(fs.fields["incompat_flags"] & ondisk.INCOMPAT["NO_HOLES"])
             with OutputTree(output_dir) as out:
                 options = {"roots": list(dict.fromkeys(roots)), "tree_id": tree_id or "all",
-                           "dedup": dedup}  # fmt: skip
+                           "dedup": dedup, "orphans": orphans}  # fmt: skip
                 recovery_id = conn.execute(
                     "INSERT INTO recovery_runs (tool_version, started_utc, image_path,"
                     " image_checked, output_dir, options) VALUES (?, ?, ?, ?, ?, ?)",
@@ -432,10 +495,14 @@ def recover(
                 ).lastrowid  # fmt: skip
                 run, gaps = recover_roots(
                     conn, fs.reader, out, recovery_id, resolved,
-                    no_holes=no_holes, dedup=dedup, note=note,
+                    no_holes=no_holes, dedup=dedup, orphans=lone, note=note,
                 )  # fmt: skip
                 summary = {
                     "artifacts": dict(run.counts),
+                    "by_source": {
+                        f"{kind} {status}": n for (kind, status), n in run.by_source.items()
+                    },
+                    "orphan_leaves": len(lone),
                     "bytes_written": run.bytes_written,
                     "gaps": {source: list(lines) for source, lines in gaps.items()},
                 }
@@ -445,6 +512,7 @@ def recover(
                 )
                 conn.commit()
         return Recovered(recovery_id, os.fspath(output_dir), rehash, resolved, gaps,
-                         dict(run.counts), run.bytes_written)  # fmt: skip
+                         dict(run.counts), run.bytes_written, len(lone),
+                         dict(run.by_source))  # fmt: skip
     finally:
         conn.close()

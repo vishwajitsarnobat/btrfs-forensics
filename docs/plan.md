@@ -1142,6 +1142,71 @@ hostile-input tests; every new column documented; a fresh clone builds the new i
 **M4c status 2026-09-21: done** (catalog.md, M4c entry; tests in `tests/test_slack.py` and
 `tests/test_mutate.py`).
 
+**M4d: recovery without an anchor: unreferenced leaves and the kernel's ORPHAN_ITEM** (design
+fixed 2026-09-21, before implementation).
+
+*What it is.* `btrfska recover … --orphans` adds two sources to the anchored roots, and labels
+every artifact with the one it came from (`artifacts.source_kind`):
+- `orphan_node`: a valid leaf of a file tree (tree 5 or a subvolume) that **no cataloged state
+  reaches**. "Reached" is computed from the database: the leaves of every file tree under every
+  row of `states`. This is stricter than `nodes.status`, which knows only the current and the
+  backup roots. Such leaves exist on every image looked at so far (26 on `m3_wide`, 4 on
+  `sandbox.img`): mostly versions that were written out in the middle of a transaction and
+  replaced before its commit, so no root tree ever named them, and leaves whose root tree is gone.
+- `orphan_item`: an inode that a tree lists under ORPHAN_ITEM (objectid -5, type 48, offset =
+  inode number): unlinked while still open, not yet cleaned up when that tree was written. Its
+  INODE_ITEM and extents are intact and it has no name. It is found by the anchored walk of that
+  tree; the label, and the search for the name it used to have, are what is new.
+
+*Decisions.*
+1. **One leaf at a time, no stitching.** An orphan leaf is read on its own: the inodes whose
+   INODE_ITEM it holds, with the names, attributes and extents that are in the same leaf. A file
+   whose extent items continue in another leaf comes out `partial` with the reason
+   `continues_elsewhere`. Joining leaves of different generations into one file is reconstruction
+   (M5, orphan graph), not recovery, and a wrong join would produce a file that never existed.
+2. **Paths.** An orphan leaf rarely holds the parent directory, so its files land under
+   `orphan_nodes/tree_ID/leaf_BYTENR_genG/.btrfska-unattached/PARENT/NAME`. The parent's objectid
+   is kept; resolving it against other states is M5.
+3. **What "only recoverable here" means, and how it is shown.** With deduplication on, an orphan
+   artifact whose tree, inode, creation generation and extent signature equal an anchored artifact
+   of the same run is a `duplicate`. `recover --root all --orphans` therefore leaves, as
+   `orphan_node` artifacts that are `complete` and not duplicates, exactly the file versions no
+   cataloged root can give. `--root all` (every state) is new for that.
+4. **Former names for ORPHAN_ITEM inodes.** The database is searched for INODE_REF and
+   INODE_EXTREF items of the same objectid in leaves of the same tree that also hold an INODE_ITEM
+   of the same creation generation (an inode number alone proves nothing: `sandbox.img` reuses
+   257). They are recorded in `names` with `"former": true` and the generation of the leaf they
+   came from; the file is written as `.btrfska-orphan-items/INODE_NAME`.
+5. No schema change: `source_kind`, `state_id` (NULL for an orphan leaf), `root_bytenr` and
+   `root_generation` (the leaf itself for an orphan leaf) already exist. The document is updated.
+
+*Changed during implementation (2026-09-21), because the first version fooled itself.* A trial
+image had 85 root-tree candidates, and the catalog evaluated the newest 64 (`MAX_STATES`, a bound
+meant for a terminal report). Six deleted files then looked "recoverable only from orphan
+leaves", when root trees that had simply not been evaluated reached them. Two corrections:
+- the catalog evaluates up to 4096 states (`catalog build --max-states`), and a bound that bites
+  is recorded in `problems` (source `roots`) instead of passing silently;
+- "orphan leaf" no longer depends on `states` at all: a file-tree leaf is an orphan when **no
+  ROOT_ITEM in any valid root-tree leaf the scan found**, of any generation, names a tree that
+  reaches it. That also covers root-tree leaves whose parent node is lost.
+With that, the trial image had no file that only an orphan file-tree leaf could give, which is
+the honest result for a sequential allocator: a victim's leaf and the root tree of its generation
+are allocated side by side and die together. What no root tree ever names is something else:
+**leaves of dropped log trees**. A file written, fsynced and deleted within one transaction
+reaches the disk only through the log tree, which the next commit drops. Those leaves (owner -6,
+not reached by the walk of the superblock's log root) are read as orphan leaves too.
+
+*Definition of done for M4d.* On synthetic trees: an orphan leaf's file is recovered and
+labelled; the same file reachable from a state is a duplicate, not a second copy; a file
+continuing in another leaf is partial; an ORPHAN_ITEM inode is labelled, keeps its content and
+gets its former name only from a leaf with the same creation generation. On `sandbox.img` and
+`m3_wide`: every orphan leaf the database lists is processed, nothing crashes, the image is
+unchanged, and every artifact has a provenance chain. The file that only an orphan source can
+recover is shown on the beyond-4-generations image (next feature), where ground truth says
+which file that must be.
+
+**M4d status 2026-09-21: done** (catalog.md, M4d entry).
+
 ### M5 — Reconstruction & timelines (~2 weeks; novelty core — start early)
 - Orphan graph: reconcile scanned nodes + edges by owner/generation/
   key-range/csum into candidate historical subtrees; reattach fragments

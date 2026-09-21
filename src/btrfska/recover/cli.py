@@ -21,10 +21,10 @@ def _note(line: str) -> None:
 
 def _root(text: str) -> str:
     kind, _, number = text.partition(":")
-    if text == "current" or (kind in ("backup", "state") and number.isdigit()):
+    if text in ("current", "all") or (kind in ("backup", "state") and number.isdigit()):
         return text
     raise argparse.ArgumentTypeError(
-        f"invalid root {text!r}: expected current, backup:GEN or state:ID"
+        f"invalid root {text!r}: expected current, backup:GEN, state:ID or all"
     )
 
 
@@ -45,6 +45,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
             roots=tuple(args.root or ["current"]),
             tree_id=args.tree,
             dedup=not args.no_dedup,
+            orphans=args.orphans,
             rehash=not args.no_rehash,
             note=lambda line: _note(f"btrfska recover: {line}"),
         )
@@ -62,6 +63,15 @@ def cmd_recover(args: argparse.Namespace) -> int:
             f"root {root.source}: state {root.state_id}, tree {root.tree_id} at {root.bytenr} "
             f"generation {root.generation} level {root.level}, "
             f"{len(done.gaps[f'{root.source} tree {root.tree_id}'])} gaps"
+        )
+    if args.orphans:
+        kinds = ("orphan_node", "orphan_item")
+        found = {k: sum(n for (kind, _), n in done.by_source.items() if kind == k) for k in kinds}
+        only = sum(done.by_source.get((k, "complete"), 0) for k in kinds)
+        print(
+            f"orphan sources: {done.orphan_leaves} leaves no root tree leads to; artifacts from "
+            f"orphan_node {found['orphan_node']}, from orphan_item {found['orphan_item']}; "
+            f"{only} complete and not a duplicate of anything the roots gave"
         )
     counts = ", ".join(f"{name} {done.counts.get(name, 0)}" for name in STATUSES)
     print(f"artifacts: {counts}; {done.bytes_written} bytes written")
@@ -87,7 +97,14 @@ def add_parser(sub) -> None:
         "--root",
         action="append",
         type=_root,
-        help="current, backup:GEN or state:ID (see `catalog info`); repeatable; default current",
+        help="current, backup:GEN, state:ID, or `all` for every cataloged state; repeatable; "
+        "default current",
+    )
+    parser.add_argument(
+        "--orphans",
+        action="store_true",
+        help="after the roots, also read every file-tree leaf no cataloged state reaches, and "
+        "label inodes a tree lists under ORPHAN_ITEM",
     )
     parser.add_argument(
         "--tree",
