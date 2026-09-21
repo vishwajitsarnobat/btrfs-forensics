@@ -20,6 +20,68 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — M4e: the deep image, EXP-006, EXP-004 §6.8, and M4 done
+
+- **Branch:** `feature/m4-deep-image` (from `main` at `cf895f1`). New
+  `corpus/vm/scenarios/deep.guest.sh`, `experiments/EXP-006.md`, `experiments/exp006.py`,
+  `tests/test_deep.py`; changed `corpus/manifest.tsv` (`m4_deep`, `m4_deep_lost_parent`: 18
+  images), `corpus/mutate.py` (`lose-root-node`), `experiments/EXP-004.md` (§6.8),
+  `experiments/exp004.py` and `scan/roots.py` (`max_states` passed through),
+  `recover/engine.py` (one label), `tests/test_vm_images.py`, plan.md, paper-draft.md, README.
+- **Planned first** (`64dd90c`). The scenario had been drafted during M4d: its trial builds are
+  what exposed the 64-state bound there. EXP-006 says so in its registration: it is not blind.
+- **Image `m4_deep`** (scenario `deep`, `commit=300`, no compression, no balance, 48 subvolumes):
+  24 victims, each committed in exactly one generation, inline and regular; 8 flash files, each
+  written, fsynced and deleted within one transaction; one file unlinked while open at the last
+  commit; power-off without unmount. The serial log holds a SHA-256 for every one of them.
+  Regular victims grow from round to round and get a separator file behind them, or the next one
+  reuses the hole (seen in the first trial: every regular victim came back `partial`).
+- **EXP-006** (N = 5 builds on the dev host, median and range; hashes against the log):
+
+  | | Median | Range |
+  |---|---|---|
+  | superblock generation | 93 | 93–93 |
+  | states, of them named by the superblock | 79, 4 | 78–80, 4–4 |
+  | victims from the current or a backup root | 0 of 24 | 0–0 |
+  | victims only from states beyond them | 21 | 21–21 |
+  | victims only from an orphan leaf | 0 | 0–0 |
+  | victims not recovered (the three oldest) | 3 | 3–3 |
+  | flash files from any root | 0 of 8 | 0–0 |
+  | flash files only from an orphan (dropped log) leaf | 8 | 8–8 |
+  | open-unlinked file as `orphan_item`, with its name | 1 | 1–1 |
+
+  All four registered hypotheses hold. What it says: backup roots are useless on a deep history
+  and discovered states recover most of it; orphan file-tree leaves add no committed file; what
+  was never committed (fsynced, then deleted) is recoverable only from dropped log leaves.
+- **EXP-004 §6.8** (prediction registered in `0e57018`, before the script ran on either image).
+  `m4_deep` contains **no** root-tree leaf whose parent node was lost: 77 nodes, 79 leaves, every
+  node a state. P1 to P3 hold. Because a natural history does not produce the case,
+  `m4_deep_lost_parent` corrupts every copy of the oldest root-tree node that has a child no
+  other node points to (generation 17 on this build). Both tools then report the orphaned leaf:
+  btrfska as a level-0 state with completeness 0.85, find-root as "generation 17 level 0",
+  because its "highest level per generation" falls back to the leaves when the node is
+  unreadable. P1 to P3 hold there too, and P4 as registered. So the case does not separate the
+  tools. Both images also hold the opposite case once: a generation-7 leaf that a later node
+  still references, which find-root prints and btrfska does not call a state. `exp004.py`
+  gained `--max-states` after the first run printed 64 of 64 (78 candidates); predictions and
+  defaults are unchanged. Totals: 394 of 394 states inside the map printed, 0 of 136 outside.
+- **One label fixed.** An ORPHAN_ITEM inode met inside a lone leaf was labelled `orphan_item`
+  with no state; it is reached through an orphan leaf, so it stays `orphan_node` and its
+  problems say it is ORPHAN_ITEM-listed. The deep image's tests found it.
+- **M4's definition of done** is checked bullet by bullet in plan.md ("M4 status"), each with its
+  test. The migration gate of §4.3 is green. `legacy/` is **not** deleted and no tag is made:
+  `exp001.py` and `exp005.py legacy` regenerate published numbers by running the prototype, so
+  that is the maintainer's decision.
+- **Verification.** `uv run pytest`: 902 passed, 0 skipped; 8 new
+  tests in `tests/test_deep.py` assert the three claims against the image's own log, and the
+  lost-parent image against its source, never as counts. Ruff clean. `sandbox.img` and all 18
+  corpus images unchanged. Corpus scripts changed, so a fresh clone of the branch ran
+  `./setup.sh`.
+- **Limits.** One scenario, a few seconds old, 512 MiB, no discard, no concurrent writers; the
+  3-of-24 loss is a property of this layout, not a rate. No baseline tool was run on the deep
+  image apart from find-root for root trees. Timings in this entry's session are not quoted: the
+  host was under unrelated load.
+
 ## 2026-09-21 — M4d: recovery without an anchor: orphan leaves, dropped log trees, ORPHAN_ITEM
 
 - **Branch:** `feature/m4-orphan-recovery` (from `main` at `38fe338`). Changed

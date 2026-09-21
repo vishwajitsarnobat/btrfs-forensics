@@ -945,7 +945,12 @@ class RootsScan:
 
 
 def discover_image(
-    img: ImageHandle, fs: Filesystem, *, full_sweep: bool = False, workers: int = 1
+    img: ImageHandle,
+    fs: Filesystem,
+    *,
+    full_sweep: bool = False,
+    workers: int = 1,
+    max_states: int = MAX_STATES,
 ) -> RootsScan:
     """Scan the image (as `btrfska scan` plans it) and run old-root discovery on the result."""
     plan = plan_scan(fs, img.size, full_sweep)
@@ -955,6 +960,6 @@ def discover_image(
     index = index_records(records, ctx)
     discovery = discover(
         img, index, ctx=ctx, chunk_map=fs.chunk_map, known=known_roots(fs.fields),
-        log_live=reach.log_logical, walk_failures=reach.walk_failures,
+        log_live=reach.log_logical, walk_failures=reach.walk_failures, max_states=max_states,
     )  # fmt: skip
     return RootsScan(plan, index, discovery, reach.problems)

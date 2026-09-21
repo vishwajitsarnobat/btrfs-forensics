@@ -221,7 +221,11 @@ class _Run:
             parts, names = self._orphan_item(root, record, names, problems)
         row = {
             "recovery_id": recovery_id,
-            "source_kind": "orphan_item" if record.orphan_item else root.kind,
+            # how the inode was reached: a lone leaf stays `orphan_node` even when it lists the
+            # inode under ORPHAN_ITEM (the path and the problems still say so)
+            "source_kind": (
+                "orphan_item" if record.orphan_item and root.kind == "anchored_root" else root.kind
+            ),
             "source": root.source,
             "state_id": root.state_id,
             "tree_id": s64(root.tree_id),
@@ -334,6 +338,7 @@ class _Run:
     def _orphan_item(self, root: Root, record: InodeRecord, names: list, problems: list):
         """Where an ORPHAN_ITEM inode is written, and its names with the former ones added."""
         inode = record.inode
+        problems.append("the tree lists this inode under ORPHAN_ITEM: unlinked, not cleaned up")
         if inode is not None and inode["nlink"]:
             problems.append(f"listed under ORPHAN_ITEM although nlink is {inode['nlink']}")
         label = str(record.objectid).encode()
