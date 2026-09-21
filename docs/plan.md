@@ -1649,8 +1649,8 @@ one run of 15 (365/353/18/828), the async and sync rows never.
 
 - **Primary target:** DFRWS EU/USA (FSI:DI) — the natural venue for this
   literature (deadline check needed); fallback IEEE Access (where Beyond
-  Carving landed; fast OA). Re-check DFRWS APAC 2026 (19–22 Oct) accepted
-  papers in October.
+  Carving landed; fast OA). DFRWS APAC 2026 (19–22 Oct) accepted papers
+  were checked on 2026-09-21: no file-system paper (research.md §11.1).
 - **Paper 1 (tool + method):** "filesystem-state archaeology" — C1, C3, C4,
   C6 + evaluation vs the full baseline set on the released corpus (C7).
   - Structure maps to milestones: background/format (existing docs),
@@ -1674,7 +1674,13 @@ one run of 15 (365/353/18/828), the async and sync rows never.
 - **Artifact:** `uvx` installable tool + Zenodo corpus + EXP scripts that
   regenerate every table/figure.
 - Re-run the prior-art watch (research.md §9) before M5 starts and before
-  submission.
+  submission. **Done before M5 on 2026-09-21** (research.md §11): nothing found
+  changes C3 or C6. Still to do before submission.
+- **Deadline found by that re-run:** DFRWS EU is now the Digital Forensics
+  Conference Europe 2027 (Edinburgh, 30 March to 2 April 2027); full papers are
+  due **9 October 2026** (abstract 2 October; 10 pages, double-blind). Whether
+  paper 1 aims for it is the maintainer's decision; the milestones do not
+  assume it.
 
 ### Paper-readiness experiments (2026-09-15, from the paper-draft review)
 
