@@ -1085,6 +1085,60 @@ kinds. Default: `--root current --tree 5`.
 **M4b status 2026-09-21: done** (catalog.md, M4b entry). Each bullet of its definition of done
 is a test in `tests/test_recover.py` or `tests/test_readonly.py`.
 
+**M4c: the archaeology port, part 1: what lies beyond `nritems`** (design fixed 2026-09-21,
+before implementation; part 2, M4d, is recovery from unreferenced leaves and ORPHAN_ITEMs).
+
+*What EXP-005 changed.* On a filesystem the kernel has written since v4.9 this area is empty,
+except in blocks `mkfs.btrfs` wrote and the kernel never rewrote. The port therefore does not
+"recover deleted items"; it **describes** what a block's slack holds, so that (a) mkfs remnants
+are recognised for what they are, (b) anything else stands out for the C5 detector, and (c) a
+filesystem last written by an older kernel, where the prototype's technique does apply, is read
+correctly. The parsers are ported to the spec, not line by line.
+
+*Decisions.*
+1. `recover/slack.py`, pure functions over one block's bytes:
+   - `slack_range`: the two ranges `prepare_eb_write` zeroes (moved here from
+     `experiments/exp005.py`, which imports it);
+   - **stale items**: item headers on the leaf's 25-byte grid, from slot `nritems` to the end of
+     the slack. A slot counts when it is not all-zero, its key type is a known item type and its
+     data range lies inside the block. Each records where its data lies: `in_slack` (the payload
+     is still there, and is kept), `overlaps_live` (live items now use that space), `empty`;
+   - **stale key pointers**: the same on the 33-byte grid: block pointer non-zero and
+     sector-aligned, generation non-zero and not above the block's own, known key type;
+   - **both grids in both kinds of block.** A leaf reallocated as an internal node keeps leaf
+     remnants, and the reverse (Bhat & Wani 2018). The prototype slid its 25-byte window from the
+     *start of the node's slack*, which is off the leaf grid unless `33 × nritems` is a multiple
+     of 25; grids here are anchored at the end of the header, where the items were;
+   - `slack_class`: `zero`; `stale_structures` when the first grid slot of the slack is a valid
+     stale entry (what mkfs and old kernels leave); `other` for non-zero content that does not
+     begin with one (what a message hidden after Toolan & Humphries looks like). This is a
+     description, not a verdict: forged stale headers would pass as `stale_structures`. Deciding
+     is M6's job, with a measured false-positive rate.
+2. **Stored at build time** (schema version 4), once per distinct content like every parsed table:
+   `contents` gains `slack_start`, `slack_len`, `slack_nonzero`, `slack_class`; new tables
+   `stale_items` and `stale_key_ptrs`. Only valid blocks are described.
+3. **Prototype parity, without its defects.** On `sandbox.img` the prototype reports 0 orphan
+   items, 0 internal pointers, 0 internal residuals and 4 saved leaf slacks. Golden test: our rows
+   for those four physical copies have the prototype's slack length and non-zero count; no stale
+   item of a file-tree type exists; and we also describe the extent-tree leaf the prototype skips
+   (it routes owner-2 leaves to a parser that ignores slack). Defect #8 is asserted the right way
+   round and relative to the image: every EXTENT_DATA_REF in `extent_backrefs` that names an
+   inode and offset a `file_extents` row also names has that row's `disk_bytenr` as its extent
+   address (the key objectid), never the key offset.
+4. **A planted-slack image** for the case no honest image has: `corpus/mutate.py plant-slack`
+   writes a message into the slack of one leaf and of one internal node of a copy of `m3_wide`
+   and recomputes both checksums, as Toolan & Humphries did by hand. New manifest row
+   `m4_planted_slack`. Expected: both blocks `other`, every other block as in `m3_wide`.
+5. Hostile input: random blocks, `nritems` beyond capacity, headers pointing outside the block,
+   data ranges that wrap: no exception, nothing read outside the block.
+
+*Definition of done for M4c.* The golden test of decision 3; the claim of EXP-005 as a database
+query on every corpus image (no kernel-written block has `slack_nonzero` > 0, relative to a
+control formatted in the test); `m4_planted_slack` flags exactly the two planted blocks; synthetic
+pre-4.9-style leaves give back a deleted file's name and inline content from stale items;
+hostile-input tests; every new column documented; a fresh clone builds the new image with
+`./setup.sh`.
+
 ### M5 — Reconstruction & timelines (~2 weeks; novelty core — start early)
 - Orphan graph: reconcile scanned nodes + edges by owner/generation/
   key-range/csum into candidate historical subtrees; reattach fragments
