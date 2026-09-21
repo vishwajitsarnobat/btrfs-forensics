@@ -1419,6 +1419,62 @@ traces of a balance (the 21st block of the prototype's count is an empty generat
 leaf, which the kernel's checker rejects). That is the half of M5's definition of done that reads
 "`s01` yields a reconstructed historical chunk map and correctly-translated outside-map orphans".
 
+**M5b: integrity and linkage checks in historical walks** (design fixed 2026-09-21, before
+implementation).
+
+*What it is.* `node.check_block` answers two different questions with one verdict. *Is this a
+well-formed block of this filesystem?* (integrity) and *is it the block the referrer meant?*
+(linkage). The kernel needs both to hold, and so does every walk of the current state. A walk
+from an old root meets a third case all the time: the address holds a sound block, but a newer
+one than the old pointer names. Today that block is simply invalid, and what it holds is
+withheld. M5b keeps the verdict and adds the distinction.
+
+*Decisions.*
+1. **The partition**, as the M1b review fixed it. Integrity: `csum`, `bytenr`, `fsid`,
+   `chunk_tree_uuid`, `generation` (not above the superblock's, or the log rule), `nritems`,
+   `written`, `layout`, and `level` below 8. Linkage: `owner`, `parent_generation`, `first_key`,
+   and `level` against the level the referrer expects. The twelve check names, the scan records
+   and the `node_checks` rows stay as they are: a failed `level` check is an integrity failure
+   when the block's own level is 8 or above and a linkage failure otherwise, which is how
+   `copy_failure` already reads it. `check_block` becomes `check_integrity` plus
+   `check_linkage`, merged in `CHECK_NAMES` order.
+2. **`read_node(..., linkage="enforce" | "report")`.** `enforce` is the default and is today's
+   behaviour, unchanged: a copy is used only when every check holds. With `report`, when no copy
+   passes everything, the first copy whose integrity checks all hold is used, and the node says
+   which linkage checks failed (`ValidatedNode.linkage_mismatch`). `valid` keeps its meaning (the
+   kernel's rule); the new `usable` is "has a copy whose items may be read". A copy that fails
+   any integrity check is never used, in either mode.
+3. **`walk(..., linkage=)`** descends usable nodes. A flagged node's pointers are followed like
+   any other, with the expectations they imply, so a mismatch is reported where it occurs and not
+   inherited silently: every node below it is checked against its own parent pointer.
+4. **`btrfska walk --linkage report`** emits the items of flagged nodes with `linkage_mismatch`
+   naming the failed checks (and `valid` false). It is **refused for the current root**: the
+   current state is walked by the kernel's rule, always. `cat`, `tree`, `recover` and the catalog
+   keep `enforce`.
+5. **Recovery and timelines never follow a mismatched pointer.** What lies behind one is a
+   different, usually newer, block: read as part of the old state it would produce a file
+   version that never existed at that time. `recover` walks trees in the database by (bytenr,
+   generation, level), so such a pointer is a gap there. M5b makes the gap say what it is: when
+   the database holds a valid block of that address with another generation, level, owner or
+   first key, the gap line names it and the linkage checks it fails. No row is derived from a
+   mismatched block, so there is no confidence to lower yet; M6 gets the flag if a later
+   feature starts using them.
+
+*Definition of done for M5b.*
+- for every block and expectation, `check_block` returns exactly what it returned before (the
+  existing tests, unchanged, plus a property test over random blocks and expectations);
+- forged blocks with a valid checksum that fail one linkage check each (owner, generation, first
+  key, level) are unusable under `enforce`, usable under `report` with exactly that check named;
+  a block failing any integrity check, or with level 8 and above, is never usable;
+- random and bit-flipped blocks never raise and never become usable in `report` mode unless
+  they pass every integrity check;
+- on `sandbox.img` and the corpus: a walk from every backup root in `report` mode yields every
+  item the `enforce` walk yields, every additional node is flagged, and the current root gives
+  the same records in both modes;
+- `walk --linkage report` is refused for the current root; README documents the option and the
+  new key (the schema tests compare them);
+- a recovery gap names the mismatched block when the database holds one.
+
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.
