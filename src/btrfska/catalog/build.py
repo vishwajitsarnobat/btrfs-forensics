@@ -183,7 +183,8 @@ def _insert_chunk_map(
 
 
 def _insert_chunk_maps(conn: sqlite3.Connection, fs: Filesystem, found: Discovery) -> dict:
-    """The current map, then every historical map: chunk root (bytenr, generation) -> map_id."""
+    """The current map, then every historical map: chunk root (bytenr, generation, level) ->
+    map_id."""
     chunk_roots = [r.root for r in found.rediscovered if r.root.tree == "chunk"]
     current = next((root for root in chunk_roots if root.source == "current"), None)
     known = [
@@ -200,7 +201,7 @@ def _insert_chunk_maps(conn: sqlite3.Connection, fs: Filesystem, found: Discover
         known_as=("current", *known),
     )  # fmt: skip
     if root:
-        by_root[root[:2]] = map_id
+        by_root[root] = map_id
     _insert_problems(conn, "chunk_map", fs.chunk_map.problems)
     for entry in found.chunk_maps:
         map_id = _insert_chunk_map(
@@ -209,7 +210,7 @@ def _insert_chunk_maps(conn: sqlite3.Connection, fs: Filesystem, found: Discover
             missing=entry.missing if entry.root else None,
         )  # fmt: skip
         if entry.root:
-            by_root[entry.root[:2]] = map_id
+            by_root[entry.root] = map_id
     return by_root
 
 
@@ -339,7 +340,7 @@ def _insert_discovery(conn: sqlite3.Connection, found: Discovery, map_ids: dict)
                 root.level if root else None,
                 root.source if root else None,
                 _flag(root.differs_from_current) if root else None,
-                map_ids.get((root.bytenr, root.generation)) if root else None,
+                map_ids.get((root.bytenr, root.generation, root.level)) if root else None,
                 state.maps_current,
                 state.maps_historical,
                 state.maps_neither,

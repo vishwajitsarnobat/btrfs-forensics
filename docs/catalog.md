@@ -82,9 +82,14 @@ Maintenance rules:
     these as wrong hashes; the record says so and counts them in a row of their own.
 - **A bug the hostile test found:** `stripe_size` raised `KeyError` on profile flags with two bits
   set, which a forged CHUNK_ITEM or block group can carry. It now returns 0.
+- **Found in the review of the pull request:** two chunk-tree blocks claiming one address and
+  generation at different levels (a planted block) would have given two maps the same name, and
+  the unique index on `chunk_maps.name` would have stopped the build. Such maps now carry the
+  level in their name, and maps are keyed by (bytenr, generation, level) throughout; a test
+  plants the pair.
 - **A mistake in the registration, corrected in the record:** it quoted EXP-002's "26" as states
   with another chunk root; that number counts slot references. No prediction used it.
-- **Verification.** `uv run pytest`: 940 passed, 0 skipped (38 new). The claims on
+- **Verification.** `uv run pytest`: 941 passed, 0 skipped (39 new). The claims on
   `s01_discard_none_r1` are asserted against its own log and recomputed from the stored chunks,
   never as counts; the rules on forged DEV_EXTENTs, block groups and maps (13 rejection cases,
   300 random inputs). Ruff clean. `sandbox.img` and the 18 corpus images unchanged. Catalog build

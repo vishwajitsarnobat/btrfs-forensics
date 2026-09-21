@@ -100,7 +100,7 @@ went through is recorded with the read (`provenance.read_record`, `artifacts.chu
 | Column | Meaning |
 |---|---|
 | `chunk_maps.map_id` | row id; the current map is always 1 |
-| `chunk_maps.name` | `current`; `historical:GEN@BYTENR` for the map under a superseded chunk-tree root; `dev_extents` for the one map assembled from DEV_EXTENT items alone |
+| `chunk_maps.name` | `current`; `historical:GEN@BYTENR` for the map under a superseded chunk-tree root (with `/levelN` appended when blocks claim that address and generation at several levels, which only a planted block does); `dev_extents` for the one map assembled from DEV_EXTENT items alone |
 | `chunk_maps.kind` | `current`, `historical` or `dev_extents` |
 | `chunk_maps.root_bytenr`, `chunk_maps.root_generation` | *u64*; the chunk-tree root the map was walked from. NULL for `dev_extents`, which has no place in time |
 | `chunk_maps.root_level` | that root's level |

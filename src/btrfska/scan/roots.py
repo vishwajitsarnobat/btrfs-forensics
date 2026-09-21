@@ -780,7 +780,13 @@ class _Discoverer:
                             origin=f"historical chunk tree leaf {leaf} slot {item.slot}")
                 for item, leaf in walked.items
             ]  # fmt: skip
-            found = ChunkMap(chunkmaps.map_name(memo[1], memo[0]), chunks, self.chunk_map.devices)
+            # Blocks can claim one address and generation at several levels (a planted block);
+            # the maps of such roots carry the level in their name, which must be unique.
+            levels = {self.index.node(j)[2] for j in self.index.find_generation(*memo[:2])}
+            name = chunkmaps.map_name(memo[1], memo[0])
+            if levels - {memo[2]}:
+                name += f"/level{memo[2]}"
+            found = ChunkMap(name, chunks, self.chunk_map.devices)
             self.maps[memo] = (found, len(walked.found), len(walked.missing) + walked.unchecked)
         return self.maps[memo]
 
