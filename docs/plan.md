@@ -1249,6 +1249,40 @@ runs on it.
 and recorded in the catalog. Tagging `legacy-final` and deleting `legacy/` is left to the
 maintainer: EXP-001 and EXP-005 regenerate numbers by running the prototype.
 
+**M4 status 2026-09-21: done.** Parts M4b (anchored recovery), M4c (slack describers), M4d
+(orphan sources) and M4e (the deep image), with EXP-005 first and EXP-006 last. The definition
+of done, bullet by bullet, each with the test or record that shows it:
+- *migration-done criterion (§4.3).* On `sandbox.img` the new pipeline reproduces the prototype's
+  report: the same 71 generation-defined orphans, 21 of them outside the chunk map
+  (`test_sandbox_legacy_compatible_orphans_are_the_legacy_offsets`, summary `(71, 21)`); the same
+  recovered files, byte for byte (`test_sandbox_recovery_gives_the_files_the_prototype_recovered`);
+  the same leaf slacks, plus the block it skips
+  (`test_sandbox_slack_equals_what_the_prototype_saved_and_adds_the_block_it_skips`); extent
+  back-references with the address in the right key field, defect #8
+  (`test_extent_back_references_carry_the_extent_address_not_the_length`). Compression, checksum
+  dispatch, superblock mirrors and backup-root walking are M1's tests and EXP-001. Two things the
+  prototype reports are deliberately **not** reproduced, because they are wrong: its "renamed
+  inode 257" is two files with a reused number, and its slack finds are mkfs remnants, not
+  deleted items (EXP-005).
+  **The gate is green. Tagging `legacy-final` and deleting `legacy/` is left to the maintainer:**
+  `experiments/exp001.py` and `experiments/exp005.py legacy` regenerate published numbers by
+  running the prototype, so deleting it needs a decision on how those stay regenerable (run them
+  from the tag, or keep `legacy/` until the paper is submitted).
+- *deleted files recoverable from (a) anchored historical roots, (b) orphan nodes and (c) orphan
+  items, each labeled with its source.* `artifacts.source_kind`; `tests/test_deep.py` on `m4_deep`
+  for all three, against the hashes the scenario logged.
+- *on the beyond-4-generations image (b)/(c) recover a file that (a) cannot.* On `m4_deep` every
+  flash file comes back only as `orphan_node`, from a dropped log leaf, and appears under no root
+  of `--root all` (`test_flash_files_come_back_from_orphan_nodes_and_from_no_anchored_root`);
+  EXP-006 gives 8 of 8 in 5 of 5 builds. For committed files the honest answer is the opposite:
+  orphan file-tree leaves add none (EXP-006 H2), and the plan no longer expects them to.
+- *cross-generation dedup of recovered content.* By tree, inode, creation generation and extent
+  signature, within one run (`test_an_unchanged_file_is_written_once_across_roots_unless_dedup_is_off`);
+  the SHA-256 of every complete file is stored, so equal content across inodes is one query.
+Not done in M4 and moved on: reading data extents through historical chunk maps (M5, C6); files
+spanning several orphan leaves and parent paths of orphan files (M5, orphan graph); replaying the
+live log tree (M5); data checksum verification and confidence tiers (M6).
+
 ### M5 — Reconstruction & timelines (~2 weeks; novelty core — start early)
 - Orphan graph: reconcile scanned nodes + edges by owner/generation/
   key-range/csum into candidate historical subtrees; reattach fragments

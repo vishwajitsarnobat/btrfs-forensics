@@ -9,13 +9,15 @@ existed, when, what changed, what can be recovered, and whether anything was
 hidden.
 
 **Status:** M1 (substrate trust layer) and M2 (scan kernel, orphan
-classification, old-root discovery, discard experiments EXP-000 and EXP-002)
-and M3 (the evidence catalog) are done. M4 (recovery) is under way: `btrfska recover` extracts
-files from any cataloged root; recovery from unreferenced blocks comes next. The earlier
-prototype is frozen, still runnable, under `legacy/`.
-- `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID]... [--tree ID|all]`
-  extracts the files of a tree as the current, a backup or a discovered root saw them, one
-  extent at a time, with a provenance record per file. It writes only below the new directory
+classification, old-root discovery, discard experiments EXP-000 and EXP-002),
+M3 (the evidence catalog) and M4 (recovery) are done: `btrfska recover` extracts files from any
+cataloged root, from leaves no root tree leads to (dropped log trees included) and from inodes
+the kernel lists under ORPHAN_ITEM, each labelled with its source. Timelines and reconstruction
+(M5) come next. The earlier prototype is frozen, still runnable, under `legacy/`.
+- `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID|all]... [--tree ID|all] [--orphans]`
+  extracts the files of a tree as the current, a backup or a discovered root saw them, and with
+  `--orphans` also from leaves that no root tree leads to, one extent at a time, with a
+  provenance record per file. It writes only below the new directory
   `DIR`, never to an image, and never passes off a partly read file as complete.
 - `btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` finds tree
   blocks of the filesystem anywhere on the image, including chunks that have
