@@ -20,6 +20,23 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — Merged branches are kept; the 22 deleted ones are restored
+
+- **Branch:** `docs/keep-merged-branches` (from `main` at `ed47e59`). One rule in `CONTRIBUTING.md`.
+- **What happened.** The history rewrite of 2026-09-21 required deleting the ten merged branches of
+  that time, because they held the old commits. After it, every feature branch was deleted when
+  its pull request was merged, which `CONTRIBUTING.md` §1 then prescribed. The maintainer wants the
+  feature branches to stay visible on GitHub.
+- **Restored.** All 22 deleted branches were recreated on GitHub, each at the tip its pull request
+  was merged from, translated through `docs/commit-hash-map-2026-09-21.tsv` for the twelve that
+  predate the rewrite (where a branch had two pull requests, at the later tip). Every restored tip
+  is an ancestor of `main`, and no branch reaches a commit with the removed trailer lines. With
+  `feature/m1-backup-roots` and `main` the repository has 24 branches.
+- **Rule changed.** §1 step 8 now says: merge with a merge commit and keep the branch.
+- **Do not use GitHub's "Restore branch" button on pull requests #1 to #18:** it would bring back
+  the pre-rewrite commits. Those remain reachable only through GitHub's read-only `refs/pull/N/head`
+  references, which only GitHub Support can remove.
+
 ## 2026-09-21 — Fix: a CI run on main could be cancelled
 
 - **Branch:** `fix/ci-never-cancel-main` (from `main` at `2b41949`). `.github/workflows/ci.yml`, one
