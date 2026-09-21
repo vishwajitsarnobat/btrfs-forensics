@@ -1659,7 +1659,7 @@ EXP-008) and M5d (timelines), after the prior-art re-run (research.md §11). Bul
   (btrfs-progs 6.6.3) cannot make a filesystem with simple quotas, so nothing could test it
   (M5d, decision 8).
 - **Open, and moved to a follow-up (M5e) instead of being claimed:**
-  - *replay of the live log tree in recovery.* The timeline reads log trees, live and dropped,
+  - *replay of the live log tree in recovery* (**done since: M5e-1, 2026-09-22**). The timeline reads log trees, live and dropped,
     and files each under the subvolume its log root names; `recover` still leaves the live log
     alone and reads dropped log leaves without saying which subvolume they logged. `m2_logtree`
     has the ground truth for it (two fsynced files and one appended file, hashes logged).
@@ -1703,6 +1703,10 @@ is `partial` with `not_logged`. On `m4_deep` the flash files come out under the 
 log root names, hash-exact. Synthetic: overlay at the front, in the middle and at the end of a
 base extent, over an inline base, a log that shrinks the file, a reused inode number (no base),
 generation 0. README and evidence-db.md document it.
+
+**M5e-1 status 2026-09-22: done** (catalog.md, M5e-1 entry; `tests/test_logs.py`). Of the three
+items M5's status left open, two remain: deleted-subvolume recovery on a real image, and the
+btrfscue comparison.
 
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree

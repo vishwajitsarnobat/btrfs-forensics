@@ -596,7 +596,7 @@ gaps go to stderr.
 
 ### `btrfska recover`
 
-`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--graph] [--maps own|current] [--no-dedup] [--no-rehash]`
+`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--graph] [--logs] [--maps own|current] [--no-dedup] [--no-rehash]`
 extracts files. `DB` is the evidence database built from `IMAGE` (`catalog build`, best with
 `--full-sweep`); the image's size and SHA-256 must match the ones recorded there (`--no-rehash`
 skips the hash, and the run is recorded as not checked).
@@ -632,7 +632,7 @@ skips the hash, and the run is recorded as not checked).
   it. Such leaves are versions written out in the middle of a transaction and replaced before
   its commit, or leaves whose root tree is gone. Leaves of **dropped log trees** count too: what
   `fsync` wrote between two commits, which no root tree ever named (the log the superblock still
-  names is left alone; replaying it is plan.md M5). They go to `orphan_nodes/tree_log/`. One leaf at a time, never joined with another: a file whose
+  names is read with `--logs`). They go to `orphan_nodes/tree_log/`. One leaf at a time, never joined with another: a file whose
   items may continue in the next leaf is `partial` with the reason `continues_elsewhere`. Files
   go to `DIR/orphan_nodes/tree_ID/leaf_BYTENR_genG/`. With deduplication on, an orphan copy of
   something a root also gives is a `duplicate`, so after `--root all --orphans` the `complete`
@@ -656,6 +656,19 @@ skips the hash, and the run is recorded as not checked).
   written before the INODE_ITEM's last change; and a parent directory the leaf does not hold is
   named from other leaves of the tree when its number has exactly one name there. Two candidates
   that differ mean no join, and the artifact's problems say so.
+- **`--logs`: log trees, under the subvolume they logged, replayed.** What `fsync` wrote since
+  the last commit is in a log tree; a crash leaves the superblock pointing at it, and a commit
+  drops it. A log root tree holds one ROOT_ITEM per logged subvolume, whose key offset is the
+  subvolume's id, so every log tree the scan found, live or dropped, is read under its subvolume
+  (`source` `log:BYTENR@GEN`, `source_kind` `log_tree`, output under
+  `DIR/log_trees/subvol_ID/log_BYTENR_genG/`). It is replayed read-only, as the kernel would at
+  mount, over the subvolume's tree in the newest cataloged state older than the log: a logged
+  extent replaces its range, the rest of a base extent stays, the logged INODE_ITEM gives the
+  size. Only an inode with the same creation generation is a base. The artifact's `joined` names
+  the log root and the base state. **In a log tree a range without an extent item is not a
+  hole:** a fast fsync logs only what changed. Without a base such a range is `not_logged` and
+  the file is `partial`; the lone log leaves of `--orphans` follow the same rule. An inode logged
+  with generation 0 (the kernel's exists-only mode) is recorded, not written.
 - **A file is not `complete` when one of its extents is newer than its INODE_ITEM** (`missing`
   reason `inode_item_older_than_extent`). A commit always updates the inode item, so no committed
   tree holds such a file; a leaf written in the middle of a transaction can, and then the data is

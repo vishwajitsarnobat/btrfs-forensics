@@ -37,8 +37,11 @@ class Root:
     generation: int
     level: int
     # anchored_root; orphan_node: `bytenr` is a leaf no state reaches, read on its own;
-    # orphan_graph: `bytenr` is the top of a fragment (`fragment_roots`), or such a leaf with joins
+    # orphan_graph: `bytenr` is the top of a fragment (`fragment_roots`), or such a leaf with joins;
+    # log_tree: a subvolume's log tree, named by a log root tree (recover/logs.py)
     kind: str = "anchored_root"
+    subvolume: int | None = None  # log_tree: the subvolume it logged
+    named_by: int | None = None  # log_tree: the log root leaf whose ROOT_ITEM names it
 
 
 @dataclass(frozen=True)

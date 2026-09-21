@@ -46,6 +46,7 @@ from btrfska.recover.inodes import (
     paths,
     safe_component,
 )
+from btrfska.recover.logs import base_root, log_roots, replay
 from btrfska.recover.maps import Readers
 from btrfska.recover.output import PARTIAL, FileSink, OutputError, OutputTree
 from btrfska.substrate import items, ondisk
@@ -137,6 +138,7 @@ class _Run:
         self.bytes_written = 0
         self.last_objectid: int | None = None  # of the orphan leaf being read, else None
         self.uncommitted = False  # the root being read is no committed tree (orphan sources)
+        self.lone_log_leaf = False  # a leaf of a log tree read on its own, without any base
 
     # ---- output names -------------------------------------------------------------------
     def _claim(self, parts: tuple[bytes, ...], objectid: int) -> tuple[bytes, ...]:
@@ -154,6 +156,9 @@ class _Run:
     def _base(root: Root) -> tuple[bytes, ...]:
         log = root.tree_id == ondisk.TREE_LOG_OBJECTID
         tree = b"tree_log" if log else f"tree_{root.tree_id}".encode()
+        if root.kind == "log_tree":
+            where = f"log_{root.bytenr}_gen{root.generation}".encode()
+            return b"log_trees", f"subvol_{root.subvolume}".encode(), where
         if root.kind == "orphan_graph":
             return b"orphan_graph", tree, f"fragment_{root.bytenr}_gen{root.generation}".encode()
         if root.kind == "orphan_node":
@@ -181,6 +186,10 @@ class _Run:
             tail = size is not None and extent.file_offset + extent.length == size
             if cut and tail and extent.kind == "implicit_hole":
                 missing.append([extent.file_offset, extent.length, "continues_elsewhere"])
+            elif (record.log_only or self.lone_log_leaf) and extent.kind == "implicit_hole":
+                # A fast fsync logs only what changed: without the base tree this range is not
+                # a hole, it is unknown.
+                missing.append([extent.file_offset, extent.length, "not_logged"])
             if extent.file_offset != sink.written:  # an overlap: FileAssembly reports it
                 missing.append([extent.file_offset, extent.length, "overlap"])
                 reads.append((extent, None))
@@ -251,6 +260,8 @@ class _Run:
     def _source_kind(root: Root, record: InodeRecord) -> str:
         if record.orphan_item and root.kind == "anchored_root":
             return "orphan_item"
+        if root.kind == "log_tree":
+            return "log_tree"
         # a lone leaf read with --graph: `orphan_graph` only for what a join contributed to
         return "orphan_graph" if root.kind != "anchored_root" and record.joins else root.kind
 
@@ -277,7 +288,7 @@ class _Run:
             "source_kind": self._source_kind(root, record),
             "source": root.source,
             "state_id": root.state_id,
-            "tree_id": s64(root.tree_id),
+            "tree_id": s64(root.tree_id if root.subvolume is None else root.subvolume),
             "root_bytenr": s64(root.bytenr),
             "root_generation": s64(root.generation),
             "objectid": s64(record.objectid),
@@ -318,6 +329,8 @@ class _Run:
         elif kind == "symlink":
             row["symlink_target"], found = self._symlink_target(record)
             problems += found
+        elif record.exists_only:
+            pass  # recorded: the log says that the inode exists, and nothing of its content
         elif kind in ("file", "unknown") and (kind == "file" or record.extents):
             signature = row["extent_signature"] = _signature(record)
             same = (root.tree_id, record.objectid, row["inode_generation"], signature)
@@ -483,6 +496,7 @@ def recover_roots(
     orphans: tuple[tuple[Root, Leaf], ...] = (),
     fragments: tuple[Root, ...] = (),
     graph: bool = False,
+    logs: tuple[Root, ...] = (),
     note: Callable[[str], None] = lambda line: None,
 ):
     """Recover every root, then every orphan leaf, into `out`: the run (counts, bytes) and the
@@ -495,12 +509,13 @@ def recover_roots(
     gaps = {}
     sectorsize = readers.current.ctx.sectorsize
     covered: set[int] = set()  # leaves read under a fragment are not read again on their own
-    for root, leaf in (*((root, None) for root in (*roots, *fragments)), *orphans):
+    for root, leaf in (*((root, None) for root in (*roots, *fragments, *logs)), *orphans):
         if leaf is not None and leaf.content_id in covered:
             continue
         run.start_root(root)
         run.reader = readers.reader(root)
         run.uncommitted = root.kind != "anchored_root"
+        run.lone_log_leaf = leaf is not None and root.tree_id == ondisk.TREE_LOG_OBJECTID
         named: dict = {}
         if leaf is None:
             leaves, found = tree_leaves(conn, root)
@@ -511,7 +526,12 @@ def recover_roots(
             leaves = [leaf]
         inodes = collect(conn, leaves)
         run.last_objectid = max(inodes, default=None) if leaf is not None else None
-        if root.kind == "orphan_graph":
+        if root.kind == "log_tree":
+            covered.update(found_leaf.content_id for found_leaf in leaves)
+            below = base_root(conn, root)
+            base = None if below is None else collect(conn, tree_leaves(conn, below)[0])
+            inodes, named = replay(inodes, base, below, root, sectorsize)
+        elif root.kind == "orphan_graph":
             covered.update(found_leaf.content_id for found_leaf in leaves)
             join = pointer_join(root.bytenr, root.generation, root.level, len(leaves),
                                 len(gaps[f"{root.source} tree {root.tree_id}"]))  # fmt: skip
@@ -536,6 +556,7 @@ def recover(
     dedup: bool = True,
     orphans: bool = False,
     graph: bool = False,
+    logs: bool = False,
     maps: str = "own",
     rehash: bool = True,
     note: Callable[[str], None] = lambda line: None,
@@ -545,7 +566,9 @@ def recover(
     `tree_id` None means every file tree each root names (the fs tree and all subvolumes). A root
     `all` stands for every cataloged state. `orphans` adds, after the roots, every file-tree leaf
     that no cataloged state reaches, each read on its own. `graph` reads them joined where a join
-    is justified (recover/graph.py): fragments first, then the leaves under none. `maps` is `own`
+    is justified (recover/graph.py): fragments first, then the leaves under none. `logs` reads
+    every log tree through the log root that names it, replayed over its base state
+    (recover/logs.py). `maps` is `own`
     (file data is read through the chunk map of each root's own time, recover/maps.py) or
     `current` (the current chunk map only).
     Raises RecoveryError, db.CatalogError, output.OutputError or dbtree.RootNotCataloged before
@@ -563,6 +586,9 @@ def recover(
         resolved = tuple(root for spec in specs for root in resolve_roots(conn, spec, tree_id))
         total_fragments, tops = fragment_roots(conn, MAX_FRAGMENTS) if graph else (0, [])
         tops = tuple(root for root in tops if tree_id in (None, root.tree_id))
+        log_trees = tuple(
+            root for root in (log_roots(conn) if logs else ()) if tree_id in (None, root.subvolume)
+        )
         lone = tuple(
             (root, leaf)
             for root, leaf in (orphan_leaves(conn) if orphans or graph else ())
@@ -581,7 +607,7 @@ def recover(
             no_holes = bool(fs.fields["incompat_flags"] & ondisk.INCOMPAT["NO_HOLES"])
             with OutputTree(output_dir) as out:
                 options = {"roots": list(dict.fromkeys(roots)), "tree_id": tree_id or "all",
-                           "dedup": dedup, "orphans": orphans, "graph": graph,
+                           "dedup": dedup, "orphans": orphans, "graph": graph, "logs": logs,
                            "maps": maps}  # fmt: skip
                 recovery_id = conn.execute(
                     "INSERT INTO recovery_runs (tool_version, started_utc, image_path,"
@@ -592,7 +618,7 @@ def recover(
                 run, gaps = recover_roots(
                     conn, Readers(conn, fs.reader, own=maps == "own"), out, recovery_id, resolved,
                     no_holes=no_holes, dedup=dedup, orphans=lone, fragments=tops, graph=graph,
-                    note=note,
+                    logs=log_trees, note=note,
                 )  # fmt: skip
                 if total_fragments > MAX_FRAGMENTS:
                     note(f"{total_fragments} fragments, only the newest {MAX_FRAGMENTS} read")
@@ -604,6 +630,7 @@ def recover(
                     "orphan_leaves": len(lone),
                     "fragments": len(tops),
                     "fragments_found": total_fragments,
+                    "log_trees": len(log_trees),
                     "bytes_written": run.bytes_written,
                     "gaps": {source: list(lines) for source, lines in gaps.items()},
                 }
