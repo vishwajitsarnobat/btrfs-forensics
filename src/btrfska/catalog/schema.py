@@ -16,7 +16,7 @@ exactly as btrfs_comp_cpu_keys does; range and ordering queries use it.
 
 import struct
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # The tables a recovery appends to after the build (plan.md M4b). Every other table is written
 # by the one pass of `catalog build` and never again; catalog/db.py enforces that.
@@ -522,6 +522,7 @@ CREATE TABLE artifacts (
     output_path       TEXT,
     in_current        INTEGER,
     chunk_maps        TEXT    NOT NULL,
+    joined            TEXT    NOT NULL,
     missing           TEXT    NOT NULL,
     problems          TEXT    NOT NULL
 );

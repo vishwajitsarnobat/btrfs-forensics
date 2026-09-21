@@ -1507,10 +1507,14 @@ they hang under tree versions whose root was written to disk and replaced before
      (`fragment:BYTENR@GEN`).
    - `sibling`: a lone leaf ends inside a file (M4's `continues_elsewhere`). Another leaf of the
      same tree continues it when its first key belongs to the same inode and lies above the
-     head's last key, none of the file's extent items in it is newer than the head's INODE_ITEM
-     (`generation` ≤ `transid`), and head and tail together cover the file exactly: no gap, no
-     overlap, the last extent ends at `i_size` (rounded up to a sector for regular extents). A
-     chain over several leaves is followed the same way. With NO_HOLES a gap could be a hole, so
+     head's last key, head and tail together cover the file exactly (no gap, no overlap, the
+     last extent ends at `i_size`, rounded up to a sector for regular extents), and the file's
+     newest extent item was written in the transaction of the INODE_ITEM's last change
+     (`generation` = `transid`). *Tightened during implementation, before any measurement:* the
+     first draft asked only for `generation` ≤ `transid`, but the same leaf boundary exists in
+     dozens of versions of a tree (33 candidate tails for one padding file of `m4_deep`), and an
+     older tail of the right size would pass for the file's content when the right one is lost.
+     A chain over several leaves is followed the same way. With NO_HOLES a gap could be a hole, so
      a file with holes is not joined: refused, and said so.
    - `parent_path`: the file's INODE_REF names its parent's inode number. The parent's name is
      taken from the scanned leaves of the same tree only when that number has exactly one name

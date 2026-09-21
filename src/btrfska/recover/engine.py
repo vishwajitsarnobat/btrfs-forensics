@@ -33,12 +33,22 @@ from btrfska.recover.dbtree import (
     RootNotCataloged,
     every_state,
     former_names,
+    fragment_roots,
     orphan_leaves,
     resolve_root,
     resolve_roots,
     tree_leaves,
 )
-from btrfska.recover.inodes import ORPHAN_ITEMS, InodeRecord, collect, paths, safe_component
+from btrfska.recover.graph import ancestors, confirmed_by_dir_index, continue_file, pointer_join
+from btrfska.recover.inodes import (
+    MAX_DEPTH,
+    ORPHAN_ITEMS,
+    ROOT_DIR,
+    InodeRecord,
+    collect,
+    paths,
+    safe_component,
+)
 from btrfska.recover.maps import Readers
 from btrfska.recover.output import PARTIAL, FileSink, OutputError, OutputTree
 from btrfska.substrate import items, ondisk
@@ -47,6 +57,7 @@ from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
 from btrfska.substrate.node import NodeReader
 
+MAX_FRAGMENTS = 4096  # fragments read per recovery, newest first; more is reported
 MAX_NOTED = 16  # findings of the extent reader copied into one artifact's problems
 MAX_SYMLINK = 4096  # PATH_MAX: a longer target is not a symlink the kernel would have made
 
@@ -68,6 +79,8 @@ class Recovered:
     bytes_written: int
     orphan_leaves: int = 0  # file-tree leaves no cataloged state reaches, read one by one
     by_source: dict[tuple[str, str], int] | None = None  # (source kind, status) -> artifacts
+    fragments: int = 0  # fragments read (`graph`), and how many there are
+    fragments_found: int = 0
 
 
 def _now() -> str:
@@ -143,6 +156,8 @@ class _Run:
     def _base(root: Root) -> tuple[bytes, ...]:
         log = root.tree_id == ondisk.TREE_LOG_OBJECTID
         tree = b"tree_log" if log else f"tree_{root.tree_id}".encode()
+        if root.kind == "orphan_graph":
+            return b"orphan_graph", tree, f"fragment_{root.bytenr}_gen{root.generation}".encode()
         if root.kind == "orphan_node":
             return b"orphan_nodes", tree, f"leaf_{root.bytenr}_gen{root.generation}".encode()
         return root.source.replace(":", "_").encode(), tree
@@ -151,7 +166,7 @@ class _Run:
         """The root's own directory, which exists even when the tree holds nothing."""
         base = self._base(root)
         self.used.update(base[:n] for n in range(1, len(base) + 1))
-        if root.kind != "orphan_node":  # an orphan leaf gets a directory only if it yields a file
+        if root.kind == "anchored_root":  # orphan sources get a directory only with a file
             self.out.make_dir(base, None, None)
 
     # ---- one file -----------------------------------------------------------------------
@@ -187,6 +202,18 @@ class _Run:
                 digest.update(piece)
             reads.append((extent, digest.hexdigest()))
         problems = [*assembly.problems, *assembly.errors]
+        transid = None if record.inode is None else record.inode["transid"]
+        newest = max((e.generation or 0 for e, _ in reads), default=0)
+        if transid is not None and newest > transid:
+            # A committed tree never holds this: the INODE_ITEM is updated by the commit at the
+            # latest. A leaf written within a transaction can: the data is already the new one,
+            # size and times are still the old ones. What was written is neither version.
+            missing.append([0, sink.written, "inode_item_older_than_extent"])
+            problems.append(
+                f"an extent of generation {newest} is newer than the INODE_ITEM (transid "
+                f"{transid}): the leaf was written before the inode item was updated, so the "
+                "size and times are those of the previous version"
+            )
         noted = list(dict.fromkeys(p for extent, _ in reads for p in extent.problems))
         problems += noted[:MAX_NOTED]
         if len(noted) > MAX_NOTED:
@@ -209,6 +236,13 @@ class _Run:
         target = b"".join(pieces)[:MAX_SYMLINK]
         return _text(target), []
 
+    @staticmethod
+    def _source_kind(root: Root, record: InodeRecord) -> str:
+        if record.orphan_item and root.kind == "anchored_root":
+            return "orphan_item"
+        # a lone leaf read with --graph: `orphan_graph` only for what a join contributed to
+        return "orphan_graph" if root.kind != "anchored_root" and record.joins else root.kind
+
     # ---- one artifact -------------------------------------------------------------------
     def artifact(self, recovery_id: int, root: Root, record: InodeRecord, where, in_current):
         parts, attached = where
@@ -229,9 +263,7 @@ class _Run:
             "recovery_id": recovery_id,
             # how the inode was reached: a lone leaf stays `orphan_node` even when it lists the
             # inode under ORPHAN_ITEM (the path and the problems still say so)
-            "source_kind": (
-                "orphan_item" if record.orphan_item and root.kind == "anchored_root" else root.kind
-            ),
+            "source_kind": self._source_kind(root, record),
             "source": root.source,
             "state_id": root.state_id,
             "tree_id": s64(root.tree_id),
@@ -257,6 +289,7 @@ class _Run:
             "output_path": None,
             "in_current": in_current,
             "chunk_maps": "[]",
+            "joined": json.dumps(record.joins),
         }
         reads, missing, same = [], [], None
         mode = None if inode is None else inode["mode"]
@@ -394,6 +427,37 @@ class _Run:
         )
 
 
+def _join_lone_leaf(conn, run: _Run, root: Root, leaf: Leaf, inodes: dict, sectorsize: int):
+    """The joins of recover/graph.py for one lone leaf: the file its end cuts, and the names of
+    directories it does not hold. Returns those names; joins and refusals go into the records."""
+    last = inodes.get(run.last_objectid)
+    if last is not None:
+        joined, outcome = continue_file(conn, root.tree_id, leaf, last, sectorsize)
+        if joined is not None:
+            joined.joins.append(outcome)
+            inodes[last.objectid] = joined
+            run.last_objectid = None  # the file is whole: nothing continues elsewhere
+        elif outcome is not None:
+            last.problems.append(f"not joined with another leaf: {outcome}")
+    named, joins, refused = ancestors(conn, root.tree_id, inodes)
+    for record in inodes.values():
+        current, steps = (record.names[0].parent if record.names else None), 0
+        while current is not None and current != ROOT_DIR and steps < MAX_DEPTH:
+            if current in named:
+                for join in joins.get(current, ()):
+                    child = record if steps == 0 else None
+                    confirmed = child is not None and confirmed_by_dir_index(
+                        conn, root.tree_id, current, record.objectid, record.names[0].name
+                    )
+                    record.joins.append(join | {"dir_index_names_this_file": confirmed})
+                current, steps = named[current].parent, steps + 1
+            else:
+                if current in refused:
+                    record.problems.append(f"no path: {refused[current]}")
+                break
+    return named
+
+
 def _current_inodes(conn: sqlite3.Connection, tree_id: int) -> set[tuple[int, int]] | None:
     """(objectid, creation generation) of every inode of the current tree; None if unknown."""
     try:
@@ -420,6 +484,8 @@ def recover_roots(
     no_holes: bool,
     dedup: bool = True,
     orphans: tuple[tuple[Root, Leaf], ...] = (),
+    fragments: tuple[Root, ...] = (),
+    graph: bool = False,
     note: Callable[[str], None] = lambda line: None,
 ):
     """Recover every root, then every orphan leaf, into `out`: the run (counts, bytes) and the
@@ -429,12 +495,17 @@ def recover_roots(
     if isinstance(readers, NodeReader):
         readers = Readers(conn, readers, own=False)
     run = _Run(conn, readers.current, out, note, no_holes=no_holes, dedup=dedup)
-    trees = {root.tree_id for root in roots} | {root.tree_id for root, _ in orphans}
+    trees = {root.tree_id for root in (*roots, *fragments)} | {r.tree_id for r, _ in orphans}
     current = {tree: _current_inodes(conn, tree) for tree in trees}
     gaps = {}
-    for root, leaf in (*((root, None) for root in roots), *orphans):
+    sectorsize = readers.current.ctx.sectorsize
+    covered: set[int] = set()  # leaves read under a fragment are not read again on their own
+    for root, leaf in (*((root, None) for root in (*roots, *fragments)), *orphans):
+        if leaf is not None and leaf.content_id in covered:
+            continue
         run.start_root(root)
         run.reader = readers.reader(root)
+        named: dict = {}
         if leaf is None:
             leaves, found = tree_leaves(conn, root)
             gaps[f"{root.source} tree {root.tree_id}"] = tuple(found)
@@ -444,7 +515,15 @@ def recover_roots(
             leaves = [leaf]
         inodes = collect(conn, leaves)
         run.last_objectid = max(inodes, default=None) if leaf is not None else None
-        located = paths(inodes)
+        if root.kind == "orphan_graph":
+            covered.update(found_leaf.content_id for found_leaf in leaves)
+            join = pointer_join(root.bytenr, root.generation, root.level, len(leaves),
+                                len(gaps[f"{root.source} tree {root.tree_id}"]))  # fmt: skip
+            for record in inodes.values():
+                record.joins.append(join)
+        elif graph and leaf is not None:
+            named = _join_lone_leaf(conn, run, root, leaf, inodes, sectorsize)
+        located = paths(inodes, named)
         for objectid in sorted(located):
             record = inodes[objectid]
             in_current = None
@@ -465,6 +544,7 @@ def recover(
     tree_id: int | None = ondisk.FS_TREE_OBJECTID,
     dedup: bool = True,
     orphans: bool = False,
+    graph: bool = False,
     maps: str = "own",
     rehash: bool = True,
     note: Callable[[str], None] = lambda line: None,
@@ -473,9 +553,10 @@ def recover(
 
     `tree_id` None means every file tree each root names (the fs tree and all subvolumes). A root
     `all` stands for every cataloged state. `orphans` adds, after the roots, every file-tree leaf
-    that no cataloged state reaches, each read on its own. `maps` is `own` (file data is read
-    through the chunk map of each root's own time, recover/maps.py) or `current` (the current
-    chunk map only).
+    that no cataloged state reaches, each read on its own. `graph` reads them joined where a join
+    is justified (recover/graph.py): fragments first, then the leaves under none. `maps` is `own`
+    (file data is read through the chunk map of each root's own time, recover/maps.py) or
+    `current` (the current chunk map only).
     Raises RecoveryError, db.CatalogError, output.OutputError or dbtree.RootNotCataloged before
     anything is written. `note` receives report lines (refusals, gaps).
     """
@@ -489,9 +570,11 @@ def recover(
             at = specs.index("all")
             specs[at : at + 1] = [s for s in every_state(conn) if s not in specs]
         resolved = tuple(root for spec in specs for root in resolve_roots(conn, spec, tree_id))
+        total_fragments, tops = fragment_roots(conn, MAX_FRAGMENTS) if graph else (0, [])
+        tops = tuple(root for root in tops if tree_id in (None, root.tree_id))
         lone = tuple(
             (root, leaf)
-            for root, leaf in (orphan_leaves(conn) if orphans else ())
+            for root, leaf in (orphan_leaves(conn) if orphans or graph else ())
             # a log leaf does not say which subvolume it logged, so it goes with any --tree
             if tree_id in (None, root.tree_id) or root.tree_id == ondisk.TREE_LOG_OBJECTID
         )
@@ -507,7 +590,8 @@ def recover(
             no_holes = bool(fs.fields["incompat_flags"] & ondisk.INCOMPAT["NO_HOLES"])
             with OutputTree(output_dir) as out:
                 options = {"roots": list(dict.fromkeys(roots)), "tree_id": tree_id or "all",
-                           "dedup": dedup, "orphans": orphans, "maps": maps}  # fmt: skip
+                           "dedup": dedup, "orphans": orphans, "graph": graph,
+                           "maps": maps}  # fmt: skip
                 recovery_id = conn.execute(
                     "INSERT INTO recovery_runs (tool_version, started_utc, image_path,"
                     " image_checked, output_dir, options) VALUES (?, ?, ?, ?, ?, ?)",
@@ -516,14 +600,19 @@ def recover(
                 ).lastrowid  # fmt: skip
                 run, gaps = recover_roots(
                     conn, Readers(conn, fs.reader, own=maps == "own"), out, recovery_id, resolved,
-                    no_holes=no_holes, dedup=dedup, orphans=lone, note=note,
+                    no_holes=no_holes, dedup=dedup, orphans=lone, fragments=tops, graph=graph,
+                    note=note,
                 )  # fmt: skip
+                if total_fragments > MAX_FRAGMENTS:
+                    note(f"{total_fragments} fragments, only the newest {MAX_FRAGMENTS} read")
                 summary = {
                     "artifacts": dict(run.counts),
                     "by_source": {
                         f"{kind} {status}": n for (kind, status), n in run.by_source.items()
                     },
                     "orphan_leaves": len(lone),
+                    "fragments": len(tops),
+                    "fragments_found": total_fragments,
                     "bytes_written": run.bytes_written,
                     "gaps": {source: list(lines) for source, lines in gaps.items()},
                 }
@@ -534,6 +623,6 @@ def recover(
                 conn.commit()
         return Recovered(recovery_id, os.fspath(output_dir), rehash, resolved, gaps,
                          dict(run.counts), run.bytes_written, len(lone),
-                         dict(run.by_source))  # fmt: skip
+                         dict(run.by_source), len(tops), total_fragments)  # fmt: skip
     finally:
         conn.close()

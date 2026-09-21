@@ -46,6 +46,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
             tree_id=args.tree,
             dedup=not args.no_dedup,
             orphans=args.orphans,
+            graph=args.graph,
             maps=args.maps,
             rehash=not args.no_rehash,
             note=lambda line: _note(f"btrfska recover: {line}"),
@@ -65,8 +66,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
             f"generation {root.generation} level {root.level}, "
             f"{len(done.gaps[f'{root.source} tree {root.tree_id}'])} gaps"
         )
-    if args.orphans:
-        kinds = ("orphan_node", "orphan_item")
+    if args.orphans or args.graph:
+        kinds = ("orphan_node", "orphan_graph", "orphan_item")
         found = {k: sum(n for (kind, _), n in done.by_source.items() if kind == k) for k in kinds}
         only = sum(done.by_source.get((k, "complete"), 0) for k in kinds)
         print(
@@ -74,6 +75,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
             f"orphan_node {found['orphan_node']}, from orphan_item {found['orphan_item']}; "
             f"{only} complete and not a duplicate of anything the roots gave"
         )
+        if args.graph:
+            print(f"orphan graph: artifacts with a recorded join {found['orphan_graph']}")
     counts = ", ".join(f"{name} {done.counts.get(name, 0)}" for name in STATUSES)
     print(f"artifacts: {counts}; {done.bytes_written} bytes written")
     incomplete = sum(
@@ -106,6 +109,15 @@ def add_parser(sub) -> None:
         action="store_true",
         help="after the roots, also read every file-tree leaf no cataloged state reaches, and "
         "label inodes a tree lists under ORPHAN_ITEM",
+    )
+    parser.add_argument(
+        "--graph",
+        action="store_true",
+        help="as --orphans, but joined where a join can be justified: tree versions that were "
+        "written and never committed are walked from their top block, a file cut by the end of "
+        "a lone leaf is continued in the leaf that fits exactly, and a missing parent directory "
+        "is named when its number has one name only; every join is recorded, an ambiguous one "
+        "is refused",
     )
     parser.add_argument(
         "--tree",

@@ -36,7 +36,9 @@ class Root:
     bytenr: int
     generation: int
     level: int
-    kind: str = "anchored_root"  # or orphan_node: `bytenr` is then a leaf no state reaches
+    # anchored_root; orphan_node: `bytenr` is a leaf no state reaches, read on its own;
+    # orphan_graph: `bytenr` is the top of a fragment (`fragment_roots`), or such a leaf with joins
+    kind: str = "anchored_root"
 
 
 @dataclass(frozen=True)
@@ -201,6 +203,44 @@ def _mismatched(conn: sqlite3.Connection, tree_id: int, bytenr: int, generation:
     if not found:
         return ""
     return "; a valid block lies at that address, not followed: " + "; ".join(found)
+
+
+def leaf_by_content(conn: sqlite3.Connection, content_id: int) -> Leaf | None:
+    """The valid leaf holding this content, as `orphan_leaves` describes one."""
+    row = conn.execute(
+        "SELECT bytenr, generation, MIN(physical), MAX(status = 'live'),"
+        " MAX(status = 'backup_reachable') FROM nodes"
+        " WHERE valid = 1 AND level = 0 AND content_id = ? GROUP BY bytenr, generation"
+        " ORDER BY generation DESC LIMIT 1",
+        (content_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    status = "live" if row[3] else "backup_reachable" if row[4] else "unreferenced"
+    return Leaf(content_id, u64(row[0]), u64(row[1]), row[2], status)
+
+
+def fragment_roots(conn: sqlite3.Connection, limit: int) -> tuple[int, list[Root]]:
+    """(how many there are, the newest `limit` of them): internal nodes of file trees that no
+    scanned key pointer, no ROOT_ITEM and no superblock slot names (plan.md M5c). Each is the
+    top of a fragment: a tree version that was never committed, or whose root tree is lost."""
+    rows = conn.execute(
+        "SELECT b.bytenr, b.generation, b.level, b.owner FROM blocks b WHERE b.level > 0"
+        " AND NOT EXISTS (SELECT 1 FROM key_ptrs k"
+        "   WHERE k.blockptr = b.bytenr AND k.ptr_generation = b.generation)"
+        " AND NOT EXISTS (SELECT 1 FROM root_items r"
+        "   WHERE r.bytenr = b.bytenr AND r.generation = b.generation)"
+        " AND NOT EXISTS (SELECT 1 FROM known_roots n"
+        "   WHERE n.bytenr = b.bytenr AND n.generation = b.generation)"
+        " ORDER BY b.generation DESC, b.bytenr"
+    ).fetchall()
+    found = [
+        Root(f"fragment:{u64(bytenr)}@{u64(generation)}", None, u64(owner), u64(bytenr),
+             u64(generation), level, kind="orphan_graph")
+        for bytenr, generation, level, owner in rows
+        if is_subvolume_tree(u64(owner))
+    ]  # fmt: skip
+    return len(found), found[:limit]
 
 
 def tree_leaves(conn: sqlite3.Connection, root: Root) -> tuple[list[Leaf], list[str]]:
