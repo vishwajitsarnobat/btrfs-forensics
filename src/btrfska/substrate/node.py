@@ -44,12 +44,12 @@ a copy is used when no copy passes everything, and the node names the linkage ch
 (`ValidatedNode.linkage_mismatch`). A copy that fails an integrity check is never used.
 
 Why a referenced block cannot be used (`node_failure`, one class per node):
-- `reused`: a copy passes every integrity check (csum, fsid, chunk_tree_uuid, nritems, written,
-  layout, level below 8) but fails a linkage check (bytenr, level, owner, parent_generation,
-  first_key) and is newer than the referrer expects. The address now holds a newer tree's block,
+- `reused`: a copy shows no damage (csum, fsid, chunk_tree_uuid, nritems, written, layout and a
+  level below 8 hold) but is another block than the one named (bytenr, level, owner,
+  parent_generation or first_key fails) and is newer than the referrer expects. The address now holds a newer tree's block,
   committed or not (an uncommitted log or transaction is newer than the superblock). This is the
   normal fate of an old backup root's blocks, not damage;
-- `mismatch`: integrity holds, linkage fails, and the block is not newer (a forged or inconsistent
+- `mismatch`: no damage, another block than the one named, and not newer (a forged or inconsistent
   referrer, or a rolled-back block);
 - `corrupt`: this filesystem's header (fsid) but an integrity check fails;
 - `overwritten`: no tree block of this filesystem there (data, another filesystem);
