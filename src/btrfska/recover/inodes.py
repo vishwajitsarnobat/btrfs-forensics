@@ -21,6 +21,7 @@ from btrfska.substrate.node import Item
 K = ondisk.ITEM_KEYS
 ROOT_DIR = ondisk.FIRST_FREE_OBJECTID  # the root directory of every fs and subvolume tree
 UNATTACHED = b".btrfska-unattached"
+ORPHAN_ITEMS = b".btrfska-orphan-items"  # inodes a tree lists under ORPHAN_ITEM
 MAX_DEPTH = 4096  # PATH_MAX cannot hold a deeper path; a longer parent chain is a cycle
 
 
@@ -50,6 +51,7 @@ class InodeRecord:
     extents: list[tuple[Item, Leaf]] = field(default_factory=list)
     origins: list[Origin] = field(default_factory=list)
     encrypted_name: bool = False  # a directory entry marks it FT_ENCRYPTED
+    orphan_item: bool = False  # the tree lists it under ORPHAN_ITEM: unlinked, not yet cleaned up
     problems: list[str] = field(default_factory=list)
 
     @property
@@ -72,11 +74,15 @@ def collect(conn: sqlite3.Connection, leaves: list[Leaf]) -> dict[int, InodeReco
     """Every inode the leaves mention, keyed by objectid."""
     inodes: dict[int, InodeRecord] = {}
     encrypted: set[int] = set()
+    orphaned: set[int] = set()
     for leaf in leaves:
         for item in leaf_items(conn, leaf):
             key = item.key
             try:
-                if key.type == K["INODE_ITEM"]:
+                if key.objectid == ondisk.ORPHAN_OBJECTID:
+                    if key.type == K["ORPHAN_ITEM"]:
+                        orphaned.add(key.offset)  # the key offset is the inode number
+                elif key.type == K["INODE_ITEM"]:
                     record = inodes.setdefault(key.objectid, InodeRecord(key.objectid))
                     record.inode = items.inode_item(item.data)
                     record.origins.append(Origin("inode_item", leaf, item.slot))
@@ -109,6 +115,8 @@ def collect(conn: sqlite3.Connection, leaves: list[Leaf]) -> dict[int, InodeReco
             except items.ItemError as exc:
                 record = inodes.setdefault(key.objectid, InodeRecord(key.objectid))
                 record.problems.append(f"item {key} in leaf {leaf.bytenr} slot {item.slot}: {exc}")
+    for objectid in orphaned & inodes.keys():
+        inodes[objectid].orphan_item = True
     for objectid in encrypted & inodes.keys():
         inodes[objectid].encrypted_name = True
         inodes[objectid].problems.append("its directory entry carries FT_ENCRYPTED (0x80)")

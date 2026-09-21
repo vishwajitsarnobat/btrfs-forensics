@@ -507,13 +507,13 @@ sqlite3 -readonly images/scratch/sandbox.db \
 
 ### `btrfska recover`
 
-`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--no-dedup] [--no-rehash]`
+`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--no-dedup] [--no-rehash]`
 extracts files. `DB` is the evidence database built from `IMAGE` (`catalog build`, best with
 `--full-sweep`); the image's size and SHA-256 must match the ones recorded there (`--no-rehash`
 skips the hash, and the run is recorded as not checked).
 
-- `--root` is `current`, `backup:GEN` or `state:ID` and may be repeated; the default is
-  `current`. Every root tree the catalog knows is a state (`btrfska roots`, table `states`), so a
+- `--root` is `current`, `backup:GEN`, `state:ID`, or `all` for every cataloged state, and may
+  be repeated; the default is `current`. Every root tree the catalog knows is a state (`btrfska roots`, table `states`), so a
   root that only the scan discovered is recovered exactly like a backup root. `--tree` is a tree
   id (default 5, the top-level fs tree; 256 and above for a subvolume or snapshot) or `all` for
   every file tree the root names.
@@ -522,6 +522,18 @@ skips the hash, and the run is recorded as not checked).
   block that was not scanned as valid is reported as a `gap`; the files below it are absent.
   Data extents are read through the *current* chunk map: an old state's extent in a chunk that
   has since been removed fails as `unmapped` (historical chunk maps are plan.md M5).
+- **`--orphans`: recovery without an anchor.** After the roots, every valid file-tree leaf that
+  **no cataloged state reaches** is read on its own (`source_kind` `orphan_node`). Such leaves
+  are versions written out in the middle of a transaction and replaced before its commit, or
+  leaves whose root tree is gone. One leaf at a time, never joined with another: a file whose
+  items may continue in the next leaf is `partial` with the reason `continues_elsewhere`. Files
+  go to `DIR/orphan_nodes/tree_ID/leaf_BYTENR_genG/`. With deduplication on, an orphan copy of
+  something a root also gives is a `duplicate`, so after `--root all --orphans` the `complete`
+  `orphan_node` files are exactly the versions no cataloged root can give. An inode a tree lists
+  under the kernel's ORPHAN_ITEM (unlinked while open, not yet cleaned up) is labelled
+  `orphan_item` with or without `--orphans`: its content is intact and it has no name, so the
+  database is searched for the name it had (same inode number *and* creation generation), and it
+  is written as `.btrfska-orphan-items/INODE_NAME`.
 - **One extent at a time.** An extent is mapped in full first, then read and written in pieces
   of at most 1 MiB; memory does not grow with file size. Inline, regular and prealloc extents,
   holes (left sparse in the output), zlib, zstd and LZO are handled as in `cat`.

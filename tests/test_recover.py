@@ -25,7 +25,14 @@ from btrfska.catalog.build import build_catalog
 from btrfska.catalog.content import ContentWriter
 from btrfska.catalog.schema import RECOVERY_TABLES, SCHEMA_VERSION
 from btrfska.cli import main
-from btrfska.recover.dbtree import Root, RootNotCataloged, resolve_roots, tree_leaves
+from btrfska.recover.dbtree import (
+    Root,
+    RootNotCataloged,
+    every_state,
+    orphan_leaves,
+    resolve_roots,
+    tree_leaves,
+)
 from btrfska.recover.engine import RecoveryError, recover, recover_roots
 from btrfska.recover.inodes import UNATTACHED, paths, safe_component
 from btrfska.recover.output import PARTIAL, OutputError, OutputTree
@@ -244,8 +251,9 @@ def dir_items_(objectid: int, name: bytes, parent: int = 256) -> list:
 ROOT_DIR_ITEMS = [((256, K["INODE_ITEM"], 0), inode_item(0, mode=0o040755))]
 
 
-def _catalog(conn, trees: dict[str, list]) -> None:
-    """One single-leaf fs tree per source, cataloged as the scan would have."""
+def _catalog(conn, trees: dict[str, list], loose: tuple[list, ...] = ()) -> None:
+    """One single-leaf fs tree per source, cataloged as the scan would have; `loose` leaves are
+    valid fs-tree leaves that no state names."""
     conn.execute("INSERT INTO regions (region_id, scanned, kind, start_offset, end_offset)"
                  " VALUES (1, 1, 'METADATA', 0, 1)")  # fmt: skip
     writer = ContentWriter(conn, NODESIZE)
@@ -272,6 +280,18 @@ def _catalog(conn, trees: dict[str, list]) -> None:
             "INSERT INTO state_trees VALUES (?, 0, 5, 0, ?, ?, 0, ?, 0, 'found', 1, 0)",
             (number, bytenr, generation, 9000 + number),
         )
+    for number, items in enumerate(loose, start=len(trees) + 1):
+        bytenr, generation = META_LOGICAL + number * NODESIZE, 7 + number
+        leaf = make_node(bytenr, items=sorted(items, key=lambda e: e[0]), owner=5,
+                         generation=generation)  # fmt: skip
+        conn.execute(
+            "INSERT INTO nodes (physical, region_id, bytenr, generation, owner, level, nritems,"
+            " valid, status, orphan, outside_map, legacy_orphan, log_tree, bytenr_mapped,"
+            " maps_here, problems, content_id)"
+            " VALUES (?, 1, ?, ?, 5, 0, ?, 1, 'unreferenced', 1, 0, 1, 0, 1, 1, '[]', ?)",
+            (META_PHYS + number * NODESIZE, bytenr, generation, len(items),
+             writer.add(leaf, True)),
+        )  # fmt: skip
     writer.flush()
     conn.execute(
         "INSERT INTO recovery_runs (recovery_id, tool_version, started_utc, image_path,"
@@ -280,13 +300,14 @@ def _catalog(conn, trees: dict[str, list]) -> None:
 
 
 @contextmanager
-def synthetic(trees: dict[str, list], data: dict[int, bytes] | None = None, size=16 * MIB):
+def synthetic(trees: dict[str, list], data: dict[int, bytes] | None = None, size=16 * MIB,
+              loose: tuple[list, ...] = ()):  # fmt: skip
     """(conn, reader, output directory path) over synthetic fs trees and a sparse image."""
     chunks = [Chunk(DATA_LOGICAL, 512 * MIB, BG["DATA"], (Stripe(1, DATA_PHYS, DEV_UUID),))]
     with scratch_dir("test_recover_") as d:
         conn = db.create(d / "synthetic.db")
         conn.row_factory = sqlite3.Row
-        _catalog(conn, trees)
+        _catalog(conn, trees, loose)
         path = write_sparse_image(d / "fs.img", size, data or {})
         with open_image(path) as img:
             reader = NodeReader(img, ChunkMap("test", chunks, {1: DEV_UUID}), node_ctx())
@@ -294,8 +315,10 @@ def synthetic(trees: dict[str, list], data: dict[int, bytes] | None = None, size
         conn.close()
 
 
-def run(conn, reader, out_dir, sources=("current",), notes=None, **options):
+def run(conn, reader, out_dir, sources=("current",), notes=None, orphans=False, **options):
     roots = tuple(root for s in sources for root in resolve_roots(conn, s, 5))
+    if orphans:
+        options["orphans"] = tuple(orphan_leaves(conn))
     with OutputTree(out_dir) as out:
         note = (notes if notes is not None else []).append
         return recover_roots(conn, reader, out, 1, roots, no_holes=True, note=note, **options)
@@ -593,6 +616,154 @@ def test_a_gap_in_the_tree_is_reported_and_an_unknown_root_is_an_error():
 
 
 # ---------------------------------------------------------------------------
+# Without an anchor: leaves no state reaches, and the kernel's ORPHAN_ITEM
+# ---------------------------------------------------------------------------
+def by_source(conn) -> dict[tuple[str, int], sqlite3.Row]:
+    return {(r["source_kind"], r["objectid"]): r for r in conn.execute("SELECT * FROM artifacts")}
+
+
+def test_a_leaf_no_state_reaches_gives_its_files_labelled_as_such():
+    current = [*ROOT_DIR_ITEMS, *file_items(257, b"kept", b"still here")]
+    lost = [*ROOT_DIR_ITEMS, *file_items(300, b"gone", b"only in a lone leaf", generation=6),
+            *file_items(301, b"deep", b"parent unknown", parent=290)]  # fmt: skip
+    with synthetic({"current": current}, loose=(lost,)) as (conn, reader, out):
+        ((root, leaf),) = orphan_leaves(conn)
+        assert (root.kind, root.state_id, root.tree_id, root.level) == ("orphan_node", None, 5, 0)
+        done, _ = run(conn, reader, out, orphans=True)
+        base = f"orphan_nodes/tree_5/leaf_{leaf.bytenr}_gen{leaf.generation}"
+        assert files_under(out) == {
+            "current/tree_5/kept": b"still here",
+            f"{base}/gone": b"only in a lone leaf",
+            f"{base}/{UNATTACHED.decode()}/290/deep": b"parent unknown",
+        }
+        row = by_source(conn)["orphan_node", 300]
+        assert (row["source"], row["state_id"], row["status"], row["in_current"]) == (
+            f"orphan_node:{leaf.bytenr}", None, "complete", 0,
+        )  # fmt: skip
+        assert (row["root_bytenr"], row["root_generation"]) == (leaf.bytenr, leaf.generation)
+        assert done.by_source["orphan_node", "complete"] == 2
+        chain = conn.execute(
+            "SELECT role, bytenr, block_status FROM provenance WHERE artifact_id = ?",
+            (row["artifact_id"],),
+        ).fetchall()
+        assert {(c["bytenr"], c["block_status"]) for c in chain} == {(leaf.bytenr, "unreferenced")}
+        # without --orphans nothing of it is touched
+    with synthetic({"current": current}, loose=(lost,)) as (conn, reader, out):
+        run(conn, reader, out)
+        assert files_under(out) == {"current/tree_5/kept": b"still here"}
+
+
+def test_what_a_root_also_gives_is_a_duplicate_so_the_rest_is_what_only_orphans_give():
+    shared = file_items(257, b"both", b"a root has this too")
+    tree = [*ROOT_DIR_ITEMS, *shared]
+    lone = [*ROOT_DIR_ITEMS, *shared, *file_items(258, b"only-here", b"no root has this")]
+    with synthetic({"current": tree}, loose=(lone,)) as (conn, reader, out):
+        run(conn, reader, out, orphans=True)
+        rows = by_source(conn)
+        assert rows["orphan_node", 257]["status"] == "duplicate"
+        assert rows["orphan_node", 257]["duplicate_of"] == rows["anchored_root", 257]["artifact_id"]
+        only = conn.execute(
+            "SELECT objectid FROM artifacts WHERE source_kind = 'orphan_node'"
+            " AND status = 'complete' AND kind = 'file'"
+        ).fetchall()
+        assert [r["objectid"] for r in only] == [258]
+
+
+def test_a_file_whose_items_continue_in_another_leaf_is_partial_and_says_so():
+    lone = [
+        *ROOT_DIR_ITEMS,
+        *file_items(257, b"whole", b"fits"),
+        ((258, K["INODE_ITEM"], 0), inode_item(3 * 4096)),
+        ((258, K["INODE_REF"], 256), inode_ref(b"cut")),
+        ((258, K["EXTENT_DATA"], 0), regular(DATA_LOGICAL, 4096)),
+    ]
+    with synthetic({"current": list(ROOT_DIR_ITEMS)}, {DATA_PHYS: b"p" * 4096},
+                   loose=(lone,)) as (conn, reader, out):  # fmt: skip
+        run(conn, reader, out, orphans=True)
+        rows = by_source(conn)
+        assert rows["orphan_node", 257]["status"] == "complete"
+        assert rows["orphan_node", 258]["status"] == "partial"
+        assert json.loads(rows["orphan_node", 258]["missing"]) == [
+            [4096, 8192, "continues_elsewhere"]
+        ]
+
+
+def test_an_orphan_item_inode_keeps_its_content_and_finds_the_name_it_had():
+    """Unlinked while open: the tree keeps INODE_ITEM and extents, lists the inode under
+    ORPHAN_ITEM, and has no name for it. An older leaf still has the name. A different file
+    that once used the same inode number must not lend its name."""
+    orphaned = [
+        *ROOT_DIR_ITEMS,
+        ((257, K["INODE_ITEM"], 0), inode_item(12, generation=9, nlink=0)),
+        ((257, K["EXTENT_DATA"], 0), inline(b"still intact")),
+        ((ondisk.ORPHAN_OBJECTID, K["ORPHAN_ITEM"], 257), b""),
+    ]
+    named = [*ROOT_DIR_ITEMS, *file_items(257, b"minutes.txt", b"still intact", generation=9,
+                                          nlink=1)]  # fmt: skip
+    reused = [*ROOT_DIR_ITEMS, *file_items(257, b"unrelated.txt", b"x", generation=4)]
+    trees = {"current": orphaned, "backup:8": named, "backup:7": reused}
+    with synthetic(trees) as (conn, reader, out):
+        run(conn, reader, out)
+        row = by_source(conn)["orphan_item", 257]
+        assert (row["status"], row["attached"], row["in_current"]) == ("complete", 0, 1)
+        assert row["path"] == ".btrfska-orphan-items/257_minutes.txt"
+        assert files_under(out) == {
+            "current/tree_5/.btrfska-orphan-items/257_minutes.txt": b"still intact"
+        }
+        names = json.loads(row["names"])
+        assert [(n["name"], n["former"], n["parent"]) for n in names] == [
+            ("minutes.txt", True, 256)
+        ]
+        assert "unrelated.txt" not in row["names"]
+
+
+def test_an_orphan_item_with_links_left_is_reported():
+    items = [
+        *ROOT_DIR_ITEMS,
+        *file_items(257, b"odd", b"x", nlink=1),
+        ((ondisk.ORPHAN_OBJECTID, K["ORPHAN_ITEM"], 257), b""),
+        ((ondisk.ORPHAN_OBJECTID, K["ORPHAN_ITEM"], 999), b""),  # names no inode of this tree
+    ]
+    with synthetic({"current": items}) as (conn, reader, out):
+        run(conn, reader, out)
+        row = by_source(conn)["orphan_item", 257]
+        assert "although nlink is 1" in row["problems"] and len(artifacts(conn)) == 1
+
+
+def test_every_state_and_orphan_leaf_of_real_images_is_read():
+    for image in (SANDBOX, SCENARIOS / "m3_wide.img"):
+        if not image.exists():
+            pytest.skip(f"{image.name} absent: build it with corpus/build.py")
+        with scratch_dir("test_recover_") as d:
+            database = d / "evidence.db"
+            build_catalog(image, database, full_sweep=True)
+            done = recover(image, database, d / "out", roots=("all",), tree_id=None, orphans=True)
+            conn = db.open_readonly(database)
+            assert {root.source for root in done.roots} == set(every_state(conn))
+            lone = orphan_leaves(conn)
+            assert done.orphan_leaves == len(lone) > 0
+            read = {r[0] for r in conn.execute(
+                "SELECT DISTINCT source FROM artifacts WHERE source_kind = 'orphan_node'"
+            )}  # fmt: skip
+            with_inodes = {r[0] for r in conn.execute(
+                "SELECT DISTINCT 'orphan_node:' || b.bytenr FROM inodes i JOIN content_blocks b"
+                " USING (content_id) WHERE i.objectid != 256")}  # fmt: skip
+            assert (
+                {root.source for root, _ in lone} & with_inodes
+                <= read
+                <= {root.source for root, _ in lone}
+            )
+            # an orphan artifact never claims a state, and always has a chain
+            bad = conn.execute(
+                "SELECT COUNT(*) FROM artifacts a WHERE a.source_kind = 'orphan_node' AND ("
+                " a.state_id IS NOT NULL OR (a.kind != 'unknown' AND NOT EXISTS (SELECT 1 FROM"
+                " provenance p WHERE p.artifact_id = a.artifact_id AND p.role = 'inode_item')))"
+            ).fetchone()[0]
+            assert bad == 0
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Real images, against the read path of `btrfska cat`
 # ---------------------------------------------------------------------------
 def _expected(image: Path, every: int):
@@ -782,6 +953,21 @@ def test_cli_recover_reports_and_exits_zero_only_when_everything_is_complete(cap
             main([*arguments, "--out", str(d / "o3"), "--root", "yesterday"])
 
 
+def test_cli_recover_all_states_with_orphans_reports_the_orphan_sources(capsys):
+    with scratch_dir("test_recover_") as d:
+        database = _sandbox_db(d)
+        code = main(["recover", str(SANDBOX), "--db", str(database), "--out", str(d / "out"),
+                     "--root", "all", "--orphans"])  # fmt: skip
+        out = capsys.readouterr().out
+        assert code == 0 and out.count("\nroot state:") + out.startswith("root state:") >= 5
+        line = next(row for row in out.splitlines() if row.startswith("orphan sources:"))
+        conn = db.open_readonly(database)
+        leaves = len(orphan_leaves(conn))
+        conn.close()
+        assert line.startswith(f"orphan sources: {leaves} leaves no state reaches")
+        assert (d / "out" / "orphan_nodes").is_dir()
+
+
 def test_readme_documents_the_command_its_statuses_and_every_manifest_key():
     readme = (REPO_ROOT / "README.md").read_text()
     section = readme.split("### `btrfska recover`", 1)[1].split("\n## ", 1)[0]
@@ -790,6 +976,8 @@ def test_readme_documents_the_command_its_statuses_and_every_manifest_key():
         keys = set(json.loads((out / "manifest.jsonl").read_text().splitlines()[0]))
     from btrfska.recover.cli import STATUSES
 
-    options = {"--db", "--out", "--root", "--tree", "--no-dedup", "--no-rehash"}
+    options = {"--db", "--out", "--root", "--tree", "--orphans", "--no-dedup", "--no-rehash"}
+    wanted_words = {"`orphan_node`", "`orphan_item`", "`continues_elsewhere`", "`all`"}
+    assert {word for word in wanted_words if word not in section} == set()
     wanted = {f"`{name}`" for name in keys | set(STATUSES)} | options
     assert {name for name in wanted if name not in section} == set()
