@@ -77,6 +77,7 @@ python3 corpus/vm/probe_stale_metadata.py images/scenarios/x.img
 | `run_scenario.sh` | Boots the guest on one image. Env: `SCENARIO` (s01), `MOUNT_OPTS` (compress=zstd,commit=5), `DISCARD` (non-empty → virtio `discard=unmap`), `TIMEOUT` (600), `QEMU` (qemu-system-x86_64) |
 | `make_image.sh NAME` | truncate + pinned mkfs (`SIZE`, `CSUM`, `MKFS_ARGS`; `MKFS=mkfs.btrfs` for the host's) + guest run → `images/scenarios/NAME.{img,log}` |
 | `scenarios/s01.guest.sh` | Subvolume, 3 files, snapshot, delete 2 (one inline), 6 commits, full balance |
+| `scenarios/wide.guest.sh` | Trees with internal nodes: 48 subvolumes, 1500 files, deletions between commits, a snapshot, no balance |
 | `scenarios/discard_{none,async,sync}.sh` | The three §10.4 discard rows |
 | `probe_stale_metadata.py` | Prints `fsid_blocks stale_blocks needle_copies nonzero_blocks` (definitions in its docstring) |
 

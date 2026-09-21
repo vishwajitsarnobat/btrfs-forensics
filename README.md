@@ -10,9 +10,7 @@ hidden.
 
 **Status:** M1 (substrate trust layer) and M2 (scan kernel, orphan
 classification, old-root discovery, discard experiments EXP-000 and EXP-002)
-are done. The evidence catalog (M3) is half done: `catalog build` writes the
-scan, the chunk map, the superblocks and the historical states; leaf items and
-reverse queries follow (M3b). The earlier prototype is
+and M3 (the evidence catalog) are done. Recovery engines (M4) come next. The earlier prototype is
 frozen, still runnable, under `legacy/`.
 - `btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` finds tree
   blocks of the filesystem anywhere on the image, including chunks that have
@@ -27,7 +25,11 @@ frozen, still runnable, under `legacy/`.
 - `btrfska catalog build IMAGE --db PATH` reads the image once and writes an
   SQLite evidence database: every candidate tree block with its validation
   record, the chunk map, the superblock copies, the historical states and the
-  chain of custody. `btrfska catalog info DB` prints a database's scan run.
+  chain of custody, and every item of every valid block, parsed. `btrfska
+  catalog query DB …` answers reverse questions (what points to this block,
+  what used this extent, which leaves hold this key, what was written in this
+  generation) from the database alone. `btrfska catalog info DB` prints a
+  database's scan run.
   Schema: [`docs/evidence-db.md`](docs/evidence-db.md).
 - `btrfska info IMAGE` validates every superblock copy (all four checksum
   types), selects the best one, and reports disagreements and the backup
@@ -465,6 +467,25 @@ column, with example queries.
   run with `unsupported_format`.
 - btrfs u64 values are stored as signed 64-bit integers, so the high objectids
   read as btrfs names them: owner `-6` is the log tree.
+
+`btrfska catalog query DB QUERY …` answers four reverse questions from the
+database alone; the image can be gone. One JSON object per line on stdout, the
+row count on stderr. Integers are on-disk u64 values, as in `walk`.
+- `parents-of BYTENR [--generation G]`: what references a tree block. `referrer`
+  is `node` (an internal node's key pointer), `root_item` (a ROOT_ITEM naming
+  it as a tree root) or `superblock` (the superblock or a backup slot).
+- `owners-of BYTENR`: what uses an extent: `file_extent` rows from every
+  surviving generation of every subvolume, `extent_backref` rows from the
+  extent tree, and `tree_block` rows when tree blocks were scanned at that
+  address.
+- `trees-covering OBJECTID TYPE OFFSET`: the leaves, of every tree and
+  generation, whose key range holds the key; `exact` says whether the key is
+  an item there.
+- `items-in-generation G [--type T] [--limit N]`: the items of every leaf whose
+  header generation is G.
+
+Rows that describe a block carry `reach` (`live`, `backup_reachable`,
+`unreferenced`) and `outside_map`.
 
 `btrfska catalog info DB [--json]` opens a database read-only and prints its
 scan run, its row counts, the nodes per class and the number of distinct valid

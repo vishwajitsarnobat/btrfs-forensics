@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 
 from btrfska import __version__
 from btrfska.catalog import db
+from btrfska.catalog.content import ContentWriter
 from btrfska.catalog.schema import SCHEMA_VERSION, s64
 from btrfska.scan.classify import Classified, scan_image
 from btrfska.scan.kernel_numpy import NodeRecord
@@ -178,7 +179,7 @@ class _NodeWriter:
         self.checks: list[tuple] = []
         self.count = 0
 
-    def add(self, item: Classified) -> None:
+    def add(self, item: Classified, content_id: int | None) -> None:
         record = item.record
         self.count += 1
         self.nodes.append(
@@ -200,6 +201,7 @@ class _NodeWriter:
                 int(record.bytenr_mapped),
                 int(record.maps_here),
                 json.dumps(list(record.problems)),
+                content_id,
             )
         )
         self.checks.extend((self.count, c.name, _flag(c.ok), c.detail) for c in record.checks)
@@ -208,7 +210,7 @@ class _NodeWriter:
 
     def flush(self) -> None:
         self.conn.executemany(
-            "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO nodes VALUES ({', '.join('?' * 18)})",
             self.nodes,
         )
         self.conn.executemany("INSERT INTO node_checks VALUES (?, ?, ?, ?)", self.checks)
@@ -298,6 +300,8 @@ def _insert_discovery(conn: sqlite3.Connection, found: Discovery) -> None:
 TABLES = (
     "scan_runs", "superblocks", "problems", "chunks", "stripes", "regions", "nodes",
     "node_checks", "known_roots", "states", "state_copies", "state_trees", "walk_failures",
+    "contents", "items", "item_problems", "key_ptrs", "inodes", "inode_refs", "dir_entries",
+    "file_extents", "root_items", "extents", "extent_backrefs",
 )  # fmt: skip
 
 
@@ -336,13 +340,20 @@ def build_catalog(
                     conn, _insert_regions(conn, scan.plan.regions, scan.plan.skipped)
                 )
 
+                ctx = fs.reader.ctx
+                contents = ContentWriter(conn, ctx.nodesize)
+
                 def written() -> Iterator[NodeRecord]:
                     for item in scan.classified:
-                        writer.add(item)
-                        yield item.record
+                        record, content_id = item.record, None
+                        if record.checks:  # the whole block lies inside the image
+                            block = img.mmap[record.physical : record.physical + ctx.nodesize]
+                            content_id = contents.add(block, record.valid)
+                        writer.add(item, content_id)
+                        yield record
 
-                ctx = fs.reader.ctx
                 index = index_records(written(), ctx)
+                contents.flush()
                 writer.flush()
                 found = discover(
                     img, index, ctx=ctx, chunk_map=fs.chunk_map, known=known_roots(fs.fields),
