@@ -10,8 +10,13 @@ hidden.
 
 **Status:** M1 (substrate trust layer) and M2 (scan kernel, orphan
 classification, old-root discovery, discard experiments EXP-000 and EXP-002)
-and M3 (the evidence catalog) are done. Recovery engines (M4) come next. The earlier prototype is
-frozen, still runnable, under `legacy/`.
+and M3 (the evidence catalog) are done. M4 (recovery) is under way: `btrfska recover` extracts
+files from any cataloged root; recovery from unreferenced blocks comes next. The earlier
+prototype is frozen, still runnable, under `legacy/`.
+- `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID]... [--tree ID|all]`
+  extracts the files of a tree as the current, a backup or a discovered root saw them, one
+  extent at a time, with a provenance record per file. It writes only below the new directory
+  `DIR`, never to an image, and never passes off a partly read file as complete.
 - `btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` finds tree
   blocks of the filesystem anywhere on the image, including chunks that have
   since been removed. It classifies each one as `live`, `backup_reachable`,
@@ -496,6 +501,62 @@ uv run btrfska catalog build sandbox.img --db images/scratch/sandbox.db
 uv run btrfska catalog info images/scratch/sandbox.db
 sqlite3 -readonly images/scratch/sandbox.db \
   "SELECT status, outside_map, COUNT(*) FROM nodes WHERE orphan GROUP BY 1, 2"
+```
+
+### `btrfska recover`
+
+`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--no-dedup] [--no-rehash]`
+extracts files. `DB` is the evidence database built from `IMAGE` (`catalog build`, best with
+`--full-sweep`); the image's size and SHA-256 must match the ones recorded there (`--no-rehash`
+skips the hash, and the run is recorded as not checked).
+
+- `--root` is `current`, `backup:GEN` or `state:ID` and may be repeated; the default is
+  `current`. Every root tree the catalog knows is a state (`btrfska roots`, table `states`), so a
+  root that only the scan discovered is recovered exactly like a backup root. `--tree` is a tree
+  id (default 5, the top-level fs tree; 256 and above for a subvolume or snapshot) or `all` for
+  every file tree the root names.
+- **Metadata comes from the database, file data from the image.** The tree is walked in the
+  database, so blocks the current chunk map no longer places are reached too. A pointer to a
+  block that was not scanned as valid is reported as a `gap`; the files below it are absent.
+  Data extents are read through the *current* chunk map: an old state's extent in a chunk that
+  has since been removed fails as `unmapped` (historical chunk maps are plan.md M5).
+- **One extent at a time.** An extent is mapped in full first, then read and written in pieces
+  of at most 1 MiB; memory does not grow with file size. Inline, regular and prealloc extents,
+  holes (left sparse in the output), zlib, zstd and LZO are handled as in `cat`.
+- **Output.** `DIR` must not exist. Files go to `DIR/SOURCE/tree_ID/PATH` (`backup:36` becomes
+  `backup_36`). Everything is created with `O_CREAT | O_EXCL | O_NOFOLLOW` relative to a
+  directory descriptor: nothing existing is ever opened for writing, no symlink is followed, so
+  no path leaves `DIR` and no image can be written. Names come from an untrusted image: `/`, NUL,
+  `.`, `..` and over-long names are replaced and the change is reported; an inode whose parents
+  do not lead to the root directory goes under `.btrfska-unattached/`. Permission bits (never
+  setuid, setgid or sticky) and atime/mtime are applied. Ownership and extended attributes are
+  recorded, not applied. Symlinks, devices, FIFOs and sockets are recorded, never created.
+- **Status of each file:** `complete` (every byte read; SHA-256 recorded); `partial` (written as
+  `NAME.partial`, with a hole for every range that could not be read, each listed with its
+  reason); `refused_encrypted` (an extent is encrypted: nothing is written, and stderr gets
+  `btrfska recover: refused: inode N of ROOT: encrypted extent …`); `duplicate` (with several
+  roots, a file that is unchanged since a root already written is not read again; `--no-dedup`
+  writes every copy); `recorded` (a symlink or special file); `failed` (the output file could
+  not be created).
+- **Records.** Every inode gets a row in `artifacts`, one row in `provenance` per item it was
+  built from (the INODE_ITEM, every INODE_REF and INODE_EXTREF name, every XATTR_ITEM, every
+  EXTENT_DATA with the physical ranges that were read), and the run a row in `recovery_runs`
+  ([`docs/evidence-db.md`](docs/evidence-db.md)). The database accepts these rows and no other
+  change. `DIR/manifest.jsonl` has one JSON object per inode, so the directory explains itself
+  without the database. Its keys: `artifact_id`, `recovery_id`, `source_kind`, `source`,
+  `state_id`, `tree_id`, `root_bytenr`, `root_generation`, `objectid`, `inode_generation`,
+  `inode_transid`, `kind`, `path`, `attached`, `names`, `size`, `mode`, `xattrs`,
+  `symlink_target`, `status`, `bytes_written`, `sha256`, `extent_signature`, `duplicate_of`,
+  `output_path`, `in_current` (1 when the current tree still holds this inode with the same
+  creation generation, 0 when it was deleted since), `missing`, `problems`, and `inode` (the
+  whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
+- Exit status 0 when every file is complete; 1 when any is `partial`, `refused_encrypted` or
+  `failed`, or on an error (unknown root, wrong image, `DIR` exists); 2 for a refused format.
+
+```sh
+uv run btrfska catalog build sandbox.img --db images/scratch/sandbox.db --full-sweep
+uv run btrfska recover sandbox.img --db images/scratch/sandbox.db --out images/scratch/recovered \
+    --root backup:13 --root backup:11      # two files deleted before the last commit
 ```
 
 ## Tests and lint

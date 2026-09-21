@@ -5,13 +5,16 @@ learned to one SQLite file. Everything after it (recovery, timelines, confidence
 queries that file and not the image. This document is the contract: every table and column is
 listed here, and a test fails when one is not (`tests/test_catalog.py`).
 
-- **Schema version: 2.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
+- **Schema version: 3.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
   the DDL in `src/btrfska/catalog/schema.py` bumps it and adds a line to [Versions](#versions).
 - **One database, one image, one pass.** The path given to `--db` must not exist. A database is
-  never overwritten or updated; a rebuild is a new file. A pass that fails leaves no file.
+  never overwritten; a rebuild is a new file. A pass that fails leaves no file. What the pass
+  wrote never changes afterwards. The only later writer is `btrfska recover`, which appends to
+  three tables of its own ([Recovery](#recovery-what-was-extracted-and-from-what)) through a
+  connection that is refused every other change.
 - **The image is never written.** The builder opens it through `substrate/image.py` (`O_RDONLY`,
-  read-only map). Databases are created only in `src/btrfska/catalog/db.py`; the read-only test
-  bans `sqlite3.connect` everywhere else in `src/`. Open a database for reading with
+  read-only map). Databases are created and opened only in `src/btrfska/catalog/db.py`; the
+  read-only test bans `sqlite3.connect` everywhere else in `src/`. Open a database for reading with
   `btrfska.catalog.db.open_readonly`, or with any SQLite client using `file:PATH?mode=ro`.
 
 ## Conventions
@@ -329,6 +332,77 @@ several entries add `entry`, the position within the item.
 | `extent_backrefs.objectid`, `extent_backrefs.file_offset` | *u64*; for EXTENT_DATA_REF, the inode and file offset |
 | `extent_backrefs.ref_count` | how many references of this kind |
 
+## Recovery: what was extracted, and from what
+
+`btrfska recover IMAGE --db DB --out DIR` appends to these three tables and to no other.
+`catalog/db.py` opens the database for it with an SQLite authorizer that allows INSERT and UPDATE
+on `recovery_runs`, `artifacts` and `provenance` and denies every other write, DELETE, DDL, PRAGMA
+and ATTACH. Rows are never deleted: a second recovery adds a second run.
+
+### `recovery_runs`: one row per `btrfska recover`
+
+| Column | Meaning |
+|---|---|
+| `recovery_id` | row id |
+| `tool_version` | the btrfska version |
+| `started_utc`, `finished_utc` | ISO 8601, UTC; `finished_utc` NULL means the run did not end properly, and its artifacts are incomplete |
+| `image_path` | the image path as given |
+| `image_checked` | 1 when the image's SHA-256 was compared with `scan_runs.image_sha256_before` and matched (a mismatch stops the run before anything is written); 0 with `--no-rehash`. The size is always compared |
+| `output_dir` | the directory that was created |
+| `options` | JSON: `roots` (as given), `tree_id` (a number or `all`), `dedup` |
+| `summary` | JSON: `artifacts` (count per status), `bytes_written`, `gaps` (per root and tree, the blocks the tree walk could not follow) |
+
+### `artifacts`: one row per inode that was recovered, recorded or refused
+
+| Column | Meaning |
+|---|---|
+| `artifact_id` | row id |
+| `recovery_id` | the run |
+| `source_kind` | how the inode was reached: `anchored_root` (a walk down from a cataloged root tree). Other sources arrive with the rest of plan.md M4 |
+| `source` | the root as the user names it: `current`, `backup:GEN` or `state:ID` |
+| `state_id` | the row of `states` that root is |
+| `tree_id` | *u64*; the fs or subvolume tree |
+| `root_bytenr`, `root_generation` | *u64*; that tree's root block under this root |
+| `objectid` | *u64*; the inode number |
+| `inode_generation`, `inode_transid` | *u64*; the transaction that created the inode, and the one that last changed it. NULL without an INODE_ITEM. Inode numbers are reused; (`objectid`, `inode_generation`) identifies a file |
+| `kind` | `file`, `dir`, `symlink`, `other` (device, FIFO, socket), or `unknown` (items but no INODE_ITEM) |
+| `path`, `path_raw` | the path inside the tree, as text (undecodable bytes replaced) and as the exact bytes, after the changes `problems` lists |
+| `attached` | 1 when the parent chain reaches the tree's root directory; 0 for a path under `.btrfska-unattached/` (a missing parent, no name, or a cycle) |
+| `names` | JSON list of every name: `parent`, `name`, `name_hex`, `index`, `extended` (1 from INODE_EXTREF). The file is written once, under the first |
+| `size` | *u64*; `i_size` |
+| `mode` | file type and permission bits as in `stat`. Only the permission bits are applied to the output; setuid, setgid and sticky never are. Ownership is not applied: join `provenance` (role `inode_item`) to `inodes` for uid, gid and the four timestamps |
+| `xattrs` | JSON list of `name` and `value_hex`. Recorded, not set on the output file |
+| `symlink_target` | for a symlink; symlinks and special files are recorded, never created |
+| `status` | `complete`: every byte was read, and `sha256` is set. `partial`: written as `NAME.partial` with a hole for each range in `missing`. `refused_encrypted`: an extent is encrypted, nothing was written. `duplicate`: the same file, unchanged, was already written in this run (`duplicate_of`). `recorded`: nothing to write (symlink, special file, an inode with no content). `failed`: the output file could not be created. A directory that was created is `complete` |
+| `bytes_written` | the length of the output file, holes included |
+| `sha256` | of the whole file content; only when `complete` |
+| `extent_signature` | SHA-256 over `i_size` and every EXTENT_DATA item (offset and raw payload): equal signatures mean equal content without reading it |
+| `duplicate_of` | the artifact of this run that holds the same tree, inode, `inode_generation` and `extent_signature` |
+| `output_path` | relative to `output_dir`: `SOURCE/tree_ID/PATH`; NULL when nothing was written |
+| `in_current` | 1 when the current tree of the same id holds this `objectid` with this `inode_generation`; 0 when it does not (deleted since, or the number was reused); NULL when the current tree could not be read completely |
+| `missing` | JSON list of `[file offset, length, reason]`: an extent failure class of `substrate/extents.py` (`unmapped`, `unreadable`, a decode error, …), `overlap`, or `short` |
+| `problems` | JSON list: names that had to be changed, FT_ENCRYPTED on the directory entry, item payloads that did not parse, findings of the extent reader |
+
+### `provenance`: the items each artifact was built from
+
+One row per item. Together with `artifacts.root_bytenr` it is the chain from the root to the
+bytes: the root names the tree, `parents-of` walks from the leaf up to it, the leaf and slot name
+the item, and for an extent `read_record` names every physical range and copy that was read.
+
+| Column | Meaning |
+|---|---|
+| `provenance_id` | row id |
+| `artifact_id`, `seq` | the artifact, and the item's position in key order |
+| `role` | `inode_item`, `inode_ref`, `inode_extref`, `xattr` or `extent_data` |
+| `content_id`, `slot` | the item in `items` |
+| `bytenr`, `generation` | *u64*; the leaf holding it |
+| `physical` | the lowest image offset among the valid copies of that leaf |
+| `block_status` | `live`, `backup_reachable` or `unreferenced`: the best status among those copies |
+| `file_offset`, `length` | for `extent_data`: the file range it supplied, after clipping to `i_size` |
+| `extent_sha256` | of the bytes it supplied; NULL for zeros (holes, prealloc) and failures |
+| `error_kind` | why it supplied nothing; NULL otherwise |
+| `read_record` | JSON: the extent reader's full record (kind, compression, addresses, the physical ranges with every copy and whether it matched, problems) |
+
 ## Reverse queries
 
 `btrfska catalog query DB …` and `btrfska.catalog.query` answer four questions from the database
@@ -377,8 +451,8 @@ SELECT slot, type_name, key_objectid, key_offset FROM items WHERE content_id = 1
 
 ## Not stored yet
 
-`artifacts` and `provenance` arrive with the milestones that first write them (plan.md M4, M6).
-Items beyond `nritems` and node slack are not parsed (M4). Log generations and the (owner,
+Confidence tiers on `artifacts` arrive with plan.md M6. Items beyond `nritems` and node slack are
+not parsed yet (M4; EXP-005 shows what to expect there). Log generations and the (owner,
 generation, level) groups that `btrfska roots` prints are one `GROUP BY` over `nodes`. Only the
 current chunk map is stored; historical maps come with M5 (`chunks.map_source`).
 
@@ -391,3 +465,6 @@ current chunk map is stored; historical maps come with M5 (`chunks.map_source`).
   parsed tables `inodes`, `inode_refs`, `dir_entries`, `file_extents`, `root_items`, `extents`,
   `extent_backrefs`; views `content_blocks` and `tree_edges`; `key_sort` on every key. Nothing of
   version 1 changed meaning. A version-1 database is refused; rebuild it from the image.
+- **3** (2026-09-21): `recovery_runs`, `artifacts` and `provenance`, appended by `btrfska recover`
+  through a connection that can change nothing else. Nothing of version 2 changed meaning. A
+  version-2 database is refused; rebuild it from the image.
