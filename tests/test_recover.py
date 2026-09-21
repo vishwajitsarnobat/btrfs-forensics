@@ -555,25 +555,13 @@ def test_an_unchanged_file_is_written_once_across_roots_unless_dedup_is_off():
         assert dict(done.counts) == {"complete": 2, "duplicate": 1}
         assert sorted(files_under(out)) == ["backup_8/tree_5/kept", "current/tree_5/kept"]
         rows = conn.execute(
-            "SELECT source, status, duplicate_of, artifact_id, in_current FROM artifacts"
+            "SELECT source, status, duplicate_of, artifact_id FROM artifacts"
         ).fetchall()
         first = next(r["artifact_id"] for r in rows if r["source"] == "backup:8")
         assert [r["duplicate_of"] for r in rows if r["source"] == "backup:7"] == [first]
-        assert {r["source"]: r["in_current"] for r in rows} == {
-            "current": 1, "backup:8": 1, "backup:7": 1,
-        }  # fmt: skip
     with synthetic(trees) as (conn, reader, out):
         done, _ = run(conn, reader, out, sources=("backup:8", "backup:7"), dedup=False)
         assert dict(done.counts) == {"complete": 2} and len(files_under(out)) == 2
-
-
-def test_a_file_missing_from_the_current_tree_is_labelled_so():
-    before = [*ROOT_DIR_ITEMS, *file_items(257, b"gone", b"deleted later", generation=8)]
-    reused = [*ROOT_DIR_ITEMS, *file_items(257, b"other", b"same number", generation=9)]
-    with synthetic({"current": reused, "backup:8": before}) as (conn, reader, out):
-        run(conn, reader, out, sources=("backup:8", "current"))
-        flags = {r["source"]: r["in_current"] for r in conn.execute("SELECT * FROM artifacts")}
-        assert flags == {"backup:8": 0, "current": 1}  # the inode number alone proves nothing
 
 
 def test_random_item_payloads_never_raise_and_never_escape():
@@ -659,8 +647,8 @@ def test_a_leaf_no_state_reaches_gives_its_files_labelled_as_such():
             f"{base}/{UNATTACHED.decode()}/290/deep": b"parent unknown",
         }
         row = by_source(conn)["orphan_node", 300]
-        assert (row["source"], row["state_id"], row["status"], row["in_current"]) == (
-            f"orphan_node:{leaf.bytenr}", None, "complete", 0,
+        assert (row["source"], row["state_id"], row["status"]) == (
+            f"orphan_node:{leaf.bytenr}", None, "complete",
         )  # fmt: skip
         assert (row["root_bytenr"], row["root_generation"]) == (leaf.bytenr, leaf.generation)
         assert done.by_source["orphan_node", "complete"] == 2
@@ -710,7 +698,7 @@ def test_a_dropped_log_tree_leaf_is_an_orphan_and_the_live_log_is_not():
         base = f"orphan_nodes/tree_log/leaf_{leaf.bytenr}_gen{leaf.generation}"
         assert files_under(out) == {f"{base}/flash.txt": b"written, fsynced, deleted"}
         row = by_source(conn)["orphan_node", 261]
-        assert (u64(row["tree_id"]), row["status"], row["in_current"]) == (log, "complete", None)
+        assert (u64(row["tree_id"]), row["status"]) == (log, "complete")
 
 
 def test_what_a_root_also_gives_is_a_duplicate_so_the_rest_is_what_only_orphans_give():
@@ -765,7 +753,7 @@ def test_an_orphan_item_inode_keeps_its_content_and_finds_the_name_it_had():
     with synthetic(trees) as (conn, reader, out):
         run(conn, reader, out)
         row = by_source(conn)["orphan_item", 257]
-        assert (row["status"], row["attached"], row["in_current"]) == ("complete", 0, 1)
+        assert (row["status"], row["attached"]) == ("complete", 0)
         assert row["path"] == ".btrfska-orphan-items/257_minutes.txt"
         assert files_under(out) == {
             "current/tree_5/.btrfska-orphan-items/257_minutes.txt": b"still intact"
@@ -928,6 +916,15 @@ def test_corpus_files_come_out_as_cat_reads_them_from_every_root(name, every):
     _assert_recovery_equals_cat(image, every)
 
 
+# An inode the current tree no longer holds: the same tree, number and creation generation
+# (`btrfska timeline` gives the delete event; this is enough to count them).
+GONE = (
+    "NOT EXISTS (SELECT 1 FROM artifacts c JOIN states t ON t.state_id = c.state_id"
+    " WHERE t.known_as LIKE '%\"current\"%' AND c.tree_id = a.tree_id"
+    " AND c.objectid = a.objectid AND c.inode_generation = a.inode_generation)"
+)
+
+
 def test_deleted_files_come_back_from_a_backup_root_and_from_a_discovered_state():
     image = SCENARIOS / "m3_wide.img"
     if not image.exists():
@@ -943,13 +940,12 @@ def test_deleted_files_come_back_from_a_backup_root_and_from_a_discovered_state(
         deleted = conn.execute(
             "SELECT s.known_as = '[]' AS discovered, COUNT(*) AS files FROM artifacts a"
             " JOIN states s USING (state_id)"
-            " WHERE a.kind = 'file' AND a.status = 'complete' AND a.in_current = 0"
-            " GROUP BY 1"
+            " WHERE a.kind = 'file' AND a.status = 'complete' AND " + GONE + " GROUP BY 1"
         ).fetchall()
         assert {row["discovered"] for row in deleted} == {0, 1}  # from both kinds of root
         # every one of them has a chain: an INODE_ITEM and a name, each naming leaf and slot
         unexplained = conn.execute(
-            "SELECT COUNT(*) FROM artifacts a WHERE a.kind = 'file' AND a.in_current = 0 AND ("
+            "SELECT COUNT(*) FROM artifacts a WHERE a.kind = 'file' AND " + GONE + " AND ("
             " NOT EXISTS (SELECT 1 FROM provenance p WHERE p.artifact_id = a.artifact_id"
             "             AND p.role = 'inode_item')"
             " OR NOT EXISTS (SELECT 1 FROM provenance p WHERE p.artifact_id = a.artifact_id"

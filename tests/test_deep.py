@@ -77,7 +77,7 @@ def test_states_beyond_the_backup_roots_give_back_victims_the_backup_roots_canno
         elif anchored:
             only_beyond.add(name)
             row = anchored[0]
-            assert row["in_current"] == 0 and row["path"].endswith(name)
+            assert row["path"].endswith(name)
             written = (out / row["output_path"]).read_bytes()
             assert hashlib.sha256(written).hexdigest() == digest
     # A victim lives in one committed generation: the backup roots hold the last ones at most.
@@ -115,7 +115,7 @@ def test_the_open_unlinked_file_comes_back_as_an_orphan_item_with_its_name(deep)
     found = [r for r in _complete(rows, digest) if r["source_kind"] == "orphan_item"]
     assert found
     row = found[0]
-    assert row["attached"] == 0 and row["in_current"] == 1
+    assert row["attached"] == 0
     names = json.loads(row["names"])
     assert [n["name"] for n in names if n.get("former")] == [name]
     assert row["path"] == f".btrfska-orphan-items/{u64(row['objectid'])}_{name}"
