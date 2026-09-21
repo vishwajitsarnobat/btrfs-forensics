@@ -5,6 +5,9 @@
 # tree a second level (a root node above its leaves). Three more commits of small writes in the
 # other subvolume follow, then a normal unmount. Prints the SHA-256 of the two files that
 # matter as ground truth, and the doomed subvolume's id.
+#
+# Mount with a short commit interval (MOUNT_OPTS=commit=5): the cleaner thread wakes with the
+# transaction thread, so with commit=300 `btrfs subvolume sync` waits five minutes.
 btrfs subvolume create $MNT/keep > /dev/null
 btrfs subvolume create $MNT/doomed > /dev/null
 mkdir $MNT/doomed/docs $MNT/doomed/many

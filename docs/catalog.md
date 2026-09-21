@@ -29,7 +29,7 @@ Maintenance rules:
 - **Planned first** (plan.md "M5e-2"). It closes the second of the three items M5's status left
   open. No recovery code changed: the point was to run what exists on a deleted subvolume, which
   the corpus did not have.
-- **`m5_delsubvol`** (scenario `delsubvol`, `commit=300`): a subvolume with a directory, a regular
+- **`m5_delsubvol`** (scenario `delsubvol`, `commit=5`): a subvolume with a directory, a regular
   and an inline file (SHA-256 logged) and 300 small files, so that its tree has a root node above
   its leaves; commit; `btrfs subvolume delete` and `btrfs subvolume sync`, so the cleaner drops
   the tree and removes the ROOT_ITEM; three more commits elsewhere; unmount. On this host's
@@ -50,9 +50,20 @@ Maintenance rules:
     `recover --graph` gives both logged files hash-exact, with their paths, as `orphan_graph` from
     a fragment of tree 257: the subvolume's own root node, which nothing names any more. No file
     under that tree that is called `complete` contradicts the log.
-- **Verification.** `uv run pytest`: 1 028 passed, 0 skipped (9 new), everything asserted against
-  the images and their log. Ruff clean; `sandbox.img` and the 18 older corpus images unchanged.
-  **Corpus scripts changed, so a fresh clone of the branch ran `./setup.sh`** (result below).
+- **What the from-scratch run found** (CONTRIBUTING.md §3: corpus scripts changed, so a fresh
+  clone of the branch ran `./setup.sh`). Two things that the development checkout did not show:
+  - With `commit=300` the new image took 335 s to build: `btrfs subvolume sync` waits for the
+    cleaner thread, which wakes with the transaction thread. The scenario now mounts with
+    `commit=5` and builds in 8 s. CI's corpus job has a 15-minute limit.
+  - **On the freshly built `m4_deep`, `recover --root all` aborted**: one old state there names
+    no tree 5, and `all` with a tree id failed on the first state that lacks the tree. The
+    checkout's own build of `m4_deep` has no such state, so no test had seen it (a guest run is
+    not bit-stable). `all` now skips such a state with a note; a root the user names must
+    still hold the tree (`resolve_all`, with a test).
+- **Verification.** Second fresh clone of the branch, `./setup.sh`: 20 images built, ruff clean,
+  `uv run pytest` 1 029 passed, 0 skipped (10 new), everything asserted against the images and
+  their log. In the development checkout `sandbox.img` and the 18 older corpus images are
+  unchanged.
 - **Limits.** One subvolume, deleted seconds before the end, no snapshot of it, no discard. How
   long a dropped subvolume's blocks survive under churn was not measured. The btrfscue v0.7
   comparison is still open: its release ships an arm64 binary only, and building it means
