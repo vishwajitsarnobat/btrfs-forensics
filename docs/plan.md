@@ -1563,6 +1563,74 @@ an extent newer than its INODE_ITEM, or (in a block that was never committed) wi
 end of the file, is not `complete`. M5c-2 (log trees) and M5c-3 (deleted subvolumes) follow
 M5d: timelines are M5's definition of done and need only the joins that exist now.
 
+**M5d: timelines, `btrfska timeline`** (design fixed 2026-09-21, before implementation).
+
+*What it is.* `btrfska timeline DB [--tree ID|all] [--inode N] [--uncommitted] [--json]` reads the
+evidence database and says, for every inode of every file tree, what happened to it and when:
+create, modify (with the ranges that changed), rename, move, link, unlink, attribute change,
+delete. It is claim C3: a *full-state* diff over *every* cataloged state (the current root, the
+backup roots, the roots only the scan found) and, on request, over what was never committed
+(fragments, lone leaves, dropped log leaves). The comparison points diff sets of inode numbers
+between one backup slot and the current tree (SecurityRonin) or over discovered root trees
+(Beyond Carving); neither follows an inode through its versions.
+
+*Decisions.*
+1. **The database, not the image.** Everything a timeline needs is in the catalog (plan §2, "scan
+   once, query forever"), so the command takes the database; M5's definition of done says
+   `timeline <image>`, written before the catalog existed. Nothing is stored: a timeline is a
+   pure function of the scan's tables, recomputed on demand. When the database also holds a
+   recovery, a version carries the SHA-256 of the complete artifact with the same tree, inode,
+   creation generation and extent signature.
+2. **Identity is (tree, inode number, creation generation), never the number alone.** btrfs
+   reuses inode numbers. On `sandbox.img` inode 257 is two files; the prototype reports them as
+   one renamed file. A reused number is noted on the later file's `create`.
+3. **Versions first, events from versions.** For every state, in generation order, every file
+   tree it names is walked in the database (the walk recovery uses) and every inode gives an
+   *observation*: names, size, mode, owner, link count, `transid`, times, extents. Consecutive
+   equal observations of one identity collapse into a *version* with the states it was seen in.
+   Events are the differences between consecutive versions: `create` for the first (its
+   transaction is the INODE_ITEM's creation generation, exact); `rename`, `move`, `link`,
+   `unlink`, `modify`, `attr` between two versions (transaction: the later version's `transid`;
+   several changes between two surviving states show as their net effect, and the event says
+   between which states it lies); `delete` when a later state of the same tree, walked without
+   a gap, does not hold the identity (bounded by the two states; a walk with gaps gives
+   `not_seen`, never `delete`). A subvolume whose ROOT_ITEM disappears gives one
+   `subvolume_deleted`, not a delete per file.
+4. **Content deltas come from extent comparison, not from reading data.** `modify` lists the byte
+   ranges whose extent (address, offset, length, compression; for inline data its hash) differs
+   between the two versions, as added, removed or replaced. Whether the bytes at an address are
+   still those bytes is recovery's business.
+5. **Time.** Generations order events and are trusted as far as the checksummed blocks are. Wall
+   clock times are copied from the inode items (`otime` on create, `mtime`/`ctime` of the later
+   version otherwise) and labelled as what the filesystem recorded: they are data a user can
+   set.
+6. **`--uncommitted`** adds observations from fragments, lone leaves and dropped log leaves
+   (`recover --graph`'s sources, without sibling joins). They are ordered before the committed
+   state of their generation, marked `uncommitted`, and never produce a `delete`: absence from a
+   fragment proves nothing. A version with an inode item older than its extent (EXP-008) is
+   marked `inconsistent`. An identity seen only there gets `never_committed` (a file written,
+   fsynced and deleted within one transaction).
+7. **`artifacts.in_current` goes** (schema version 7), as M4b announced: "deleted since" is a
+   `delete` event now, with its bounds, instead of a flag computed against one tree.
+8. **EXTENT_OWNER_REF (172) is not used.** Simple quotas need `btrfs quota enable --simple` or
+   `mkfs.btrfs -O squota`, which arrived with btrfs-progs 6.7; the pinned guest tools are 6.6.3,
+   so no corpus image can have them without changing the pin, and an attribution nobody can
+   test is not added. The parser and the `extent_backrefs` rows exist (M3).
+
+*Definition of done for M5d.*
+- on `sandbox.img` the timeline shows inode 257 as two files (`target_file.txt`, created, then
+  deleted; `large_target.txt`, created later under the same number, then deleted), each event
+  with the states that bound it, and agrees with the image's known history of generations 11
+  to 14; the text rendering is what M5's definition of done calls "renders the sandbox's known
+  history";
+- on `m4_deep` every logged victim has exactly one `create` and one `delete`, the delete bounded
+  by the commit after its deletion, and with a recovery in the database its version carries the
+  logged SHA-256; with `--uncommitted` the flash files appear as `never_committed`;
+- synthetic trees: rename, move, link and unlink, modify with the changed ranges, attribute
+  change, reuse of an inode number, a walk with a gap (`not_seen`), a deleted subvolume;
+- hostile input: payloads that do not parse, cycles, 4096 states: no crash, bounded;
+- README documents the command and every key of its JSON records (the schema tests compare).
+
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.
