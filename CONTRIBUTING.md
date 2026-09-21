@@ -32,7 +32,9 @@ pull request; do not work around it. Background and reasons live in
    pass. GitHub can take a few minutes to start a run: "no checks reported"
    means wait, not merge, unless the change touches only `docs/` (which starts
    no run). A failing check is fixed on the branch, never merged over.
-8. **Merge** with a merge commit and delete the branch.
+8. **Merge** with a merge commit, and **keep the branch**: a merged feature branch stays on GitHub
+   as the visible record of that feature. Do not delete it, and do not tick "delete branch" when
+   merging.
 
 Ask the maintainer when a decision is really theirs to make: a change of
 scope or of a claim in the paper, anything that costs money, anything that
