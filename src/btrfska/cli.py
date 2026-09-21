@@ -27,6 +27,7 @@ from btrfska.substrate.roots import (
     resolve_tree,
 )
 from btrfska.substrate.tree import walk
+from btrfska.timeline import cli as timeline_cli
 
 EXIT_ERROR = 1
 # The image was read but btrfska will not interpret it: no valid superblock, or the feature
@@ -729,6 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     catalog_cli.add_parser(sub)
     recover_cli.add_parser(sub)
+    timeline_cli.add_parser(sub)
     return parser
 
 
