@@ -486,6 +486,21 @@ def test_overlapping_extents_a_missing_inode_item_and_a_symlink():
         ]
 
 
+def test_a_file_that_cannot_be_given_its_name_stays_partial_and_is_reported():
+    items = [*ROOT_DIR_ITEMS, *file_items(257, b"taken", b"content")]
+    with synthetic({"current": items}) as (conn, reader, out_dir):
+        roots = tuple(resolve_roots(conn, "current", 5))
+        with OutputTree(out_dir) as out:
+            out.make_dir((b"current", b"tree_5"), None, None)
+            (out_dir / "current/tree_5/taken").write_bytes(b"somebody else's file")
+            done, _ = recover_roots(conn, reader, out, 1, roots, no_holes=True)
+        assert dict(done.counts) == {"failed": 1}
+        assert (out_dir / "current/tree_5/taken").read_bytes() == b"somebody else's file"
+        assert (out_dir / "current/tree_5/taken.partial").read_bytes() == b"content"
+        row = artifacts(conn)[257]
+        assert row["sha256"] is None and row["output_path"].endswith("taken.partial")
+
+
 def test_an_unchanged_file_is_written_once_across_roots_unless_dedup_is_off():
     same = [*ROOT_DIR_ITEMS, *file_items(257, b"kept", b"unchanged")]
     changed = [*ROOT_DIR_ITEMS, *file_items(257, b"kept", b"changed!!")]

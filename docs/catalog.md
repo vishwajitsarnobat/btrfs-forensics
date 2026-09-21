@@ -68,7 +68,7 @@ Maintenance rules:
   pre-balance state: 3 files come out `partial` with every extent `unmapped`, because their
   data chunks were removed by the balance. That is the case historical chunk maps (M5, C6) are
   for; M4 reports it and does not guess.
-- **Verification.** `uv run pytest`: 862 passed, 0 skipped (40 new). On `sandbox.img`, `m1_lzo`,
+- **Verification.** `uv run pytest`: 863 passed, 0 skipped (41 new). On `sandbox.img`, `m1_lzo`,
   `m1_zlib`, `m1_blake2b` and `m3_wide`, for every root set and every subvolume, the set of
   regular files equals what an independent walk through the image finds, and their content
   equals `read_file` (every file; every 40th on `m3_wide`, whose 1 500 files cost one tree walk

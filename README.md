@@ -537,7 +537,7 @@ skips the hash, and the run is recorded as not checked).
   `btrfska recover: refused: inode N of ROOT: encrypted extent …`); `duplicate` (with several
   roots, a file that is unchanged since a root already written is not read again; `--no-dedup`
   writes every copy); `recorded` (a symlink or special file); `failed` (the output file could
-  not be created).
+  not be created or named).
 - **Records.** Every inode gets a row in `artifacts`, one row in `provenance` per item it was
   built from (the INODE_ITEM, every INODE_REF and INODE_EXTREF name, every XATTR_ITEM, every
   EXTENT_DATA with the physical ranges that were read), and the run a row in `recovery_runs`

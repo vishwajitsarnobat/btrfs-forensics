@@ -269,12 +269,16 @@ class _Run:
                     digest = sink.close(mode, _times(inode))
                     row["bytes_written"] = sink.written
                     self.bytes_written += sink.written
-                    if missing or inode is None:
-                        row["status"] = "partial"
+                    row["status"] = "partial" if missing or inode is None else "complete"
+                    if row["status"] == "complete":
+                        try:
+                            self.out.promote(parts)
+                            row["sha256"] = digest
+                        except OSError as exc:  # the name is taken after all, or no hard links
+                            row["status"] = "failed"
+                            problems.append(f"read completely, but left as {PARTIAL!r}: {exc}")
+                    if row["status"] != "complete":
                         parts = (*parts[:-1], parts[-1] + PARTIAL)
-                    else:
-                        self.out.promote(parts)
-                        row["status"], row["sha256"] = "complete", digest
                     row["output_path"] = _text(b"/".join(parts))
         row["path"], row["path_raw"] = _text(b"/".join(where[0])), b"/".join(where[0])
         row["missing"], row["problems"] = json.dumps(missing), json.dumps(problems)
