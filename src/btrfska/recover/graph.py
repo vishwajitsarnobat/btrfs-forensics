@@ -11,10 +11,12 @@ artifact (`artifacts.joined`), and is refused when two candidates would give dif
   committed state, and its artifacts say so.
 - `sibling` (`continue_file`): the last file of a lone leaf continues in another leaf of the same
   tree, when that leaf's first key belongs to the same inode, head and tail cover the file
-  exactly, and the file's newest extent item was written in the transaction of the INODE_ITEM's
-  last change (`generation` equals `transid`). The same leaf boundary exists in many versions of
-  a tree, so there are usually many candidate tails; an older one with the right size would
-  otherwise pass for the file's content when the right one is lost.
+  exactly, no extent item is newer than the INODE_ITEM (`generation` at most `transid`), and the
+  tail leaf was not written before the INODE_ITEM's last change (header generation at least
+  `transid`). The same leaf boundary exists in many versions of a tree, so there are usually
+  many candidate tails. A leaf written at or after the last change holds the file as it was
+  then or later, and a later change of content would show as a newer extent or a different
+  cover; an older leaf of the right size would pass for the content when the right one is lost.
 - `parent_path` (`ancestors`): the name of a parent directory is taken from other leaves of the
   same tree when that inode number has exactly one name there.
 """
@@ -77,17 +79,12 @@ def _coverage(record: InodeRecord, sectorsize: int) -> tuple[int, str | None]:
     return end, None
 
 
-def _newest_extent(record: InodeRecord) -> int:
-    return max(
-        (items.file_extent(item.data)["generation"] for item, _ in record.extents), default=0
-    )
-
-
 @dataclass
 class _Step:
     leaves: tuple[Leaf, ...]
     record: InodeRecord
     last: bytes  # key_sort of the last key of the chain so far
+    short: str = ""  # why the chain so far is not the whole file
 
 
 def _merge(record: InodeRecord, more: InodeRecord) -> InodeRecord:
@@ -133,6 +130,10 @@ def continue_file(
         candidates = _tails(conn, tree_id, record.objectid, step.last)
         if len(candidates) > MAX_CANDIDATES or len(step.leaves) > MAX_CHAIN:
             return None, "more continuation candidates than are searched; not joined"
+        if not candidates and step.short:
+            reasons.append(
+                f"after leaf {step.leaves[-1].bytenr}: {step.short}, and no leaf goes on"
+            )
         for content_id in candidates:
             searched += 1
             leaf = leaf_by_content(conn, content_id)
@@ -147,15 +148,11 @@ def continue_file(
                 "SELECT last_key FROM contents WHERE content_id = ?", (content_id,)
             ).fetchone()[0]
             _, problem = _coverage(joined, sectorsize)
-            if (
-                problem is None
-                and more.extents
-                and (_newest_extent(joined) != record.inode["transid"])
-            ):
+            if problem is None and leaf.generation < record.inode["transid"]:
                 problem = (
-                    f"its newest extent (generation {_newest_extent(joined)}) is older than the "
-                    f"INODE_ITEM's last change (transid {record.inode['transid']}): a later "
-                    "rewrite whose leaf is lost cannot be excluded"
+                    f"the leaf was written before the INODE_ITEM's last change (transid "
+                    f"{record.inode['transid']}): it may hold the file as it was before, and a "
+                    "later rewrite whose leaf is lost cannot be excluded"
                 )
             if problem is None:
                 signature = tuple(
@@ -170,7 +167,7 @@ def continue_file(
                 and "the file has" in problem
                 and (bytes(tail_last)[:8] == key_sort(record.objectid, 0, 0)[:8])
             ):
-                frontier.append(_Step((*step.leaves, leaf), joined, bytes(tail_last)))
+                frontier.append(_Step((*step.leaves, leaf), joined, bytes(tail_last), problem))
             else:
                 reasons.append(f"leaf {leaf.bytenr} generation {leaf.generation}: {problem}")
     if len(found) > 1:
@@ -189,9 +186,9 @@ def continue_file(
         "objectid": record.objectid,
         "leaves": [{"bytenr": leaf.bytenr, "generation": leaf.generation} for leaf in step.leaves],
         "evidence": "same tree; the next leaf's first key continues this inode; together the "
-        "extents cover the file exactly, without gap or overlap; the newest extent was written "
-        "in the transaction of the INODE_ITEM's last change; no other scanned leaf continues "
-        "the file differently under these rules",
+        "extents cover the file exactly, without gap or overlap; no extent is newer than the "
+        "INODE_ITEM and no joined leaf was written before its last change; no other scanned "
+        "leaf continues the file differently under these rules",
     }
     return step.record, join
 

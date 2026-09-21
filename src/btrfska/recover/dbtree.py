@@ -163,12 +163,12 @@ def resolve_root(conn: sqlite3.Connection, spec: str, tree_id: int) -> Root:
 
 
 def _block(conn: sqlite3.Connection, bytenr: int, generation: int, level: int):
-    """(content_id, physical, status, first_key) of the valid block, or None."""
+    """(content_id, physical, status, first_key, owner) of the valid block, or None."""
     return conn.execute(
         "SELECT n.content_id, MIN(n.physical),"
         " CASE WHEN MAX(n.status = 'live') THEN 'live'"
         "      WHEN MAX(n.status = 'backup_reachable') THEN 'backup_reachable'"
-        "      ELSE 'unreferenced' END, c.first_key"
+        "      ELSE 'unreferenced' END, c.first_key, n.owner"
         " FROM nodes n JOIN contents c USING (content_id)"
         " WHERE n.valid = 1 AND n.bytenr = ? AND n.generation = ? AND n.level = ?"
         " GROUP BY n.content_id ORDER BY MIN(n.physical) LIMIT 1",
@@ -262,7 +262,13 @@ def tree_leaves(conn: sqlite3.Connection, root: Root) -> tuple[list[Leaf], list[
             other = _mismatched(conn, root.tree_id, bytenr, generation, level)
             gaps.append(f"{where}: not among the valid scanned blocks{other}")
             continue
-        content_id, physical, status, first_key = found
+        content_id, physical, status, first_key, owner = found
+        if owner_ok(root.tree_id, u64(owner)) is False:
+            gaps.append(
+                f"{where}: a block of tree {u64(owner)}, not of this tree (linkage mismatch: "
+                "owner); not followed"
+            )
+            continue
         if expected_key is not None and first_key is not None and first_key != expected_key:
             gaps.append(
                 f"{where}: its first key is not the key its parent points to (linkage mismatch: "
