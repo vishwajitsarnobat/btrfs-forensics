@@ -20,6 +20,51 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — M5b: integrity and linkage checks told apart
+
+- **Branch:** `feature/m5-integrity-linkage` (from `main` at `f6a14c7`). Changed
+  `substrate/node.py`, `substrate/tree.py`, `cli.py` (`walk --linkage`), `recover/dbtree.py`
+  (gap lines), `README.md`, `tests/test_cli.py`, plan.md (M5b); new `tests/test_linkage.py`.
+  No schema change: the twelve check names and the `node_checks` rows are as before.
+- **Planned first** (`7bf92f7`: plan.md "M5b").
+- **Why.** One verdict answered two questions: is this a well-formed block of this filesystem,
+  and is it the block the referrer meant. The kernel needs both, and so does any walk of the
+  current state. A walk from an old root keeps meeting the third case, a sound block that is
+  newer than the old pointer says, and until now withheld it like a damaged one (M1b review).
+- **What was built.**
+  - `check_block` is now `check_integrity` (csum, bytenr, fsid, chunk_tree_uuid, generation,
+    nritems, written, layout, level below 8) plus `check_linkage` (owner, parent_generation,
+    first_key, level against the expected one), merged in the old order. `level` is the one
+    check with two halves; a failed `level` is an integrity failure when the block's own level is
+    8 or above, which is how `copy_failure` already read it.
+  - `read_node(..., linkage="report")` uses, when no copy passes everything, the first copy whose
+    integrity holds, and the node names the failed linkage checks (`linkage_mismatch`). `valid`
+    keeps the kernel's meaning; `usable` is new. `walk(..., linkage=)` descends flagged nodes and
+    checks every child against its own pointer.
+  - `btrfska walk --linkage report`, refused for `--root current`. `cat`, `tree`, `recover` and
+    the catalog stay on `enforce`.
+  - **Recovery never follows a mismatched pointer**, and now says why a gap is one: "a valid
+    block lies at that address, not followed: generation G level L owner O (linkage mismatch:
+    …)". The block behind such a pointer belongs to another state; read as part of the old one
+    it would produce a file version that never existed. So no row is derived from a flagged
+    block, and there is no confidence to lower until a later feature uses them (M6).
+- **What the corpus shows.** Only `m2_logtree` has a backup slot with rewritten blocks: the root,
+  extent and dev tree addresses of its oldest slot now hold blocks of *other trees*, newer ones
+  (`owner, parent_generation`). That is decision 5's warning in one example: the "root tree" a
+  report walk shows there is not a root tree. On every other image, and for every current root,
+  `enforce` and `report` give identical walks.
+- **Verification.** `uv run pytest`: 972 passed, 0 skipped (31 new). The split was compared once
+  with `main`'s `check_block` on 60 000 random blocks and expectations (levels 0 to 255, bit
+  flips with and without a recomputed checksum, random garbage, absurd `nritems`): identical
+  names, outcomes and details; in the tree, a property test pins the merge rule. Forged blocks
+  failing exactly one linkage check each are unusable under `enforce` and usable under `report`
+  with exactly that check named; ten kinds of integrity failure, level 8 included, are never
+  usable; 300 bit-flipped blocks become usable only when every integrity check holds; a valid
+  mirror is preferred to a flagged one. Ruff clean; images unchanged. No corpus script changed.
+- **Limits.** `report` exists for `walk` only. The scan, the catalog, recovery and the coming
+  timelines resolve children by (bytenr, generation, level) in the block index, where a
+  mismatched block is simply not the child; they gain the explanation, not the content.
+
 ## 2026-09-21 — M5a: historical chunk maps, and EXP-007
 
 - **Branch:** `feature/m5-historical-chunk-maps` (from `main` at `ef98a68`). New

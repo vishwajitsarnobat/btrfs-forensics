@@ -8,6 +8,11 @@ recorded on the child's copies (see node.py). The walker adds its own hop findin
 - a child whose last key is not below the parent's next key.
 An invalid node is yielded but not descended, because its pointers cannot be trusted. Depth is
 bounded: levels are below 8 and must drop by one per hop.
+
+`linkage="report"` (node.py, plan.md M5b) is for walks from old roots: a block whose integrity
+holds but which is not the block its parent named is yielded usable, flagged with
+`node.linkage_mismatch`, and descended, each child checked against its own pointer. What such a
+block holds belongs to another state than the root's. The current state is walked with `enforce`.
 """
 
 import stat
@@ -34,15 +39,17 @@ class Visit:
     expect: Expect = NO_EXPECTATIONS  # what the referrer said the block must be
 
 
-def walk(reader: NodeReader, bytenr: int, expect: Expect = NO_EXPECTATIONS) -> Iterator[Visit]:
+def walk(
+    reader: NodeReader, bytenr: int, expect: Expect = NO_EXPECTATIONS, linkage: str = "enforce"
+) -> Iterator[Visit]:
     """Every node reachable from `bytenr`, parents before children, children in key order."""
     claimed = {bytenr}
     stack = [(bytenr, expect, None, None, 0, None)]
     while stack:
         logical, expected, parent, slot, depth, upper = stack.pop()
-        node = reader.read(logical, expected)
+        node = reader.read(logical, expected, linkage)
         problems, children = [], []
-        if node.valid:
+        if node.usable:
             keys = (
                 [i.key for i in node.items] if node.level == 0 else [p.key for p in node.key_ptrs]
             )
@@ -75,7 +82,7 @@ def walk(reader: NodeReader, bytenr: int, expect: Expect = NO_EXPECTATIONS) -> I
 def leaf_items(visits) -> Iterator[tuple[Visit, Item]]:
     """(visit, item) for every item of every valid leaf among `visits`."""
     for visit in visits:
-        if visit.node.valid and visit.node.level == 0:
+        if visit.node.usable and visit.node.level == 0:
             for item in visit.node.items:
                 yield visit, item
 
