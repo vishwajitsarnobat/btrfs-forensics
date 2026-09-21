@@ -1475,6 +1475,12 @@ withheld. M5b keeps the verdict and adds the distinction.
   new key (the schema tests compare them);
 - a recovery gap names the mismatched block when the database holds one.
 
+**M5b status 2026-09-21: done** (catalog.md, M5b entry). Each bullet of its definition of done is
+a test in `tests/test_linkage.py`; the first one was also checked once against the version on
+`main`, 60 000 random blocks and expectations, identical checks and details. On the corpus only
+`m2_logtree` has a backup slot whose blocks were rewritten: its oldest slot's root, extent and dev
+tree addresses now hold blocks of other trees (`owner`, `parent_generation`).
+
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.
