@@ -33,7 +33,7 @@ from btrfska.recover.dbtree import (
     resolve_roots,
     tree_leaves,
 )
-from btrfska.recover.engine import RecoveryError, recover, recover_roots
+from btrfska.recover.engine import RecoveryError, recover, recover_roots, resolve_all
 from btrfska.recover.inodes import UNATTACHED, paths, safe_component
 from btrfska.recover.output import PARTIAL, OutputError, OutputTree
 from btrfska.substrate import items as parsers
@@ -611,6 +611,18 @@ def test_stream_extent_gives_the_bytes_read_extent_gives():
         pieces = list(pieces)
         assert record.error_kind is None and b"".join(pieces) == data
         assert max(map(len, pieces)) == MIB and len(pieces) == 4
+
+
+def test_all_skips_a_state_that_does_not_name_the_tree_and_a_named_root_must_have_it():
+    tree = [*ROOT_DIR_ITEMS, *file_items(257, b"f", b"x")]
+    with synthetic({"backup:8": tree, "current": tree}) as (conn, _, _):
+        conn.execute("DELETE FROM state_trees WHERE state_id = 1")  # as an old root tree may be
+        notes: list[str] = []
+        found = resolve_all(conn, ("all",), 5, notes.append)
+        assert [root.state_id for root in found] == [2]
+        assert len(notes) == 1 and "names no tree 5" in notes[0]
+        with pytest.raises(RootNotCataloged):
+            resolve_all(conn, ("state:1",), 5, notes.append)
 
 
 def test_a_gap_in_the_tree_is_reported_and_an_unknown_root_is_an_error():

@@ -30,6 +30,7 @@ from btrfska.catalog.schema import s64
 from btrfska.recover.dbtree import (
     Leaf,
     Root,
+    RootNotCataloged,
     every_state,
     former_names,
     fragment_roots,
@@ -546,6 +547,30 @@ def recover_roots(
     return run, gaps
 
 
+def resolve_all(
+    conn: sqlite3.Connection, roots: tuple[str, ...], tree_id: int | None, note
+) -> tuple[Root, ...]:
+    """The trees to read under `roots`, where `all` stands for every cataloged state. A state
+    that `all` brought in and that does not name the wanted tree is skipped with a note (an old
+    root tree from before the subvolume existed, or one whose leaf naming it is lost); a root
+    the user named must have it."""
+    specs = list(dict.fromkeys(roots))
+    brought_in: set[str] = set()
+    if "all" in specs:
+        at = specs.index("all")
+        brought_in = {s for s in every_state(conn) if s not in specs}
+        specs[at : at + 1] = [s for s in every_state(conn) if s in brought_in]
+    resolved: list[Root] = []
+    for spec in specs:
+        try:
+            resolved += resolve_roots(conn, spec, tree_id)
+        except RootNotCataloged as exc:
+            if spec not in brought_in:
+                raise
+            note(f"skipped: {exc}")
+    return tuple(resolved)
+
+
 def recover(
     image: str | os.PathLike[str],
     database: str | os.PathLike[str],
@@ -579,11 +604,7 @@ def recover(
         scan = conn.execute(
             "SELECT image_size, image_sha256_before, unsupported_format FROM scan_runs"
         ).fetchone()
-        specs = list(dict.fromkeys(roots))
-        if "all" in specs:  # every cataloged state, where `all` stands
-            at = specs.index("all")
-            specs[at : at + 1] = [s for s in every_state(conn) if s not in specs]
-        resolved = tuple(root for spec in specs for root in resolve_roots(conn, spec, tree_id))
+        resolved = resolve_all(conn, tuple(roots), tree_id, note)
         total_fragments, tops = fragment_roots(conn, MAX_FRAGMENTS) if graph else (0, [])
         tops = tuple(root for root in tops if tree_id in (None, root.tree_id))
         log_trees = tuple(
