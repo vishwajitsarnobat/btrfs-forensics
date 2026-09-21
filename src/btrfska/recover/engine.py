@@ -39,6 +39,7 @@ from btrfska.recover.dbtree import (
     tree_leaves,
 )
 from btrfska.recover.inodes import ORPHAN_ITEMS, InodeRecord, collect, paths, safe_component
+from btrfska.recover.maps import Readers
 from btrfska.recover.output import PARTIAL, FileSink, OutputError, OutputTree
 from btrfska.substrate import items, ondisk
 from btrfska.substrate.extents import FileAssembly, stream_extent
@@ -46,6 +47,7 @@ from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
 from btrfska.substrate.node import NodeReader
 
+MAX_NOTED = 16  # findings of the extent reader copied into one artifact's problems
 MAX_SYMLINK = 4096  # PATH_MAX: a longer target is not a symlink the kernel would have made
 
 
@@ -185,6 +187,10 @@ class _Run:
                 digest.update(piece)
             reads.append((extent, digest.hexdigest()))
         problems = [*assembly.problems, *assembly.errors]
+        noted = list(dict.fromkeys(p for extent, _ in reads for p in extent.problems))
+        problems += noted[:MAX_NOTED]
+        if len(noted) > MAX_NOTED:
+            problems.append(f"and {len(noted) - MAX_NOTED} more findings of the extent reader")
         if size is None:
             problems.append("no INODE_ITEM: the file's size is unknown")
         elif sink.written != size:
@@ -250,6 +256,7 @@ class _Run:
             "duplicate_of": None,
             "output_path": None,
             "in_current": in_current,
+            "chunk_maps": "[]",
         }
         reads, missing, same = [], [], None
         mode = None if inode is None else inode["mode"]
@@ -288,6 +295,8 @@ class _Run:
                 else:
                     reads, missing, found = self._write(sink, record)
                     problems += found
+                    through = [e.chunk_map for e, _ in reads if e.chunk_map and not e.error_kind]
+                    row["chunk_maps"] = json.dumps(list(dict.fromkeys(through)))
                     digest = sink.close(mode, _times(inode))
                     row["bytes_written"] = sink.written
                     self.bytes_written += sink.written
@@ -403,7 +412,7 @@ def _current_inodes(conn: sqlite3.Connection, tree_id: int) -> set[tuple[int, in
 
 def recover_roots(
     conn: sqlite3.Connection,
-    reader: NodeReader,
+    readers: Readers | NodeReader,
     out: OutputTree,
     recovery_id: int,
     roots: tuple[Root, ...],
@@ -415,13 +424,17 @@ def recover_roots(
 ):
     """Recover every root, then every orphan leaf, into `out`: the run (counts, bytes) and the
     gaps per root. Anchored roots come first, so that an orphan leaf's copy of a file a root
-    also gives is recognised as the duplicate."""
-    run = _Run(conn, reader, out, note, no_holes=no_holes, dedup=dedup)
+    also gives is recognised as the duplicate. `readers` chooses the chunk maps per root
+    (recover/maps.py); a plain NodeReader reads every root through its one map."""
+    if isinstance(readers, NodeReader):
+        readers = Readers(conn, readers, own=False)
+    run = _Run(conn, readers.current, out, note, no_holes=no_holes, dedup=dedup)
     trees = {root.tree_id for root in roots} | {root.tree_id for root, _ in orphans}
     current = {tree: _current_inodes(conn, tree) for tree in trees}
     gaps = {}
     for root, leaf in (*((root, None) for root in roots), *orphans):
         run.start_root(root)
+        run.reader = readers.reader(root)
         if leaf is None:
             leaves, found = tree_leaves(conn, root)
             gaps[f"{root.source} tree {root.tree_id}"] = tuple(found)
@@ -452,6 +465,7 @@ def recover(
     tree_id: int | None = ondisk.FS_TREE_OBJECTID,
     dedup: bool = True,
     orphans: bool = False,
+    maps: str = "own",
     rehash: bool = True,
     note: Callable[[str], None] = lambda line: None,
 ) -> Recovered:
@@ -459,7 +473,9 @@ def recover(
 
     `tree_id` None means every file tree each root names (the fs tree and all subvolumes). A root
     `all` stands for every cataloged state. `orphans` adds, after the roots, every file-tree leaf
-    that no cataloged state reaches, each read on its own.
+    that no cataloged state reaches, each read on its own. `maps` is `own` (file data is read
+    through the chunk map of each root's own time, recover/maps.py) or `current` (the current
+    chunk map only).
     Raises RecoveryError, db.CatalogError, output.OutputError or dbtree.RootNotCataloged before
     anything is written. `note` receives report lines (refusals, gaps).
     """
@@ -491,7 +507,7 @@ def recover(
             no_holes = bool(fs.fields["incompat_flags"] & ondisk.INCOMPAT["NO_HOLES"])
             with OutputTree(output_dir) as out:
                 options = {"roots": list(dict.fromkeys(roots)), "tree_id": tree_id or "all",
-                           "dedup": dedup, "orphans": orphans}  # fmt: skip
+                           "dedup": dedup, "orphans": orphans, "maps": maps}  # fmt: skip
                 recovery_id = conn.execute(
                     "INSERT INTO recovery_runs (tool_version, started_utc, image_path,"
                     " image_checked, output_dir, options) VALUES (?, ?, ?, ?, ?, ?)",
@@ -499,7 +515,7 @@ def recover(
                      json.dumps(options)),
                 ).lastrowid  # fmt: skip
                 run, gaps = recover_roots(
-                    conn, fs.reader, out, recovery_id, resolved,
+                    conn, Readers(conn, fs.reader, own=maps == "own"), out, recovery_id, resolved,
                     no_holes=no_holes, dedup=dedup, orphans=lone, note=note,
                 )  # fmt: skip
                 summary = {

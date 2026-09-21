@@ -31,7 +31,7 @@ the kernel lists under ORPHAN_ITEM, each labelled with its source. Timelines and
   newer trees apart from damaged ones.
 - `btrfska catalog build IMAGE --db PATH` reads the image once and writes an
   SQLite evidence database: every candidate tree block with its validation
-  record, the chunk map, the superblock copies, the historical states and the
+  record, the current and the historical chunk maps, the superblock copies, the historical states and the
   chain of custody, every item of every valid block, parsed, and what lies
   beyond `nritems` in each block (its slack, and the stale items and key
   pointers in it). `btrfska
@@ -396,8 +396,8 @@ applicable. Every record has `record` (its type) and `unsupported_format`
     scanned. `maps_historical`: the same under the CHUNK_ITEMs of the state's
     chunk tree, read through the index and independent of the
     sys_chunk_array (`null` unless `differs_from_current`). `maps_neither`:
-    found blocks neither places. This is a read-only check; historical chunk
-    maps come with plan.md M5.
+    found blocks neither places. This is a read-only check. `catalog build`
+    stores those maps (`chunk_maps`), and `recover` reads through them.
   - `level_consistent`: `false` when a pointer of this block names an
     indexed block of the pointer's bytenr and generation only at a level
     other than the block's level − 1 (for example a planted level-7 block
@@ -459,8 +459,9 @@ the class earliest in the list above wins:
 
 `btrfska catalog build IMAGE --db PATH [--full-sweep] [--workers N] [--max-states N] [--no-rehash]`
 scans the image once, read-only, and writes everything `scan` and `roots`
-compute, plus the superblock copies, the chunk map and the scanned regions, to
-one SQLite file. Later analysis queries that file instead of reading the image
+compute, plus the superblock copies, the chunk maps (the current one, one per
+superseded chunk-tree root the scan found, and one assembled from DEV_EXTENT
+items; none is merged into another) and the scanned regions, to one SQLite file. Later analysis queries that file instead of reading the image
 again. [`docs/evidence-db.md`](docs/evidence-db.md) documents every table and
 column, with example queries.
 
@@ -512,7 +513,7 @@ sqlite3 -readonly images/scratch/sandbox.db \
 
 ### `btrfska recover`
 
-`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--no-dedup] [--no-rehash]`
+`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--maps own|current] [--no-dedup] [--no-rehash]`
 extracts files. `DB` is the evidence database built from `IMAGE` (`catalog build`, best with
 `--full-sweep`); the image's size and SHA-256 must match the ones recorded there (`--no-rehash`
 skips the hash, and the run is recorded as not checked).
@@ -525,8 +526,21 @@ skips the hash, and the run is recorded as not checked).
 - **Metadata comes from the database, file data from the image.** The tree is walked in the
   database, so blocks the current chunk map no longer places are reached too. A pointer to a
   block that was not scanned as valid is reported as a `gap`; the files below it are absent.
-  Data extents are read through the *current* chunk map: an old state's extent in a chunk that
-  has since been removed fails as `unmapped` (historical chunk maps are plan.md M5).
+- **`--maps`: which chunk map file data is read through.** A balance gives every chunk a new
+  address and removes the old chunks, so the current chunk map cannot place what a state from
+  before the balance points at. The chunk-tree blocks that could are usually still on the disk,
+  and the catalog keeps one map per chunk-tree root it finds (`chunk_maps`). With `own`, the
+  default, a root whose chunk root is the current one is read through the current map alone. Any
+  other root is read through the map of its own time; an extent that map does not place is
+  tried against the newer maps, oldest first, and last against the map assembled from
+  DEV_EXTENT items. One map places an extent as a whole, the read record names it, and
+  `artifacts.chunk_maps` lists the maps a file came through. Nothing is merged and the current
+  map is never overridden. The file's problems say when an extent did not go through the
+  root's own map, when a newer map gives the same address to a different chunk, and when a newer
+  map has allocated the disk space again, so that the bytes may have been overwritten. `complete`
+  still means that every byte was read: whether bytes from a freed chunk are the file's is for a
+  data checksum to say (plan.md M6). With `current`, only the current map is used, and such an
+  extent fails as `unmapped`.
 - **`--orphans`: recovery without an anchor.** After the roots, every valid file-tree leaf that
   **no scanned root tree leads to** is read on its own (`source_kind` `orphan_node`): no
   ROOT_ITEM in any root-tree leaf the scan found, of any generation, names a tree that reaches
@@ -570,7 +584,7 @@ skips the hash, and the run is recorded as not checked).
   `inode_transid`, `kind`, `path`, `attached`, `names`, `size`, `mode`, `xattrs`,
   `symlink_target`, `status`, `bytes_written`, `sha256`, `extent_signature`, `duplicate_of`,
   `output_path`, `in_current` (1 when the current tree still holds this inode with the same
-  creation generation, 0 when it was deleted since), `missing`, `problems`, and `inode` (the
+  creation generation, 0 when it was deleted since), `chunk_maps`, `missing`, `problems`, and `inode` (the
   whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
 - Exit status 0 when every file is complete; 1 when any is `partial`, `refused_encrypted` or
   `failed`, or on an error (unknown root, wrong image, `DIR` exists); 2 for a refused format.

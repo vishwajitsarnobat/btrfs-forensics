@@ -46,6 +46,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
             tree_id=args.tree,
             dedup=not args.no_dedup,
             orphans=args.orphans,
+            maps=args.maps,
             rehash=not args.no_rehash,
             note=lambda line: _note(f"btrfska recover: {line}"),
         )
@@ -112,6 +113,14 @@ def add_parser(sub) -> None:
         default=ondisk.FS_TREE_OBJECTID,
         help="tree id: 5 for the top-level fs tree (default), 256 and above for a subvolume, "
         "or `all` for every file tree the root names",
+    )
+    parser.add_argument(
+        "--maps",
+        choices=("own", "current"),
+        default="own",
+        help="own (default): read a root's file data through the chunk map of its own time, then "
+        "through newer maps, and say which map each extent went through; current: through the "
+        "current chunk map only, so data in chunks a balance removed stays unmapped",
     )
     parser.add_argument(
         "--no-dedup",
