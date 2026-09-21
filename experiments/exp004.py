@@ -28,7 +28,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from btrfska.scan.roots import discover_image
+from btrfska.scan.roots import MAX_STATES, discover_image
 from btrfska.substrate import ondisk
 from btrfska.substrate.chunks import BG, MappingError, type_name
 from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat, open_filesystem
@@ -90,7 +90,7 @@ def run_find_root(path: Path) -> dict:
     }
 
 
-def btrfska_root_tree_blocks(path: Path) -> dict:
+def btrfska_root_tree_blocks(path: Path, max_states: int = MAX_STATES) -> dict:
     """Every owner-1 block btrfska indexes, with its placement under the current chunk map."""
     with open_image(path) as img:
         try:
@@ -100,7 +100,7 @@ def btrfska_root_tree_blocks(path: Path) -> dict:
         except NoValidSuperblock as exc:
             return {"refused": f"no valid superblock: {exc}"}
         nodesize = fs.reader.ctx.nodesize
-        scan = discover_image(img, fs, full_sweep=True)
+        scan = discover_image(img, fs, full_sweep=True, max_states=max_states)
         states = {(s.bytenr, s.generation, s.level): s for s in scan.discovery.states}
         rows = []
         for i in range(scan.index.nodes):
@@ -157,10 +157,10 @@ def predicted_find_root(rows: list[dict]) -> set[tuple[int, int, int]]:
     }
 
 
-def measure(path: Path) -> dict:
+def measure(path: Path, max_states: int = MAX_STATES) -> dict:
     result = {"image": path.name, "sha256": sha256(path)}
     result["find_root"] = run_find_root(path)
-    result["btrfska"] = ours = btrfska_root_tree_blocks(path)
+    result["btrfska"] = ours = btrfska_root_tree_blocks(path, max_states)
     if "refused" in ours or not result["find_root"]["opened"]:
         return result
     printed = {tuple(b) for b in result["find_root"]["blocks"]}
@@ -189,14 +189,14 @@ def measure(path: Path) -> dict:
     return result
 
 
-def run(paths: list[Path], results: Path) -> None:
+def run(paths: list[Path], results: Path, max_states: int = MAX_STATES) -> None:
     results.parent.mkdir(parents=True, exist_ok=True)
     with results.open("a") as out:
         for path in paths:
             if not path.exists():
                 print(f"skip   {path.name}: absent", file=sys.stderr)
                 continue
-            record = measure(path)
+            record = measure(path, max_states)
             out.write(json.dumps(record) + "\n")
             out.flush()
             cmp_ = record.get("comparison")
@@ -271,12 +271,19 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     run_cmd = commands.add_parser("run", help="measure images and append to the results")
     run_cmd.add_argument("images", nargs="*", type=Path)
+    run_cmd.add_argument(
+        "--max-states",
+        type=int,
+        default=MAX_STATES,
+        help="root trees btrfska evaluates as states (added for §6.8: m4_deep has more "
+        f"candidates than the default {MAX_STATES})",
+    )
     table_cmd = commands.add_parser("table", help="print the tables of EXP-004.md")
     for command in (run_cmd, table_cmd):
         command.add_argument("--results", type=Path, default=RESULTS)
     args = parser.parse_args()
     if args.command == "run":
-        run(args.images or default_images(), args.results)
+        run(args.images or default_images(), args.results, args.max_states)
     else:
         table(args.results)
 
