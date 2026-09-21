@@ -20,6 +20,57 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-21 — M3b: contents, items, tree edges and the four reverse queries (completes M3)
+
+- **Branch:** `feature/m3b-items-and-queries` (from `main` at `2ad52ea`). New
+  `src/btrfska/catalog/content.py` and `query.py`, `tests/test_catalog_content.py`,
+  `corpus/vm/scenarios/wide.guest.sh`; changed `catalog/schema.py` (version 2), `build.py`, `cli.py`,
+  `substrate/items.py` (extent parser), `corpus/manifest.tsv`, `docs/evidence-db.md`, `README.md`,
+  plan.md M3b, `tests/test_items.py`, `tests/test_vm_images.py`.
+- **Planned first** (`618526e`): contents keyed by SHA-256, keys stored readable and sortable, the
+  parsed tables, the new extent parser, the definition of done.
+- **Schema version 2.** `contents` (one row per distinct block content) and `nodes.content_id`;
+  `items` with the raw payload; `item_problems`; `key_ptrs`; parsed tables `inodes`, `inode_refs`,
+  `dir_entries`, `file_extents`, `root_items`, `extents`, `extent_backrefs`; views `content_blocks`
+  and `tree_edges`. Nothing of version 1 changed meaning; a version-1 file is refused.
+- **Key order.** Signed storage (M3a decision 5) keeps a u64's value but not its order: objectid −6
+  sorts before 0. Every key is therefore also stored as `key_sort`, 17 big-endian bytes that SQLite
+  compares bytewise, which is the btrfs key order. `trees-covering` and any `ORDER BY` on keys use
+  it. A test sorts 2 000 keys, high objectids included, both ways and compares.
+- **New parser: `items.extent_item` and `items.extent_ref`.** EXTENT_ITEM and METADATA_ITEM with
+  inline TREE_BLOCK_REF, SHARED_BLOCK_REF, EXTENT_DATA_REF, SHARED_DATA_REF and EXTENT_OWNER_REF
+  (172), and the standalone reference items. The extent's address is the key objectid; the key
+  offset is its length, or the level for METADATA_ITEM: prototype defect #8 is not carried over.
+  EXTENT_DATA_REF starts right after the type byte, the other kinds after an 8-byte value
+  (`btrfs_extent_inline_ref_size`). Hostile input raises only `ItemError` (4 000 random payloads).
+- **Reverse queries** (`catalog/query.py`, `btrfska catalog query DB …`): `parents-of` (internal
+  nodes, ROOT_ITEMs and superblock slots that name a block), `owners-of` (file extents of every
+  surviving generation, the extent tree's back-references, tree blocks at that address),
+  `trees-covering` (leaves whose key range holds a key), `items-in-generation`.
+- **New corpus image `m3_wide`.** Every tree in the existing images is a single leaf, so there was
+  no key pointer anywhere (`key_ptrs` 0 on all 14) and `parents-of` could not be tested on real
+  data. Scenario `wide`: 48 subvolumes, 1 500 files, deletions between commits, a read-only
+  snapshot, no balance. Root tree and fs tree reach level 1; 959 key pointers, every child found.
+  It is also the corpus's first history without a final balance (paper-draft.md G3).
+- **Numbers** (Fedora 44, single runs, indicative): `sandbox.img` 0.34 s, 364 KiB, 53 contents for
+  85 nodes, 302 items; `s01_discard_none_r1` 0.69 s, 1.2 MiB, 2 728 items; `m3_wide` 1.13 s,
+  5.4 MiB, 20 018 items, 10 074 directory entries. `item_problems` is 0 on all three.
+- **Verification: the definition of done.** On `sandbox.img` and four corpus images the database
+  is built from a copy, **the copy is deleted**, and every valid node reached by an independent
+  walk of the current and the four backup roots is then checked against the database: its items
+  (slot, key, offset, size and payload bytes) or key pointers are identical; `trees-covering`
+  returns the leaf, exact, for its first and last key; `parents-of` returns the walk's parent, or
+  a ROOT_ITEM or superblock slot for a tree root; `items-in-generation` contains every walked
+  item. On `m3_wide` this exercises real parent edges.
+- **Oracle.** `extent_backrefs` of the live extent tree equal `btrfs inspect-internal dump-tree -t
+  extent` reference for reference on `m3_wide` (which has SHARED_DATA_REFs from its snapshot) and
+  `s01_discard_none_r1`. The tool sees only a scratch copy; the test skips without btrfs-progs.
+- `uv run pytest`: 810 passed, 0 skipped. Ruff and format clean. `sandbox.img` and all 15 corpus
+  images unchanged. A fresh clone of the branch built the corpus and passed with `./setup.sh`.
+- **Limits.** Items beyond `nritems` and node slack are not parsed (M4). The database holds every
+  item payload once per distinct content, so its size follows the image's metadata, not the image.
+  Content ids and the block index are held in memory during the build.
+
 ## 2026-09-21 — M3a: the evidence database, built in one pass
 
 - **Branch:** `feature/m3a-evidence-catalog` (from `main` at `c13b098`). New package
