@@ -215,3 +215,35 @@ def test_flip_byte_refuses_offsets_outside_the_image(source):
         assert result.returncode != 0
         assert "outside the image" in result.stderr
         assert not (d / "out.img").exists()
+
+
+def test_plant_slack_refuses_a_tree_without_an_internal_node_and_leaves_no_file():
+    """sandbox.img's fs tree is a single leaf. The source is only read."""
+    with scratch_dir("test_mutate_") as d:
+        before = sha256(REPO_ROOT / "sandbox.img")
+        result = run(REPO_ROOT / "sandbox.img", d / "planted.img", "plant-slack")
+        assert result.returncode != 0 and "no internal node" in result.stderr
+        assert not (d / "planted.img").exists()
+        assert sha256(REPO_ROOT / "sandbox.img") == before
+
+
+def test_plant_slack_changes_only_the_slack_and_checksum_of_the_blocks_it_names():
+    src = REPO_ROOT / "images" / "scenarios" / "m3_wide.img"
+    if not src.exists():
+        pytest.skip("m3_wide.img absent: build it with corpus/build.py")
+    with scratch_dir("test_mutate_") as d:
+        result = run(src, d / "planted.img", "plant-slack", "--message", "over here")
+        assert result.returncode == 0, result.stderr
+        offsets = [int(word) for word in result.stdout.split("plant-slack", 1)[1].split()]
+        assert len(offsets) == 4  # a node and a leaf, two DUP copies each
+        a, b = src.read_bytes(), (d / "planted.img").read_bytes()
+        assert len(a) == len(b)
+        nodesize = 16384
+        for offset in offsets:
+            old, new = a[offset : offset + nodesize], b[offset : offset + nodesize]
+            differing = [i for i in range(nodesize) if old[i] != new[i]]
+            assert new.count(b"over here") == 1 and old.count(b"over here") == 0
+            start = new.index(b"over here")
+            assert all(i < ondisk.CSUM_SIZE or start <= i < start + 9 for i in differing)
+            a = a[:offset] + new + a[offset + nodesize :]
+        assert a == b  # nothing else in the image changed
