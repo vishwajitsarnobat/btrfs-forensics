@@ -147,6 +147,99 @@ def root_item(data) -> dict:
     return fields
 
 
+_REF_NAMES = {
+    K["TREE_BLOCK_REF"]: "TREE_BLOCK_REF",
+    K["SHARED_BLOCK_REF"]: "SHARED_BLOCK_REF",
+    K["EXTENT_DATA_REF"]: "EXTENT_DATA_REF",
+    K["SHARED_DATA_REF"]: "SHARED_DATA_REF",
+    K["EXTENT_OWNER_REF"]: "EXTENT_OWNER_REF",
+}
+# The `type` byte of an inline reference is followed by an 8-byte value, except for
+# EXTENT_DATA_REF, whose 28-byte struct starts right after the type byte
+# (btrfs_extent_inline_ref_size, fs/btrfs/accessors.h at v7.0).
+_INLINE_TYPE = 1
+
+
+def _backref(kind: int, inline: bool, **fields) -> dict:
+    """One back-reference; the fields a kind does not have are None."""
+    ref = dict.fromkeys(("root", "parent", "objectid", "offset", "count"))
+    return {"type": kind, "type_name": _REF_NAMES[kind], "inline": inline, **ref, **fields}
+
+
+def extent_item(key: Key, data) -> dict:
+    """EXTENT_ITEM or METADATA_ITEM with its inline back-references.
+
+    The extent's logical address is the key objectid. The key offset is the extent's length for
+    EXTENT_ITEM and the tree block's level for METADATA_ITEM (skinny metadata), where no
+    btrfs_tree_block_info follows the head.
+    """
+    head = _unpack(ondisk.EXTENT_ITEM, data)
+    pos = ondisk.EXTENT_ITEM.size
+    tree_block = bool(head["flags"] & ondisk.EXTENT_FLAG_TREE_BLOCK)
+    skinny = key.type == K["METADATA_ITEM"]
+    level, first_key = (key.offset if skinny else None), None
+    if tree_block and not skinny:
+        info = _unpack(ondisk.TREE_BLOCK_INFO, data, pos)
+        pos += ondisk.TREE_BLOCK_INFO.size
+        level = info["level"]
+        first_key = Key(info["key_objectid"], info["key_type"], info["key_offset"])
+    refs = []
+    while pos < len(data):
+        kind = data[pos]
+        if kind == K["EXTENT_DATA_REF"]:
+            body = _unpack(ondisk.EXTENT_DATA_REF, data, pos + _INLINE_TYPE)
+            pos += _INLINE_TYPE + ondisk.EXTENT_DATA_REF.size
+            refs.append(_backref(kind, True, **body))
+            continue
+        value = _unpack(ondisk.EXTENT_INLINE_REF, data, pos)["offset"]
+        pos += ondisk.EXTENT_INLINE_REF.size
+        if kind == K["TREE_BLOCK_REF"]:
+            refs.append(_backref(kind, True, root=value))
+        elif kind == K["SHARED_BLOCK_REF"]:
+            refs.append(_backref(kind, True, parent=value))
+        elif kind == K["EXTENT_OWNER_REF"]:
+            refs.append(_backref(kind, True, root=value))
+        elif kind == K["SHARED_DATA_REF"]:
+            count = _unpack(ondisk.SHARED_DATA_REF, data, pos)["count"]
+            pos += ondisk.SHARED_DATA_REF.size
+            refs.append(_backref(kind, True, parent=value, count=count))
+        else:
+            raise ItemError(f"unknown inline reference type {kind} at offset {pos - 9}")
+    return {
+        "bytenr": key.objectid,
+        "num_bytes": None if skinny else key.offset,
+        "refs": head["refs"],
+        "generation": head["generation"],
+        "flags": head["flags"],
+        "tree_block": tree_block,
+        "level": level,
+        "first_key": first_key,
+        "backrefs": refs,
+    }
+
+
+def extent_ref(key: Key, data) -> dict:
+    """A standalone back-reference item; the extent is the key objectid.
+
+    TREE_BLOCK_REF and SHARED_BLOCK_REF carry everything in the key (offset: root, or parent
+    bytenr). EXTENT_DATA_REF keys hold a hash of the struct in the payload; SHARED_DATA_REF keys
+    hold the parent and the payload the count.
+    """
+    kind = key.type
+    if kind == K["TREE_BLOCK_REF"]:
+        return _backref(kind, False, root=key.offset)
+    if kind == K["SHARED_BLOCK_REF"]:
+        return _backref(kind, False, parent=key.offset)
+    if kind == K["EXTENT_DATA_REF"]:
+        return _backref(kind, False, **_unpack(ondisk.EXTENT_DATA_REF, data))
+    if kind == K["SHARED_DATA_REF"]:
+        count = _unpack(ondisk.SHARED_DATA_REF, data)["count"]
+        return _backref(kind, False, parent=key.offset, count=count)
+    if kind == K["EXTENT_OWNER_REF"]:
+        return _backref(kind, False, root=_unpack(ondisk.EXTENT_OWNER_REF, data)["root_id"])
+    raise ItemError(f"key type {kind} is not a back-reference")
+
+
 def root_ref(data) -> dict:
     """ROOT_REF and ROOT_BACKREF."""
     fields = _unpack(ondisk.ROOT_REF, data)
