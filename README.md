@@ -598,7 +598,8 @@ skips the hash, and the run is recorded as not checked).
 - **A file is not `complete` when one of its extents is newer than its INODE_ITEM** (`missing`
   reason `inode_item_older_than_extent`). A commit always updates the inode item, so no committed
   tree holds such a file; a leaf written in the middle of a transaction can, and then the data is
-  already the new one while the size is still the old one.
+  already the new one while the size is still the old one. In blocks that were never committed
+  the same is concluded when an extent reaches past the sector of the end of the file.
 - **One extent at a time.** An extent is mapped in full first, then read and written in pieces
   of at most 1 MiB; memory does not grow with file size. Inline, regular and prealloc extents,
   holes (left sparse in the output), zlib, zstd and LZO are handled as in `cat`.

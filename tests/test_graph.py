@@ -293,6 +293,26 @@ def test_a_file_whose_extent_is_newer_than_its_inode_item_is_not_complete():
         assert any("newer than the INODE_ITEM" in p for p in json.loads(row["problems"]))
 
 
+def test_in_an_uncommitted_block_data_past_the_end_of_the_file_means_the_same():
+    """Created at size 0, written a moment later, both in one transaction: the generations
+    agree, the sizes do not. In a committed tree the same items are what the kernel shows."""
+    early = [
+        ((257, K["INODE_ITEM"], 0), inode_item(0, generation=7)),
+        ((257, K["INODE_REF"], 256), inode_ref(b"just-created")),
+        ((257, K["EXTENT_DATA"], 0), regular(0, 2, generation=7)),
+    ]
+    with synthetic({"current": [*ROOT_DIR_ITEMS, *early]}, DATA, loose=([*early],)) as (
+        conn, reader, out,
+    ):  # fmt: skip
+        run(conn, reader, out, orphans=True, dedup=False)
+        rows = by_source(conn)
+        assert rows["anchored_root", 257]["status"] == "complete"
+        lone = rows["orphan_node", 257]
+        assert lone["status"] == "partial"
+        assert json.loads(lone["missing"]) == [[0, 0, "inode_item_older_than_extent"]]
+        assert any("earlier moment" in p for p in json.loads(lone["problems"]))
+
+
 # ---------------------------------------------------------------------------
 # m4_deep: against what its scenario can have written
 # ---------------------------------------------------------------------------

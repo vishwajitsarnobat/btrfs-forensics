@@ -1019,11 +1019,19 @@ def test_cli_recover_all_states_with_orphans_reports_the_orphan_sources(capsys):
         code = main(["recover", str(SANDBOX), "--db", str(database), "--out", str(d / "out"),
                      "--root", "all", "--orphans"])  # fmt: skip
         out = capsys.readouterr().out
-        assert code == 0 and out.count("\nroot state:") + out.startswith("root state:") >= 5
+        assert out.count("\nroot state:") + out.startswith("root state:") >= 5
         line = next(row for row in out.splitlines() if row.startswith("orphan sources:"))
         conn = db.open_readonly(database)
         leaves = len(orphan_leaves(conn))
+        # One orphan leaf holds large_target.txt at size 0 with its 5 MiB extent already
+        # attached: written between the data and the inode update. Not a version of the file.
+        partial = conn.execute("SELECT source_kind, path, missing FROM artifacts"
+                               " WHERE status = 'partial'").fetchall()  # fmt: skip
         conn.close()
+        assert code == 1 and [(r[0], r[1]) for r in partial] == [
+            ("orphan_node", "large_target.txt.partial")
+        ]
+        assert "inode_item_older_than_extent" in partial[0][2]
         assert line.startswith(f"orphan sources: {leaves} leaves no root tree leads to")
         assert (d / "out" / "orphan_nodes").is_dir()
 

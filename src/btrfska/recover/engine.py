@@ -139,6 +139,7 @@ class _Run:
         self.by_source: Counter[tuple[str, str]] = Counter()  # (source kind, status)
         self.bytes_written = 0
         self.last_objectid: int | None = None  # of the orphan leaf being read, else None
+        self.uncommitted = False  # the root being read is no committed tree (orphan sources)
 
     # ---- output names -------------------------------------------------------------------
     def _claim(self, parts: tuple[bytes, ...], objectid: int) -> tuple[bytes, ...]:
@@ -213,6 +214,19 @@ class _Run:
                 f"an extent of generation {newest} is newer than the INODE_ITEM (transid "
                 f"{transid}): the leaf was written before the inode item was updated, so the "
                 "size and times are those of the previous version"
+            )
+        beyond = [
+            e for e, _ in reads if e.kind in ("inline", "regular")
+            and any(p.startswith("clipped from") for p in e.problems)
+        ]  # fmt: skip
+        if self.uncommitted and beyond and not (transid is not None and newest > transid):
+            # The same thing within one transaction: the generations agree, the sizes do not.
+            # A commit never leaves data past the sector of the end of the file.
+            missing.append([0, sink.written, "inode_item_older_than_extent"])
+            problems.append(
+                f"the extent at file offset {beyond[0].file_offset} reaches past the end of the "
+                "file: in a block that was never committed, the INODE_ITEM is from an earlier "
+                "moment of the transaction than the extent"
             )
         noted = list(dict.fromkeys(p for extent, _ in reads for p in extent.problems))
         problems += noted[:MAX_NOTED]
@@ -505,6 +519,7 @@ def recover_roots(
             continue
         run.start_root(root)
         run.reader = readers.reader(root)
+        run.uncommitted = root.kind != "anchored_root"
         named: dict = {}
         if leaf is None:
             leaves, found = tree_leaves(conn, root)
