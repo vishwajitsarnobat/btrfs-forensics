@@ -120,8 +120,9 @@ few minutes, on any Linux distribution.** Every change keeps that true.
   repository or the authors. A paper is cited for what it says only after
   someone has read it; until then its notes say so.
 - `major-project.jpg` (the signed project proposal) stays where it is.
-- `legacy/` is the frozen prototype. It is changed only to keep it running,
-  and deleted only when the parity gate of `docs/plan.md` §4.3 is met.
+- The prototype that preceded `btrfska` was deleted on 2026-09-22, once the parity gate of
+  `docs/plan.md` §4.3 was met. It lives on as the git tag `legacy-final`; the two experiments
+  that still run it check it out from there (`experiments/prototype.py`).
 
 ## 7. Cost
 

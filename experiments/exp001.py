@@ -40,6 +40,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO))  # experiments/prototype.py, whether run as a script or imported
 
 from btrfska.substrate import items, ondisk  # noqa: E402
 from btrfska.substrate.extents import read_file  # noqa: E402
@@ -47,6 +48,7 @@ from btrfska.substrate.fs import open_filesystem  # noqa: E402
 from btrfska.substrate.image import open_image  # noqa: E402
 from btrfska.substrate.roots import TreeRoot, root_sets, subvolumes  # noqa: E402
 from btrfska.substrate.tree import fs_tree_inventory, leaf_items, walk  # noqa: E402
+from experiments import prototype  # noqa: E402
 
 OUT = REPO / "images" / "scratch" / "exp" / "EXP-001"
 SCENARIOS = REPO / "images" / "scenarios"
@@ -159,7 +161,7 @@ def measure_btrfska(name: str, path: Path) -> dict:
 # ---------------------------------------------------------------------------
 # legacy prototype
 # ---------------------------------------------------------------------------
-LEGACY_COMMAND = "uv run --python 3.14 python legacy/main.py {image} -o {out}"
+LEGACY_COMMAND = "uv run --python 3.14 python {prototype}/main.py {image} -o {out}"
 
 
 def legacy_reference(name: str, path: Path, filename: str, generation: int) -> str | None:
@@ -187,7 +189,10 @@ def measure_legacy(name: str, path: Path) -> dict:
     if out.exists():
         shutil.rmtree(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    command = LEGACY_COMMAND.format(image=path.relative_to(REPO), out=out.relative_to(REPO))
+    command = LEGACY_COMMAND.format(
+        prototype=prototype.checkout().relative_to(REPO), image=path.relative_to(REPO),
+        out=out.relative_to(REPO),
+    )  # fmt: skip
     log = subprocess.run(command.split(), cwd=REPO, capture_output=True, text=True, check=True)
     (OUT / "legacy" / f"{name}.log").write_text(log.stdout + log.stderr)
     report = json.loads((out / "recovery_report.json").read_text())

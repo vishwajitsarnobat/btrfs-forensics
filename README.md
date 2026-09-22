@@ -16,7 +16,7 @@ the kernel lists under ORPHAN_ITEM, each labelled with its source. M5 (reconstru
 timelines): the catalog keeps the chunk maps of superseded chunk-tree roots and `recover` reads
 a state from before a balance through the map of its own time; `recover --graph` joins orphan
 blocks where a join can be justified; `btrfska timeline` follows every inode through every
-cataloged state. The earlier prototype is frozen, still runnable, under `legacy/`.
+cataloged state. The prototype that came first is the git tag `legacy-final`.
 - `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID|all]... [--tree ID|all] [--orphans|--graph]`
   extracts the files of a tree as the current, a backup or a discovered root saw them, and with
   `--orphans` also from leaves that no root tree leads to, one extent at a time, with a
@@ -715,10 +715,9 @@ uv run btrfska recover sandbox.img --db images/scratch/sandbox.db --out images/s
 ## Tests and lint
 
 ```sh
-uv run ruff check . && uv run ruff format --check .   # lint (legacy/ excluded)
-uv run pytest                                          # new tests + legacy tests (collected as unittest cases)
+uv run ruff check . && uv run ruff format --check .   # lint
+uv run pytest                                          # every test; nothing is skipped on a complete checkout
 uv run pytest -m sandbox                               # sandbox-only subset
-uv run python -m unittest discover -s legacy/tests     # legacy suite, original runner
 uvx --from . btrfska --version
 ```
 
@@ -767,15 +766,13 @@ One image by hand (the corpus build does this for every manifest row):
 corpus/vm/fetch_vm.sh && corpus/vm/build_initramfs.sh && corpus/vm/make_image.sh smoke_s01
 ```
 
-## Legacy prototype
+## The prototype
 
-The prototype CLI and its tests live under `legacy/` as a reference until the
-new pipeline reaches parity (`plan.md` §4.3). Run both at once:
-
-```sh
-uv run --python 3.14 python legacy/main.py sandbox.img -o images/scratch/legacy-out
-uv run --python 3.14 python -m unittest discover -s legacy/tests -v
-```
+The first prototype (August 2026) is the git tag `legacy-final`. It was deleted from the tree
+on 2026-09-22 after `btrfska` reproduced its results on `sandbox.img` (`docs/plan.md` §4.3). Two
+experiment records still run it for their historical columns; `experiments/prototype.py` checks
+it out from the tag under `images/scratch/`. It is our own earlier code, not a baseline: the
+tools the paper compares against are listed in `docs/plan.md` M7.
 
 ## Documentation
 
