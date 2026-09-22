@@ -45,6 +45,16 @@ def log_roots(conn: sqlite3.Connection) -> list[Root]:
     ]  # fmt: skip
 
 
+def base_inodes(conn: sqlite3.Connection, below: Root) -> tuple[dict[int, InodeRecord], list[str]]:
+    """The base tree's inodes and the gaps of its walk. With a gap, an inode's extents may be
+    in a leaf that was not found, so an unlogged range cannot be taken for a hole."""
+    from btrfska.recover.dbtree import tree_leaves
+    from btrfska.recover.inodes import collect
+
+    leaves, gaps = tree_leaves(conn, below)
+    return collect(conn, leaves), gaps
+
+
 def base_root(conn: sqlite3.Connection, log: Root) -> Root | None:
     """The subvolume's tree in the newest cataloged state older than the log."""
     states = conn.execute(
@@ -116,7 +126,7 @@ def overlay(base: list, logged: list, size: int, sectorsize: int) -> tuple[list,
 
 def replay(
     logged: dict[int, InodeRecord], base: dict[int, InodeRecord] | None, base_root_: Root | None,
-    log: Root, sectorsize: int,
+    log: Root, sectorsize: int, base_gaps: int = 0,
 ) -> tuple[dict[int, InodeRecord], dict[int, Name]]:  # fmt: skip
     """The log's inodes as they would be after a replay, and the names of the base tree's
     directories for their paths. Every record says in `joins` what it rests on."""
@@ -153,6 +163,21 @@ def replay(
             continue
         extents, problems = overlay(old.extents, record.extents, inode["size"], sectorsize)
         record.extents = extents
+        if base_gaps:
+            record.log_only = True  # what the base held in a lost leaf is not known
+            problems.append(
+                f"the base tree's walk has {base_gaps} gap(s): a range that neither the log nor "
+                "the found base leaves cover is not known to be a hole"
+            )
+        if base_root_.generation != log.generation - 1:
+            # The kernel replays a log over the commit just before it. An older base may hold an
+            # older version of what was not logged: the file is then not known whole.
+            record.log_only = True
+            problems.append(
+                f"the base state is generation {base_root_.generation}, not the commit before "
+                f"the log ({log.generation - 1}), which is not cataloged: ranges the log does "
+                "not cover may have changed in between"
+            )
         record.origins = [o for o in old.origins if o.role == "extent_data"] + record.origins
         record.problems += problems
         if not record.names:
@@ -175,7 +200,3 @@ def replay(
         if objectid not in found and record.kind == "dir" and record.names:
             names[objectid] = record.names[0]
     return found, names
-
-
-def describe(log: Root) -> str:
-    return json.dumps({"log": log.source, "subvolume": log.subvolume})

@@ -136,9 +136,9 @@ def _map(reader: NodeReader, logical: int, length: int):
 def _map_through(img, chunk_map, logical: int, length: int):
     """(ranges, segments, problems, (error kind, detail) or None) under one chunk map.
 
-    `segments` holds (physical, size) of the copy used for each piece, in order. Nothing of the
-    content is kept: this is where `unmapped` and `unreadable` are decided, so a caller that then
-    reads the segments cannot fail halfway through an extent.
+    `segments` holds (physical, size, devid) of the copy used for each piece, in order. Nothing
+    of the content is kept: this is where `unmapped` and `unreadable` are decided, so a caller
+    that then reads the segments cannot fail halfway through an extent.
     """
     ranges, segments, problems = [], [], []
     pieces = chunk_map.pieces(logical, length)
@@ -170,13 +170,13 @@ def _map_through(img, chunk_map, logical: int, length: int):
             return tuple(ranges), [], tuple(problems), (
                 "unreadable", f"no readable copy of logical {start}+{size}",
             )  # fmt: skip
-        segments.append((copies[used].physical, size))
+        segments.append((copies[used].physical, size, copies[used].devid))
     return tuple(ranges), segments, tuple(problems), None
 
 
-def _pieces(img, segments: list[tuple[int, int]]) -> Iterator[bytes]:
+def _pieces(img, segments: list[tuple[int, int, int]]) -> Iterator[bytes]:
     """The bytes of mapped segments, at most `_WINDOW` at a time."""
-    for physical, size in segments:
+    for physical, size, _ in segments:
         for offset in range(0, size, _WINDOW):
             step = min(_WINDOW, size - offset)
             yield bytes(img.mmap[physical + offset : physical + offset + step])
@@ -384,7 +384,7 @@ def read_file(reader: NodeReader, root: TreeRoot, inode: int, *, no_holes: bool)
 
     The content is held fully in memory: every non-zero extent's bytes are kept in the `FileRead`,
     and each is built from a read buffer first, so the peak is about twice the file size (zero
-    runs excepted). Streaming reads arrive with the recovery engine (plan.md M4)."""
+    runs excepted). `recover` streams the same extents through `FileAssembly` instead."""
     errors, problems, inode_fields, found = [], [], None, []
     for visit in walk(reader, root.bytenr, root.expect()):
         node = visit.node

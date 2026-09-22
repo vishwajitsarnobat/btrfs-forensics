@@ -20,6 +20,69 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-22 — Final review of M0 to M5: what two independent reads of the code found
+
+- **Branch:** `fix/m5-final-review` (from `main` at `74948d5`). Changed `recover/engine.py`,
+  `recover/logs.py`, `recover/graph.py`, `recover/dbtree.py`, `recover/inodes.py`,
+  `scan/chunkmaps.py`, `scan/roots.py`, `catalog/build.py`, `substrate/chunks.py`,
+  `substrate/extents.py`, `substrate/tree.py`, `timeline/build.py`, `timeline/cli.py`,
+  `corpus/mutate.py`, `README.md`, `docs/evidence-db.md`, and tests. No schema change.
+- **Why.** Before M6, the whole of `src/` was read twice, once by a reviewer with the diff of M5
+  and once by an auditor with the whole tree and the documents, and the pipeline was run end to
+  end on six images including the damaged and the refused ones. Everything below was fixed with
+  a test that failed before it, except where marked as left alone.
+- **Wrong verdicts, fixed.**
+  - A file with an extent item wholly past its end (`fallocate` with KEEP_SIZE leaves a prealloc
+    extent beyond `i_size` in a committed tree) was `partial` with a spurious `overlap`, while
+    `cat` read it whole. A clipped-away extent is no overlap now.
+  - Historical chunk maps parsed chunk items without the superblock's feature flags, so on a
+    MIXED_GROUPS filesystem every chunk of every historical map was rejected. No corpus image is
+    mixed, so no test saw it; a forged one does now.
+  - `from_dev_extents` made a DUP chunk of any two device extents naming one address on a
+    one-device filesystem, including two extents from dev-tree leaves of different generations:
+    a chunk that lived at P1, was balanced away, and a later chunk at the same logical address at
+    P2. Two extents are now copies of one chunk only when a single dev-tree leaf holds both;
+    otherwise the pair is rejected as chunks that had the address at different times, block
+    group or not.
+  - A log replayed over a base state whose walk had gaps, or over a state older than the commit
+    before the log (when that one is not cataloged), wrote unlogged ranges as zeros and called
+    the file `complete`. Both cases now make the file `log_only`: unlogged ranges are `not_logged`.
+  - `timeline --uncommitted` read log leaves as versions of their own, so a fast fsync (one
+    changed extent logged) produced a `modify` that removed the rest of the file and a second
+    that put it back, and an inode logged in exists-only mode (generation 0) became an identity
+    with a spurious `create`. Log trees are now replayed over their base as `recover --logs`
+    does, exists-only entries are left out, and a version whose base is missing or not the commit
+    before is marked `log_only` (new key, documented).
+- **A crash path, fixed.** A forged lone leaf whose last inode is number 2^64-1 made the sibling
+  search compute a key of objectid 2^64 and abort the recovery (`struct.error`).
+- **Smaller.** The dedup key of a replayed log artifact used tree -6 instead of the subvolume, so
+  a file fsynced without a change of content was written a second time instead of being a
+  duplicate. The "space was allocated again" note of a read through a historical map compared
+  physical offsets without the device id (wrong on a multi-device image; none in the corpus).
+  The sibling search gained a total bound (4096 leaves per file) beside the per-step and per-chain
+  ones. The extent signature is computed in one place (`recover/inodes.py`); recovery and the
+  timeline had two copies. The pointer-join evidence said "never a committed state", which is
+  wrong for `m5_delsubvol_lost_items`, where the fragment is the committed subvolume tree whose
+  ROOT_ITEMs are gone: it now says "cannot be taken for a committed state". Dead code
+  (`resolve_root`, `describe`), a duplicated docstring line in `corpus/mutate.py`, a README
+  mention of a `tree` command that does not exist, and "streaming arrives with M4" left in two
+  docstrings after M4.
+- **Left alone, on purpose.** (1) The catalog build parses every indexed extent-tree and dev-tree
+  leaf of every generation to collect BLOCK_GROUP_ITEMs and DEV_EXTENTs, whether or not a
+  historical chunk root exists; on the corpus it costs nothing measurable, on a large image it
+  will be a pass over the biggest tree. It is noted for M7's performance work. (2) When the
+  current map places an address, old-root discovery classes a missing block from that read alone
+  and does not consult the state's own chunk items; that is the documented design, and it can
+  only lower a pre-balance state's `completeness`, never raise it. (3) The stripe length is
+  computed in `substrate/chunks.py` and again in `scan/regions.py`; equal today, and the second
+  predates the first.
+- **Verification.** `uv run pytest`: 998 passed, 0 skipped (7 new, each failing before its fix);
+  ruff clean; `sandbox.img` and the 20 corpus images unchanged. `catalog build`, `recover --root
+  all --tree all --graph --logs` and `timeline --uncommitted` ran on `sandbox.img`, `m1_lzo`,
+  `m1_badnode_both`, `m4_deep_lost_parent`, `m4_planted_slack` and `m1_unknown_incompat`
+  (refused at the gate, as designed) without a traceback, every image unchanged, every
+  non-complete artifact with a documented reason and none `failed`. No corpus script changed.
+
 ## 2026-09-22 — The prototype is retired: tag `legacy-final`, `legacy/` deleted
 
 - **Branch:** `chore/retire-legacy` (from `main` at `9f1a5b7`). Deleted `legacy/` (15 files, about

@@ -442,7 +442,7 @@ def build_catalog(
                     img, index, ctx=ctx, chunk_map=fs.chunk_map, known=known_roots(fs.fields),
                     log_live=scan.reach.log_logical, walk_failures=scan.reach.walk_failures,
                     max_states=max_states, max_maps=max_maps,
-                    num_devices=fs.fields["num_devices"],
+                    num_devices=fs.fields["num_devices"], incompat=fs.fields["incompat_flags"],
                 )  # fmt: skip
                 _insert_discovery(conn, found, _insert_chunk_maps(conn, fs, found))
                 _insert_node_maps(conn, found, ctx.nodesize)

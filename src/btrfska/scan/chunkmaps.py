@@ -141,8 +141,13 @@ def _from_group(
     num_devices: int,
     devices: dict[int, bytes],
     sectorsize: int,
+    together: bool = True,
 ) -> Chunk:
-    """One chunk from the distinct (devid, physical, length) DEV_EXTENTs naming `logical`."""
+    """One chunk from the distinct (devid, physical, length) DEV_EXTENTs naming `logical`.
+
+    `together`: some one dev-tree leaf holds every one of them. Two extents that never appear
+    in the same leaf may be two chunks that had this address at different times, not two copies
+    of one; such a pair is never presented as mirrors."""
     lengths = {length for _, _, length in extents}
     stripes = tuple(
         Stripe(devid, physical, devices.get(devid, _NO_UUID)) for devid, physical, _ in extents
@@ -158,6 +163,11 @@ def _from_group(
         problems.append(f"logical {logical} + length {length} overflows")
     if _overlap(extents):
         problems.append("device extents overlap each other")
+    if len(extents) > 1 and not together:
+        problems.append(
+            "no dev-tree leaf holds these device extents together: they may be two chunks that "
+            "had this address at different times, not the copies of one"
+        )
     if group is not None:
         origin += f" and BLOCK_GROUP_ITEM of generation {group.generation}"
         type_, profile = group.flags, group.flags & PROFILE_MASK
@@ -197,17 +207,19 @@ def from_dev_extents(
 ) -> ChunkMap:
     """The `dev_extents` map. Never raises on content; what it cannot use is a rejected chunk."""
     groups: dict[int, set[tuple[int, int, int]]] = {}
+    by_leaf: dict[int, dict[int, set]] = {}  # chunk -> leaf -> the extents that leaf holds
     for extent in dev_extents:
-        groups.setdefault(extent.chunk_offset, set()).add(
-            (extent.devid, extent.physical, extent.length)
-        )
+        placement = (extent.devid, extent.physical, extent.length)
+        groups.setdefault(extent.chunk_offset, set()).add(placement)
+        by_leaf.setdefault(extent.chunk_offset, {}).setdefault(extent.leaf, set()).add(placement)
     newest: dict[int, BlockGroup] = {}
     for group in block_groups:
         if group.logical not in newest or group.generation > newest[group.logical].generation:
             newest[group.logical] = group
     chunks = [
         _from_group(logical, sorted(extents), newest.get(logical), num_devices=num_devices,
-                    devices=devices, sectorsize=sectorsize)
+                    devices=devices, sectorsize=sectorsize,
+                    together=any(held == extents for held in by_leaf[logical].values()))
         for logical, extents in sorted(groups.items())
     ]  # fmt: skip
     return ChunkMap(DEV_EXTENTS, chunks, devices)

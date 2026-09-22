@@ -107,7 +107,8 @@ def test_a_stripe_is_witnessed_by_each_dev_tree_leaf_that_agrees_with_it():
 
 def test_one_device_without_block_groups_single_and_dup_are_the_only_possible_profiles():
     found = rebuilt([extent(20 * MIB, 13 * MIB), extent(40 * MIB, 64 * MIB),
-                     extent(80 * MIB, 64 * MIB), extent(80 * MIB, 64 * MIB, leaf=9)])  # fmt: skip
+                     extent(80 * MIB, 64 * MIB), extent(80 * MIB, 64 * MIB, leaf=9),
+                     extent(40 * MIB, 64 * MIB, leaf=9)])  # fmt: skip
     assert found.source == "dev_extents" and not found.rejected
     single, dup = found.chunks
     assert (single.logical, single.length, single.num_stripes) == (13 * MIB, 8 * MIB, 1)
@@ -152,6 +153,23 @@ def test_what_dev_extents_cannot_settle_is_rejected_with_the_reason(
     assert any(reason in problem for problem in chunk.problems), chunk.problems
     with pytest.raises(MappingError):
         found.copies(chunk.logical, 4096)
+
+
+def test_two_extents_for_one_address_that_no_leaf_holds_together_are_not_mirrors():
+    """A SINGLE chunk at L lived at P1, was balanced away, and a later chunk at L lives at P2:
+    two dev-tree leaves of different generations each hold one extent. Not a DUP chunk."""
+    apart = [extent(20 * MIB, 13 * MIB, leaf=100, generation=10),
+             extent(40 * MIB, 13 * MIB, leaf=200, generation=50)]  # fmt: skip
+    found = rebuilt(apart)
+    assert not found.chunks
+    (chunk,) = found.rejected
+    assert any("had this address at different times" in p for p in chunk.problems)
+    # the same two extents in one leaf are the two copies of a DUP chunk
+    together = [extent(20 * MIB, 13 * MIB, leaf=300), extent(40 * MIB, 13 * MIB, leaf=300)]
+    assert rebuilt(together).chunks[0].type == BG["DUP"]
+    # and a block group naming DUP does not make the apart pair mirrors either
+    group = [BlockGroup(13 * MIB, 8 * MIB, BG["DATA"] | BG["DUP"], 50)]
+    assert not rebuilt(apart, group).chunks
 
 
 def test_a_mirrored_block_group_is_accepted_with_the_newest_item_and_even_with_one_copy_found():

@@ -6,9 +6,9 @@ artifact (`artifacts.joined`), and is refused when two candidates would give dif
 
 - `pointer` (dbtree.fragment_roots): a scanned internal node names its children by address and
   generation. A file-tree block that nothing names, walked like a tree, is a *fragment*: a tree
-  version written within a transaction and replaced before its commit, or one whose root tree
-  is lost. Its blocks were written at different moments of that transaction; it was never a
-  committed state, and its artifacts say so.
+  version written within a transaction and replaced before its commit, or one whose every
+  root tree is lost. Its blocks may have been written at different moments of one
+  transaction; it cannot be taken for a committed state, and its artifacts say so.
 - `sibling` (`continue_file`): the last file of a lone leaf continues in another leaf of the same
   tree, when that leaf's first key belongs to the same inode, head and tail cover the file
   exactly, no extent item is newer than the INODE_ITEM (`generation` at most `transid`), and the
@@ -32,10 +32,12 @@ from btrfska.substrate import items, ondisk
 K = ondisk.ITEM_KEYS
 MAX_CHAIN = 64  # leaves one file may be followed through
 MAX_CANDIDATES = 256  # tails examined per step; more than that is reported, not searched
+MAX_STEPS = 4096  # leaves examined for one file in all; more than that is reported, not searched
 UNCOMMITTED = (
-    "no ROOT_ITEM and no superblock slot names this tree version: it was written within a "
-    "transaction and replaced before the commit, or its root tree is lost; its blocks were "
-    "written at different moments of that transaction, and it was never a committed state"
+    "no ROOT_ITEM and no superblock slot names this tree version: either it was written within "
+    "a transaction and replaced before the commit, or every root tree that named it is lost. "
+    "Its blocks may have been written at different moments of one transaction; it cannot be "
+    "taken for a committed state"
 )
 
 
@@ -97,6 +99,8 @@ def _merge(record: InodeRecord, more: InodeRecord) -> InodeRecord:
 
 def _tails(conn: sqlite3.Connection, tree_id: int, objectid: int, after: bytes) -> list[int]:
     """Contents of leaves of `tree_id` whose first key is a later key of `objectid`."""
+    if objectid >= (1 << 64) - 1:  # no key of a later objectid exists; a forged number
+        return []
     rows = conn.execute(
         "SELECT DISTINCT c.content_id FROM contents c JOIN content_blocks b USING (content_id)"
         " WHERE c.level = 0 AND c.parsed AND b.owner = ? AND c.first_key > ? AND c.first_key < ?"
@@ -128,7 +132,11 @@ def continue_file(
     while frontier:
         step = frontier.pop()
         candidates = _tails(conn, tree_id, record.objectid, step.last)
-        if len(candidates) > MAX_CANDIDATES or len(step.leaves) > MAX_CHAIN:
+        if (
+            len(candidates) > MAX_CANDIDATES
+            or len(step.leaves) > MAX_CHAIN
+            or (searched > MAX_STEPS)
+        ):
             return None, "more continuation candidates than are searched; not joined"
         if not candidates and step.short:
             reasons.append(

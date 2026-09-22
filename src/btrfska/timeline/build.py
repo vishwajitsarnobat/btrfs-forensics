@@ -21,11 +21,10 @@ never produce a `delete`: absence from a block that was never a state proves not
 import hashlib
 import json
 import sqlite3
-import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from btrfska.catalog.schema import s64, u64
+from btrfska.catalog.schema import u64
 from btrfska.recover.dbtree import (
     Root,
     fragment_roots,
@@ -33,11 +32,13 @@ from btrfska.recover.dbtree import (
     resolve_roots,
     tree_leaves,
 )
-from btrfska.recover.inodes import ROOT_DIR, InodeRecord, collect, paths
+from btrfska.recover.inodes import ROOT_DIR, InodeRecord, collect, extent_signature, paths
+from btrfska.recover.logs import base_inodes, base_root, log_roots, replay
 from btrfska.substrate import items, ondisk
 
 MAX_FRAGMENTS = 4096
 SECTOR = 4096  # the smallest sector size: a larger one only makes the past-the-end test stricter
+DEFAULT_SECTOR = 4096  # for a database without a scan_runs row (synthetic catalogs in tests)
 _ATTRS = ("mode", "uid", "gid")
 
 
@@ -78,6 +79,7 @@ class Observation:
     times: dict  # otime, mtime, ctime as [sec, nsec]
     inconsistent: bool  # an extent is newer than the INODE_ITEM (EXP-008): no version of the file
     past_end: bool  # data reaches past the sector of the end of the file (the same, uncommitted)
+    log_only: bool = False  # from a log tree without its base: what was not logged is unknown
 
     def same_version(self, other: Observation) -> bool:
         mine = (self.transid, self.size, self.attrs, self.nlink, self.names, self.signature)
@@ -93,16 +95,6 @@ class Version:
 
 def _text(raw: bytes) -> str:
     return raw.decode("utf-8", "replace")
-
-
-def _signature(record: InodeRecord) -> str:
-    """As recover/engine.py computes `artifacts.extent_signature`."""
-    digest = hashlib.sha256()
-    digest.update(struct.pack("<q", -1 if record.inode is None else record.inode["size"]))
-    for item, _ in record.extents:
-        digest.update(struct.pack("<QI", item.key.offset, len(item.data)))
-        digest.update(item.data)
-    return digest.hexdigest()
 
 
 def _extents(record: InodeRecord) -> tuple[tuple[tuple, ...], int]:
@@ -143,7 +135,7 @@ def _observe(tree_id: int, inodes: dict[int, InodeRecord]) -> Iterator[Observati
             attrs=tuple(inode[name] for name in _ATTRS), nlink=inode["nlink"],
             names=tuple(sorted((n.parent, n.name) for n in record.names)),
             path=_text(b"/".join(parts)), attached=attached, extents=extents,
-            signature=_signature(record),
+            signature=extent_signature(record),
             times={
                 name: [inode[f"{name}_sec"], inode[f"{name}_nsec"]]
                 for name in ("otime", "mtime", "ctime")
@@ -154,6 +146,7 @@ def _observe(tree_id: int, inodes: dict[int, InodeRecord]) -> Iterator[Observati
                 and offset + length > -(-inode["size"] // SECTOR) * SECTOR
                 for offset, length, what, into in extents
             ),
+            log_only=record.log_only,
         )  # fmt: skip
 
 
@@ -200,15 +193,19 @@ class Timeline:
         for shown in self.trees.values():
             shown.sort(key=lambda tree: tree.seen.order)
 
-    def _add(self, root: Root, seen: Seen, tree_id: int | None = None) -> None:
-        """Walk `root` and file what it shows under `tree_id` (the root's own tree, or for a log
-        tree the subvolume it logged)."""
+    def _add(
+        self, root: Root, seen: Seen, tree_id: int | None = None, inodes: dict | None = None,
+        gaps: list | None = None,
+    ) -> None:  # fmt: skip
+        """Walk `root` (or take its `inodes` and `gaps` as given) and file what it shows under
+        `tree_id`: the root's own tree, or for a log tree the subvolume it logged."""
         tree_id = root.tree_id if tree_id is None else tree_id
         key = (tree_id, root.bytenr, root.generation, root.level)
         if key not in self._walked:
-            leaves, gaps = tree_leaves(self.conn, root)
-            self.gaps += [f"{seen.source} tree {tree_id}: {line}" for line in gaps]
-            inodes = collect(self.conn, leaves)
+            if inodes is None:
+                leaves, gaps = tree_leaves(self.conn, root)
+                inodes = collect(self.conn, leaves)
+            self.gaps += [f"{seen.source} tree {tree_id}: {line}" for line in gaps or ()]
             observations = {(o.objectid, o.created): o for o in _observe(tree_id, inodes)}
             self._walked[key] = (not gaps, observations)
         complete, observations = self._walked[key]
@@ -219,29 +216,33 @@ class Timeline:
         covered: set[int] = set()
         for root in tops:
             if self.tree_id in (None, root.tree_id):
-                leaves, _ = tree_leaves(self.conn, root)
+                leaves, gaps = tree_leaves(self.conn, root)
                 covered.update(leaf.content_id for leaf in leaves)
-                self._add(root, Seen(root.source, root.generation, False))
+                inodes = collect(self.conn, leaves)
+                self._add(root, Seen(root.source, root.generation, False), None, inodes, gaps)
         for root, leaf in orphan_leaves(self.conn):
             if leaf.content_id in covered or root.tree_id == ondisk.TREE_LOG_OBJECTID:
                 continue  # a log leaf alone does not say which subvolume it logged: see below
             if self.tree_id in (None, root.tree_id):
                 self._add(root, Seen(root.source, root.generation, False))
-        # Log trees, dropped or live: the ROOT_ITEMs of a log root tree (objectid -6, key offset =
-        # the subvolume) name each subvolume's log tree. What a log holds was fsynced within a
-        # transaction; the next commit drops the log.
-        log = ondisk.TREE_LOG_OBJECTID
-        rows = self.conn.execute(
-            "SELECT DISTINCT r.key_offset, r.bytenr, r.generation, r.level FROM root_items r"
-            " JOIN content_blocks b USING (content_id) WHERE r.tree_id = ? AND b.owner = ?",
-            (s64(log), s64(log)),
-        ).fetchall()
-        for subvolume, bytenr, generation, level in rows:
-            subvolume, bytenr, generation = u64(subvolume), u64(bytenr), u64(generation)
-            if self.tree_id in (None, subvolume):
-                source = f"log:{bytenr}@{generation}"
-                root = Root(source, None, log, bytenr, generation, level, kind="orphan_graph")
-                self._add(root, Seen(source, generation, False), subvolume)
+        # Log trees, dropped or live, each under the subvolume its log root names, replayed over
+        # the commit before the log as recovery replays them (recover/logs.py): a fast fsync logs
+        # only what changed, so a log leaf on its own is no version of a file.
+        row = self.conn.execute("SELECT sectorsize FROM scan_runs").fetchone()
+        sectorsize = row[0] if row else DEFAULT_SECTOR
+        for root in log_roots(self.conn):
+            if self.tree_id not in (None, root.subvolume):
+                continue
+            leaves, gaps = tree_leaves(self.conn, root)
+            below = base_root(self.conn, root)
+            base, base_gaps = (None, []) if below is None else base_inodes(self.conn, below)
+            logged, _ = replay(
+                collect(self.conn, leaves), base, below, root, sectorsize, len(base_gaps)
+            )
+            # an inode logged in exists-only mode (generation 0) is a name, not a version
+            inodes = {n: r for n, r in logged.items() if not r.exists_only}
+            self._add(root, Seen(root.source, root.generation, False), root.subvolume, inodes,
+                      gaps)  # fmt: skip
 
     # ---- versions and events ---------------------------------------------------------------
     def versions(self, tree_id: int) -> dict[tuple[int, int], list[Version]]:
@@ -367,6 +368,7 @@ def _event(kind: str, version: Version, before: Version | None) -> dict:
         "transid": o.transid,
         "extent_signature": o.signature,
         "inconsistent": o.inconsistent or (o.past_end and _seen(version)["uncommitted_only"]),
+        "log_only": o.log_only,
         "times": o.times,
         "between": None if before is None or kind in ("delete", "not_seen") else [
             before.seen[-1].source, version.seen[0].source,

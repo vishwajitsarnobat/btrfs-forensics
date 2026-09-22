@@ -18,6 +18,8 @@ from btrfska.timeline.build import Timeline, delta, hashes
 from tests.helpers import REPO_ROOT, SCENARIOS, scratch_dir
 from tests.test_recover import (
     DATA_LOGICAL,
+    META_LOGICAL,
+    NODESIZE,
     ROOT_DIR_ITEMS,
     dir_items_,
     file_items,
@@ -25,11 +27,13 @@ from tests.test_recover import (
     inode_ref,
     synthetic,
 )
+from tests.test_scan_roots import root_item
 
 K = ondisk.ITEM_KEYS
 SECTOR = 4096
 SANDBOX = REPO_ROOT / "sandbox.img"
 DEEP = SCENARIOS / "m4_deep.img"
+LOG = ondisk.TREE_LOG_OBJECTID
 
 
 def regular(sector: int, sectors: int = 1, generation: int = 7, offset: int = 0) -> bytes:
@@ -191,6 +195,32 @@ def test_hundreds_of_states_cost_one_walk_per_distinct_tree_root_and_give_one_ve
         events = [e for e in timeline.events(5) if e["objectid"] == 257]
     assert [e["event"] for e in events] == ["create", "delete"]
     assert events[0]["seen_in"] == 300 and len(timeline.trees[5]) == 301
+
+
+def test_a_log_leaf_is_replayed_over_its_base_not_read_as_a_version_of_its_own():
+    """A 3-sector file committed, then one sector rewritten and fsynced: the log holds one
+    extent. Read on its own it would be a modify that removed two sectors; replayed it is one
+    sector replaced. An inode logged in exists-only mode (generation 0) is no identity."""
+    base = [*ROOT_DIR_ITEMS, ((257, K["INODE_ITEM"], 0), inode_item(3 * SECTOR)),
+            ((257, K["INODE_REF"], 256), inode_ref(b"f")),
+            ((257, K["EXTENT_DATA"], 0), regular(0, 3))]  # fmt: skip
+    log_leaf = META_LOGICAL + 100 * NODESIZE
+    logged = {"owner": LOG, "generation": 9, "bytenr": log_leaf, "items": [
+        ((257, K["INODE_ITEM"], 0), inode_item(3 * SECTOR, transid=9)),
+        ((257, K["EXTENT_DATA"], SECTOR), regular(8, 1, generation=9)),
+        ((300, K["INODE_ITEM"], 0), inode_item(0, generation=0, transid=9)),
+        ((300, K["INODE_REF"], 256), inode_ref(b"exists"))]}  # fmt: skip
+    # the log root tree: one ROOT_ITEM per logged subvolume, its key offset the subvolume
+    log_root = {"owner": LOG, "generation": 9, "items": [((LOG, K["ROOT_ITEM"], 5),
+                                                         root_item(log_leaf, 9))]}  # fmt: skip
+    with synthetic({"current": base}, loose=(logged, log_root)) as (conn, _, _):
+        conn.execute("UPDATE states SET generation = 8")
+        events = list(Timeline(conn, uncommitted=True).events(5))
+    mine = [e for e in events if e["objectid"] == 257]
+    assert [e["event"] for e in mine] == ["create", "modify"]
+    assert mine[1]["delta"] == [{"offset": SECTOR, "length": SECTOR, "change": "replaced"}]
+    assert mine[1]["first_seen"]["source"].startswith("log:") and not mine[1]["log_only"]
+    assert kinds(events, 300) == []
 
 
 # ---------------------------------------------------------------------------

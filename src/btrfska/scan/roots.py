@@ -423,8 +423,9 @@ def _reached(label: str, where: str, key) -> str:
 
 
 class _Discoverer:
-    def __init__(self, img, index, ctx, chunk_map, known, log_live):
+    def __init__(self, img, index, ctx, chunk_map, known, log_live, incompat=0):
         self.img, self.index, self.ctx, self.chunk_map = img, index, ctx, chunk_map
+        self.incompat = incompat  # the superblock's flags: a mixed chunk is valid only under them
         self.known, self.log_live = tuple(known), log_live
         self.reader = NodeReader(img, chunk_map, ctx)
         self.maps: dict = {}
@@ -777,6 +778,7 @@ class _Discoverer:
             self._walk(walked, memo, ondisk.CHUNK_TREE_OBJECTID, 0, K["CHUNK_ITEM"])
             chunks = [
                 parse_chunk(item.key.offset, item.data, sectorsize=self.ctx.sectorsize,
+                            incompat=self.incompat,
                             origin=f"historical chunk tree leaf {leaf} slot {item.slot}")
                 for item, leaf in walked.items
             ]  # fmt: skip
@@ -982,13 +984,14 @@ def discover(
     max_states: int = MAX_STATES,
     max_maps: int = MAX_MAPS,
     num_devices: int = 1,
+    incompat: int = 0,
 ) -> Discovery:
     """Groups, candidate roots, root-tree states, rediscovery and log generations of `index`.
 
     `chunk_map` is the current map (for missing-block classes and the mapping check), `known` the
     superblock and backup roots, `log_live` the logical addresses the current log walk reached.
     """
-    work = _Discoverer(img, index, ctx, chunk_map, known, log_live)
+    work = _Discoverer(img, index, ctx, chunk_map, known, log_live, incompat)
     total, states = work.states(max_states)
     chunk_roots, maps, current_witnesses = work.chunk_maps(max_maps, num_devices)
     return Discovery(
@@ -1033,6 +1036,6 @@ def discover_image(
     discovery = discover(
         img, index, ctx=ctx, chunk_map=fs.chunk_map, known=known_roots(fs.fields),
         log_live=reach.log_logical, walk_failures=reach.walk_failures, max_states=max_states,
-        num_devices=fs.fields["num_devices"],
+        num_devices=fs.fields["num_devices"], incompat=fs.fields["incompat_flags"],
     )  # fmt: skip
     return RootsScan(plan, index, discovery, reach.problems)

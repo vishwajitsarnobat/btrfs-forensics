@@ -242,7 +242,7 @@ def test_a_tree_version_nothing_names_is_walked_from_its_top_and_says_what_it_is
         )  # fmt: skip
         (join,) = json.loads(row["joined"])
         assert join["kind"] == "pointer" and join["leaves"] == 2 and join["gaps"] == 0
-        assert "never a committed state" in join["evidence"]
+        assert "cannot be taken for a committed state" in join["evidence"]
         # the leaves under the fragment are not read again on their own
         assert not [key for key in rows if key[0] == "orphan_node"]
         assert any("orphan_graph/tree_5/fragment_" in name for name in files_under(out))
@@ -277,6 +277,22 @@ def test_a_node_some_pointer_or_root_item_names_is_not_a_fragment():
 # ---------------------------------------------------------------------------
 # An extent newer than the inode item
 # ---------------------------------------------------------------------------
+
+
+def test_extents_clipped_away_past_the_end_are_not_called_overlaps():
+    """A size-0 inode item with three extents attached (a leaf written between the data and the
+    inode update): the one reason is the stale inode item, not an overlap per extent."""
+    stale = [
+        ((257, K["INODE_ITEM"], 0), inode_item(0, generation=7)),
+        ((257, K["INODE_REF"], 256), inode_ref(b"emptied")),
+        ((257, K["EXTENT_DATA"], 0), regular(0, 1, generation=7)),
+        ((257, K["EXTENT_DATA"], SECTOR), regular(1, 1, generation=7)),
+        ((257, K["EXTENT_DATA"], 2 * SECTOR), regular(2, 1, generation=7)),
+    ]
+    with synthetic({"current": list(ROOT_DIR_ITEMS)}, DATA, loose=(stale,)) as (conn, reader, out):
+        run(conn, reader, out, orphans=True)
+        row = by_source(conn)["orphan_node", 257]
+        assert json.loads(row["missing"]) == [[0, 0, "inode_item_older_than_extent"]]
 
 
 def test_a_file_whose_extent_is_newer_than_its_inode_item_is_not_complete():
