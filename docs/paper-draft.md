@@ -412,7 +412,7 @@ Only layers 1 and 2 of plan.md §2 exist, plus the CLI's JSON records. Do not de
 catalog, recovery engines, tiers or GUI as built. Code: 5 826 lines of Python under `src/btrfska/`
 at `8034a75` (`find src/btrfska -name '*.py' | xargs wc -l`); 724 tests passing at the M2b review
 verification (catalog.md M2b "Review fixes", `uv run pytest -q`). The 724 include the 37 tests of
-the frozen prototype under `legacy/tests`, which `pyproject.toml` `testpaths` collects (`uv run
+the frozen prototype under `legacy/tests` (deleted on 2026-09-22; git tag `legacy-final`), which `pyproject.toml` `testpaths` collected (`uv run
 pytest --collect-only -q legacy`: 37), so 687 test btrfska.
 
 **5.5.1 Substrate (layer 1).** `src/btrfska/substrate/`.

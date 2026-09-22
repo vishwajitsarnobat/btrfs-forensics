@@ -55,9 +55,6 @@ jobs:
       - name: Tests
         run: uv run pytest
 
-      - name: Legacy tests (original runner)
-        run: uv run python -m unittest discover -s legacy/tests
-
       - name: CLI smoke
         run: uv run btrfska --help
 

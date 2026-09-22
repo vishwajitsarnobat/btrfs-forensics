@@ -10,7 +10,8 @@ For every image, read-only as always:
 1. `scan_image(..., full_sweep=True)` yields every candidate block of the whole image, classified;
 2. for each valid physical copy the slack range is computed and its non-zero bytes are counted;
 3. blocks of one tree, level and first key are paired generation by generation.
-`legacy` runs the frozen prototype on sandbox.img and locates each of its beyond-`nritems` hits.
+`legacy` runs the frozen prototype (git tag `legacy-final`, checked out by experiments/prototype.py)
+on sandbox.img and locates each of its beyond-`nritems` hits.
 
 Usage, from the repo root:
   uv run python experiments/exp005.py run [IMAGE...]   # default: every manifest image + sandbox.img
@@ -41,6 +42,9 @@ from btrfska.substrate.items import KEY_TYPE_NAMES
 from btrfska.substrate.slack import slack_range
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))  # experiments/prototype.py, whether run as a script or imported
+from experiments import prototype  # noqa: E402
+
 OUT = REPO / "images" / "scratch" / "exp" / "EXP-005"
 RESULTS = OUT / "results.jsonl"
 MANIFEST = REPO / "corpus" / "manifest.tsv"
@@ -442,7 +446,7 @@ def legacy(results: Path) -> None:
     before = sha256(image)
     done = subprocess.run(
         [sys.executable, "main.py", str(image), "-o", str(out / "out"), "--full-sweep"],
-        cwd=REPO / "legacy", capture_output=True, text=True,
+        cwd=prototype.checkout(), capture_output=True, text=True,
     )  # fmt: skip
     (out / "stdout.txt").write_text(done.stdout + done.stderr)
     print(f"prototype exit {done.returncode}; sandbox.img unchanged: {sha256(image) == before}")

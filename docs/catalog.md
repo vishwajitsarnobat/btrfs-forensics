@@ -20,6 +20,33 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-09-22 — The prototype is retired: tag `legacy-final`, `legacy/` deleted
+
+- **Branch:** `chore/retire-legacy` (from `main` at `9f1a5b7`). Deleted `legacy/` (15 files, about
+  2 800 lines); new `experiments/prototype.py`; changed `experiments/exp001.py`,
+  `experiments/exp005.py`, `experiments/EXP-001.md`, `experiments/EXP-005.md`, `pyproject.toml`
+  (`testpaths`, ruff exclude), `.github/workflows/ci.yml` (the legacy test step),
+  `conftest.py`, `tests/test_scan_classify.py` (one test that imported the prototype),
+  `README.md`, `CONTRIBUTING.md` §6, plan.md §4.3, paper-draft.md.
+- **Why.** The migration gate of plan.md §4.3 has been green since M4e. The one reason to keep
+  the directory was that EXP-001 and EXP-005 run the prototype to regenerate their prototype
+  columns. Those columns were never a baseline: the prototype is our own earlier code, and the
+  comparisons served the migration gate and the correction of the numbers the prototype had put
+  into the catalog and the proposal (71/21 orphans, slack finds, "renamed inode 257"). The paper
+  cites the btrfska columns and the independent oracles only; the tools it compares against are
+  M7's.
+- **How.** The annotated tag `legacy-final` is at `9f1a5b7`, the last `main` with the directory.
+  `experiments/prototype.py` checks `legacy/` out of that tag under `images/scratch/prototype/`
+  with `git archive`, once per session, and the two scripts run it from there. Both records say
+  that their prototype columns are historical and how they are regenerated.
+- **Verification.** `uv run python experiments/exp005.py legacy` and `uv run python
+  experiments/exp001.py` regenerate through the tag checkout (EXP-001: the same table as
+  recorded; `runs: 1, identical: yes`). `uv run pytest`: 991 passed, 0 skipped: the prototype's own 37
+  unittest cases and the one golden test that imported it are gone; the golden files it
+  produced stay and the other parity tests still compare against them. Ruff clean; `sandbox.img` unchanged. CI loses one step.
+- **Must know.** The tag must not be deleted or moved: two experiment records depend on it, and
+  the catalog cites prototype file lines (`legacy/utils/btree.py:…`) that now resolve only there.
+
 ## 2026-09-22 — M5e-2: a deleted subvolume on real images
 
 - **Branch:** `feature/m5-deleted-subvolume` (from `main` at `a426d9e`). New

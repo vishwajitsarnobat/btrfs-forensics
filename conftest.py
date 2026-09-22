@@ -1,4 +1,4 @@
-"""Repo-wide pytest fixtures. At the repo root so the hash guard also covers legacy/tests."""
+"""Repo-wide pytest fixtures."""
 
 from pathlib import Path
 

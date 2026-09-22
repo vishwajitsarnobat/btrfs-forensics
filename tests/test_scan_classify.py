@@ -1,15 +1,11 @@
 """Orphan classification: live and backup reachability, chunk-map coverage, legacy parity."""
 
 import collections
-import contextlib
-import io
 import json
-import os
 import re
 import shutil
 import struct
 import subprocess
-import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -326,31 +322,6 @@ def test_sandbox_every_live_copy_is_found_by_the_scan(sandbox_scans):
     assert live == scan.reach.live and len(live) == 20
     assert scan.reach.extent_tree == scan.reach.live_logical
     assert scan.reach.problems == ()
-
-
-@pytest.mark.sandbox
-def test_golden_legacy_offsets_match_a_live_legacy_run(sandbox_img):
-    legacy_dir = str(REPO_ROOT / "legacy")
-    if not os.path.isdir(legacy_dir):
-        pytest.skip("legacy/ removed")
-    sys.path.insert(0, legacy_dir)
-    try:
-        from utils.btree import sweep_for_orphans
-        from utils.chunk_parser import build_scan_regions
-        from utils.recovery_report import RecoveryReport
-        from utils.superblock import parse_superblock
-
-        with scratch_dir("test_scan_legacy_") as out, contextlib.redirect_stdout(io.StringIO()):
-            sb = parse_superblock(str(sandbox_img))
-            regions = build_scan_regions(
-                sb["chunk_map"], sb["nodesize"], sandbox_img.stat().st_size
-            )
-            report = RecoveryReport(str(out))
-            sweep_for_orphans(str(sandbox_img), sb, report, str(out), scan_regions=regions)
-    finally:
-        sys.path.remove(legacy_dir)
-    assert [list(r) for r in regions] == LEGACY["regions"]
-    assert report.orphan_offsets == [o["physical"] for o in LEGACY["orphans"]]
 
 
 @pytest.mark.vm

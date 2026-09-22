@@ -460,7 +460,10 @@ New pipeline on `sandbox.img` reproduces the legacy report (same 71 orphans,
 same 21 outside-map, same recovered files; backref addresses per the defect
 #8 fix, not legacy's) **plus** compression, csum dispatch, superblock
 mirrors, and backup-root walking. When that gate is green, tag
-`legacy-final` and delete `legacy/`.
+`legacy-final` and delete `legacy/`. **Done 2026-09-22** (catalog.md): the tag
+is at `9f1a5b7`, and `experiments/prototype.py` checks the prototype out from
+it for EXP-001 and EXP-005, whose prototype columns are historical (our own
+earlier code is not a baseline; M7's tools are).
 
 ---
 
