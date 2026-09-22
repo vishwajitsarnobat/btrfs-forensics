@@ -73,9 +73,9 @@ def root_item(bytenr: int, generation: int, level: int = 0) -> bytes:
     return bytes(data)
 
 
-def chunk_item(physical: int, length: int) -> bytes:
-    """A single-stripe METADATA chunk item on devid 1."""
-    head = struct.pack("<QQQQIIIHH", length, 2, 1 << 16, METADATA, SECTOR, SECTOR, SECTOR, 1, 1)
+def chunk_item(physical: int, length: int, type_: int = METADATA) -> bytes:
+    """A single-stripe chunk item on devid 1, METADATA unless another type is given."""
+    head = struct.pack("<QQQQIIIHH", length, 2, 1 << 16, type_, SECTOR, SECTOR, SECTOR, 1, 1)
     return head + struct.pack("<QQ16s", 1, physical, DEV_UUID)
 
 
@@ -329,6 +329,28 @@ def test_forged_chunk_roots_claiming_one_address_at_two_levels_get_maps_with_dis
     names = [m.name for m in found.chunk_maps]
     assert len(names) == len(set(names))
     assert {f"historical:90@{real}/level0", f"historical:90@{real}/level1"} <= set(names)
+
+
+def test_a_historical_map_accepts_a_mixed_chunk_only_under_the_mixed_groups_feature():
+    """The current map is built with the superblock's flags (substrate/fs.py); a historical
+    map must be too, or every chunk of a mixed filesystem is rejected there."""
+    mixed = METADATA | ondisk.BLOCK_GROUP_FLAGS["DATA"]
+    root = a(0)
+    blocks = {
+        root: make_node(
+            root,
+            owner=3,
+            generation=90,
+            items=[((256, CHUNK_ITEM, MIB), chunk_item(MIB, 15 * MIB, mixed))],
+        )
+    }
+    strict = discover_blocks("test_scan_roots_mixed_", blocks)
+    (found,) = [m for m in strict.chunk_maps if m.kind == "historical"]
+    assert not found.chunk_map.chunks and len(found.chunk_map.rejected) == 1
+    lenient = discover_blocks("test_scan_roots_mixed_", blocks,
+                              incompat=ondisk.INCOMPAT["MIXED_GROUPS"])  # fmt: skip
+    (found,) = [m for m in lenient.chunk_maps if m.kind == "historical"]
+    assert [c.logical for c in found.chunk_map.chunks] == [MIB]
 
 
 def test_old_leaves_of_a_multi_leaf_root_tree_that_newer_parents_still_use_are_not_states():

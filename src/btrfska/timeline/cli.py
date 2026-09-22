@@ -60,6 +60,7 @@ def _line(event: dict) -> str:
         f" [{mark}]" for mark, on in (
             ("order within the generation assumed", event.get("order_assumed")),
             ("uncommitted", event.get("uncommitted_only")),
+            ("from the log alone", event.get("log_only")),
             ("inconsistent", event.get("inconsistent")),
         ) if on
     )  # fmt: skip

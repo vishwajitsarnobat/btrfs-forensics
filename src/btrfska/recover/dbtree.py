@@ -161,10 +161,6 @@ def former_names(conn: sqlite3.Connection, tree_id: int, objectid: int, created:
     return [(u64(row[0]), bytes(row[1]), u64(row[2]), bool(row[3]), u64(row[4])) for row in rows]
 
 
-def resolve_root(conn: sqlite3.Connection, spec: str, tree_id: int) -> Root:
-    return resolve_roots(conn, spec, tree_id)[0]
-
-
 def _block(conn: sqlite3.Connection, bytenr: int, generation: int, level: int):
     """(content_id, physical, status, first_key, owner) of the valid block, or None."""
     return conn.execute(

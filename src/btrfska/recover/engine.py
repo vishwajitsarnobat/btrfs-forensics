@@ -18,7 +18,6 @@ import hashlib
 import json
 import os
 import sqlite3
-import struct
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -44,10 +43,11 @@ from btrfska.recover.inodes import (
     ROOT_DIR,
     InodeRecord,
     collect,
+    extent_signature,
     paths,
     safe_component,
 )
-from btrfska.recover.logs import base_root, log_roots, replay
+from btrfska.recover.logs import base_inodes, base_root, log_roots, replay
 from btrfska.recover.maps import Readers
 from btrfska.recover.output import PARTIAL, FileSink, OutputError, OutputTree
 from btrfska.substrate import items, ondisk
@@ -88,17 +88,6 @@ def _now() -> str:
 
 def _text(raw: bytes) -> str:
     return raw.decode("utf-8", "replace")
-
-
-def _signature(record: InodeRecord) -> str:
-    """Identifies a file's content without reading it: i_size and every EXTENT_DATA item."""
-    digest = hashlib.sha256()
-    size = -1 if record.inode is None else record.inode["size"]
-    digest.update(struct.pack("<q", size))
-    for item, _ in record.extents:
-        digest.update(struct.pack("<QI", item.key.offset, len(item.data)))
-        digest.update(item.data)
-    return digest.hexdigest()
 
 
 def _encrypted(record: InodeRecord) -> str | None:
@@ -191,6 +180,9 @@ class _Run:
                 # A fast fsync logs only what changed: without the base tree this range is not
                 # a hole, it is unknown.
                 missing.append([extent.file_offset, extent.length, "not_logged"])
+            if extent.length == 0 and size is not None and extent.file_offset >= size:
+                reads.append((extent, None))  # clipped away: it lies wholly past the end
+                continue
             if extent.file_offset != sink.written:  # an overlap: FileAssembly reports it
                 missing.append([extent.file_offset, extent.length, "overlap"])
                 reads.append((extent, None))
@@ -333,8 +325,9 @@ class _Run:
         elif record.exists_only:
             pass  # recorded: the log says that the inode exists, and nothing of its content
         elif kind in ("file", "unknown") and (kind == "file" or record.extents):
-            signature = row["extent_signature"] = _signature(record)
-            same = (root.tree_id, record.objectid, row["inode_generation"], signature)
+            signature = row["extent_signature"] = extent_signature(record)
+            tree = root.tree_id if root.subvolume is None else root.subvolume
+            same = (tree, record.objectid, row["inode_generation"], signature)
             refusal = _encrypted(record)
             if refusal:
                 row["status"] = "refused_encrypted"
@@ -530,8 +523,8 @@ def recover_roots(
         if root.kind == "log_tree":
             covered.update(found_leaf.content_id for found_leaf in leaves)
             below = base_root(conn, root)
-            base = None if below is None else collect(conn, tree_leaves(conn, below)[0])
-            inodes, named = replay(inodes, base, below, root, sectorsize)
+            base, base_gaps = (None, []) if below is None else base_inodes(conn, below)
+            inodes, named = replay(inodes, base, below, root, sectorsize, len(base_gaps))
         elif root.kind == "orphan_graph":
             covered.update(found_leaf.content_id for found_leaf in leaves)
             join = pointer_join(root.bytenr, root.generation, root.level, len(leaves),
@@ -558,8 +551,9 @@ def resolve_all(
     brought_in: set[str] = set()
     if "all" in specs:
         at = specs.index("all")
-        brought_in = {s for s in every_state(conn) if s not in specs}
-        specs[at : at + 1] = [s for s in every_state(conn) if s in brought_in]
+        states = every_state(conn)
+        brought_in = {s for s in states if s not in specs}
+        specs[at : at + 1] = [s for s in states if s in brought_in]
     resolved: list[Root] = []
     for spec in specs:
         try:

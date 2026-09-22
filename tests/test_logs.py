@@ -13,7 +13,7 @@ from btrfska.catalog.build import build_catalog
 from btrfska.recover.dbtree import Root
 from btrfska.recover.engine import recover
 from btrfska.recover.inodes import InodeRecord, Name
-from btrfska.recover.logs import overlay, replay
+from btrfska.recover.logs import log_roots, overlay, replay
 from btrfska.substrate import items, ondisk
 from btrfska.substrate.node import Item, Key
 from tests.helpers import SCENARIOS, scratch_dir
@@ -27,6 +27,7 @@ from tests.test_recover import (
     run,
     synthetic,
 )
+from tests.test_scan_roots import root_item
 
 K = ondisk.ITEM_KEYS
 SECTOR = 4096
@@ -123,6 +124,40 @@ def test_a_base_is_only_the_same_inode_and_generation_0_means_names_without_cont
     assert nothing[257].log_only
     exists, _ = replay({257: _record(0, [extent(0, 1)])}, {257: _record(7)}, below, log, SECTOR)
     assert exists[257].exists_only and exists[257].extents == []
+
+
+def test_a_base_with_gaps_or_from_an_older_commit_leaves_unlogged_ranges_unknown():
+    log = Root("log:1@9", None, LOG, 1, 9, 0, kind="log_tree", subvolume=5, named_by=2)
+    just_before = Root("current", 1, 5, 3, 8, 0)
+    older = Root("state:4", 4, 5, 3, 6, 0)
+    logged = {257: _record(7, [extent(SECTOR, 1)])}
+    base = {257: _record(7, [extent(0, 2)])}
+    whole, _ = replay(logged, base, just_before, log, SECTOR)
+    assert not whole[257].log_only
+    gappy, _ = replay({257: _record(7, [extent(SECTOR, 1)])}, base, just_before, log, SECTOR, 3)
+    assert gappy[257].log_only and any("3 gap(s)" in p for p in gappy[257].problems)
+    stale, _ = replay({257: _record(7, [extent(SECTOR, 1)])}, base, older, log, SECTOR)
+    assert stale[257].log_only and any("not the commit before" in p for p in stale[257].problems)
+
+
+def test_a_replayed_file_equal_to_its_base_is_a_duplicate_not_a_second_copy():
+    """fsync without a change of content: a full log of the inode gives the same extents as
+    the committed tree, so the log artifact is a duplicate of the anchored one."""
+    log_leaf = 1 << 30
+    file_ = [((257, K["INODE_ITEM"], 0), inode_item(SECTOR)),
+             ((257, K["INODE_REF"], 256), inode_ref(b"same")),
+             ((257, K["EXTENT_DATA"], 0), extent(0, 1, disk=DATA_LOGICAL)[0].data)]  # fmt: skip
+    logged = {"owner": LOG, "generation": 9, "bytenr": log_leaf, "items": list(file_)}
+    log_root = {"owner": LOG, "generation": 9,
+                "items": [((LOG, K["ROOT_ITEM"], 5), root_item(log_leaf, 9))]}  # fmt: skip
+    trees, data = {"current": [*ROOT_DIR_ITEMS, *file_]}, {DATA_PHYS: b"x" * SECTOR}
+    with synthetic(trees, data, loose=(logged, log_root)) as (conn, reader, out):
+        conn.execute("UPDATE states SET generation = 8")
+        run(conn, reader, out, logs=tuple(log_roots(conn)))
+        rows = by_source(conn)
+        assert rows["anchored_root", 257]["status"] == "complete"
+        assert rows["log_tree", 257]["status"] == "duplicate"
+        assert rows["log_tree", 257]["duplicate_of"] == rows["anchored_root", 257]["artifact_id"]
 
 
 # ---------------------------------------------------------------------------

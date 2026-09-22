@@ -157,7 +157,7 @@ items are emitted with `valid` `false` and `linkage_mismatch` naming the failed
 checks, and its children are followed, each checked against its own pointer. A
 copy that fails any integrity check is never used. What a flagged block holds
 belongs to another state than the root's, so `--linkage report` is refused for
-`--root current`, and `cat`, `tree`, `recover` and `catalog` never use it: a
+`--root current`, and `cat`, `recover` and `catalog` never use it: a
 recovery reports such a pointer as a gap and names the block that lies there.
 
 Keys added by each record type:
@@ -229,7 +229,7 @@ checksum and data checksums are verified from M6 on.
 
 `cat` currently holds the whole file in memory before writing it, with a
 peak of about twice the file size (explicit and implicit holes excepted).
-Streaming reads arrive with the recovery engine (plan.md M4).
+`recover` streams the same extents one piece at a time.
 
 ### `btrfska scan` output
 
@@ -565,9 +565,12 @@ root, the backup roots and the roots only the scan found.
   without reading data.
 - **Time.** Generations order everything. `times` (`otime`, `mtime`, `ctime` as `[sec, nsec]`) are
   copied from the version's inode item: what the filesystem recorded, which a user can set.
-- **`--uncommitted`** adds what was never a committed state: fragments and lone leaves
+- **`--uncommitted`** adds what cannot be taken for a committed state: fragments and lone leaves
   (`recover --graph`'s sources) and log trees, each log tree filed under the subvolume that the
-  ROOT_ITEM of its log root tree names. Such observations sort before the committed state of
+  ROOT_ITEM of its log root tree names and replayed over the commit before it, as `recover
+  --logs` does (a fast fsync logs only what changed, so a log leaf on its own is no version of a
+  file; a version whose base is missing or not that commit is marked `log_only`, and an inode
+  logged in exists-only mode is left out). Such observations sort before the committed state of
   their generation, are marked `uncommitted_only`, and never prove a `delete`. A version whose
   inode item is older than an extent (see `recover`) is marked `inconsistent`. An identity seen
   only there ends with `never_committed`: a file written, fsynced and deleted within one
@@ -582,7 +585,7 @@ items say so exactly: the creation generation for `create`, the version's `trans
 `create`) and `generations` (theirs), `path`, `attached`, `kind`, `size`, `transid`,
 `extent_signature`, `inconsistent`, `times`, `first_seen` and `last_seen` (`source` and
 `generation` of the version the event leads to; for `delete` and `not_seen`, of the last version),
-`seen_in` (how many sources showed that version), `uncommitted_only`, `sha256`, and `order_assumed`:
+`seen_in` (how many sources showed that version), `uncommitted_only`, `log_only`, `sha256`, and `order_assumed`:
 true when the two bounding sources have the same generation. Two root trees of one generation can
 survive (one written in the middle of the transaction); generations cannot order them, so they are
 taken in the order of their addresses, the one a superblock slot names last, and the event says
@@ -649,8 +652,8 @@ skips the hash, and the run is recorded as not checked).
   through its parent's pointer (`fragment:BYTENR@GEN`, output under
   `DIR/orphan_graph/tree_ID/fragment_BYTENR_genG/`). Most orphan leaves hang under one. A fragment
   is a tree version that was written within a transaction and replaced before the commit, or one
-  whose root tree is lost; its blocks were written at different moments, and it was never a
-  committed state. Then the leaves under no fragment, as with `--orphans`, plus two joins: a file
+  whose every root tree is lost; its blocks may have been written at different moments, and it
+  cannot be taken for a committed state. Then the leaves under no fragment, as with `--orphans`, plus two joins: a file
   cut by the end of its leaf is continued in another leaf of the same tree when the extents of
   both cover the file exactly, none is newer than the INODE_ITEM and the other leaf was not
   written before the INODE_ITEM's last change; and a parent directory the leaf does not hold is

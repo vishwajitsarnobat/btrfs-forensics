@@ -22,7 +22,6 @@ a refused run leaves no file behind. Unchanged all-zero regions stay sparse.
       Toolan & Humphries 2026, which no honest image contains (EXP-005). The source needs an fs
       tree with an internal node (m3_wide).
   uv run python corpus/mutate.py SRC DST lose-root-node
-  uv run python corpus/mutate.py SRC DST lose-root-items TREE
       invert one byte in every physical copy of the oldest root-tree node (level 1 or above) that
       still has a leaf on the image and is not the current root: that generation's root-tree
       leaves lose their parent, as if it had been overwritten (EXP-004 §6.8). Checksums are left

@@ -10,8 +10,10 @@ leave the output directory; `paths` resolves each inode to a path under the tree
 directory, or under `UNATTACHED` when its parents do not lead there.
 """
 
+import hashlib
 import sqlite3
 import stat
+import struct
 from dataclasses import dataclass, field
 
 from btrfska.recover.dbtree import Leaf, leaf_items
@@ -67,6 +69,18 @@ class InodeRecord:
         if stat.S_ISDIR(mode):
             return "dir"
         return "symlink" if stat.S_ISLNK(mode) else "other"
+
+
+def extent_signature(record: InodeRecord) -> str:
+    """Identifies a file's content without reading it: i_size and every EXTENT_DATA item.
+    Stored as `artifacts.extent_signature`; the timeline compares versions by it."""
+    digest = hashlib.sha256()
+    size = -1 if record.inode is None else record.inode["size"]
+    digest.update(struct.pack("<q", size))
+    for item, _ in record.extents:
+        digest.update(struct.pack("<QI", item.key.offset, len(item.data)))
+        digest.update(item.data)
+    return digest.hexdigest()
 
 
 def _raw(name: str) -> bytes:

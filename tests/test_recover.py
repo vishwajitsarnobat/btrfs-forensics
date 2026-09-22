@@ -613,6 +613,23 @@ def test_stream_extent_gives_the_bytes_read_extent_gives():
         assert max(map(len, pieces)) == MIB and len(pieces) == 4
 
 
+def test_a_preallocated_extent_past_the_end_of_the_file_does_not_make_it_partial():
+    """fallocate with KEEP_SIZE leaves a prealloc extent beyond i_size in a committed tree."""
+    prealloc = struct.pack(
+        ondisk.FILE_EXTENT_ITEM.format, 7, 8192, 0, 0, 0, ondisk.FILE_EXTENT_PREALLOC,
+        DATA_LOGICAL + 8192, 8192, 0, 8192,
+    )  # fmt: skip
+    tree = [*ROOT_DIR_ITEMS, ((257, K["INODE_ITEM"], 0), inode_item(3000)),
+            ((257, K["INODE_REF"], 256), inode_ref(b"kept-size")),
+            ((257, K["EXTENT_DATA"], 0), regular(DATA_LOGICAL, 4096)),
+            ((257, K["EXTENT_DATA"], 4096), prealloc)]  # fmt: skip
+    with synthetic({"current": tree}, {DATA_PHYS: b"k" * 4096}) as (conn, reader, out):
+        run(conn, reader, out)
+        row = artifacts(conn)[257]
+        assert (row["status"], row["missing"]) == ("complete", "[]")
+        assert files_under(out) == {"current/tree_5/kept-size": b"k" * 3000}
+
+
 def test_all_skips_a_state_that_does_not_name_the_tree_and_a_named_root_must_have_it():
     tree = [*ROOT_DIR_ITEMS, *file_items(257, b"f", b"x")]
     with synthetic({"backup:8": tree, "current": tree}) as (conn, _, _):

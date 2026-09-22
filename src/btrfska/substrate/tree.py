@@ -6,8 +6,9 @@ owner, the pointer's generation and key, and the start's log context. Those chec
 recorded on the child's copies (see node.py). The walker adds its own hop findings to each `Visit`:
 - a pointer to a block already reached in this walk (a cycle or a shared block) is not followed;
 - a child whose last key is not below the parent's next key.
-An invalid node is yielded but not descended, because its pointers cannot be trusted. Depth is
-bounded: levels are below 8 and must drop by one per hop.
+An invalid node is yielded but not descended, because its pointers cannot be trusted. Every
+address is followed at most once, so a walk ends; with `enforce` levels are below 8 and drop by
+one per hop, and with `report` a flagged block of the wrong level is descended all the same.
 
 `linkage="report"` (node.py, plan.md M5b) is for walks from old roots: a block whose integrity
 holds but which is not the block its parent named is yielded usable, flagged with

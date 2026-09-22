@@ -442,7 +442,8 @@ class MapOrder:
     def notes(self, used: ChunkMap, logical: int, segments) -> tuple[str, ...]:
         """What the other maps say about a range read through `used`: that it is not the map of
         the state, that a newer map gives the logical address to a different chunk, and that a
-        newer map has given the disk space read (`segments`: (physical, size)) to another chunk.
+        newer map has given the disk space read (`segments`: (physical, size, devid)) to
+        another chunk, on the same device.
         """
         found = []
         if used is not self.maps[0]:
@@ -470,8 +471,9 @@ class MapOrder:
                     for there in other.chunks
                     if not _same_chunk(chunk, there)
                     for stripe in there.stripes
-                    for physical, size in segments
-                    if physical < stripe.offset + stripe_size(there)
+                    for physical, size, devid in segments
+                    if stripe.devid == devid
+                    and physical < stripe.offset + stripe_size(there)
                     and stripe.offset < physical + size
                 ),
                 None,

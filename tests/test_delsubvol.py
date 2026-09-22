@@ -118,7 +118,10 @@ def test_then_only_the_orphan_graph_gives_its_files_back_with_their_paths(lost):
         assert whole, name
         assert all(row["attached"] and row["source"].startswith("fragment:") for row in whole)
         joins = json.loads(whole[0]["joined"])
-        assert joins[0]["kind"] == "pointer" and "never a committed state" in joins[0]["evidence"]
+        assert (
+            joins[0]["kind"] == "pointer"
+            and "cannot be taken for a committed state" in joins[0]["evidence"]
+        )
     # nothing that is called complete under that tree has a content the log contradicts
     for name, rows in found.items():
         for row in rows:
