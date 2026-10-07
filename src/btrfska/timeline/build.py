@@ -21,7 +21,9 @@ committed it was walked whole and does not hold it; otherwise it is `not_seen` (
 
 Names are compared only between versions seen in a whole walk: a walk with gaps, a fragment or a
 lone leaf can miss the leaf that holds an INODE_REF, and the missing name is no `unlink` (EXP-009
-found a `link` that never happened from such a version).
+found a `link` that never happened from such a version). One exception: a rename within one
+directory, from versions seen at least in committed walks with gaps. Every name of an inode in one
+directory is in one INODE_REF item, which lies in one leaf: read at all, it was read whole.
 """
 
 import hashlib
@@ -77,6 +79,7 @@ class Observation:
     attrs: tuple[int, int, int]  # mode, uid, gid
     nlink: int
     names: tuple[tuple[int, bytes], ...]  # (parent, name), sorted
+    extended: frozenset[tuple[int, bytes]]  # the names that come from INODE_EXTREF items
     path: str
     attached: bool
     # (file offset, length, what lies there, offset into it; None for a hole), in file order
@@ -98,6 +101,9 @@ class Version:
     observation: Observation
     seen: list[Seen] = field(default_factory=list)
     whole: bool = False  # seen in at least one walk of the whole tree: its names are all there
+    # seen in a walk of a committed state, gaps or not: each INODE_REF item it shows was read
+    # whole, so it holds every name of the inode in that item's directory
+    walked: bool = False
 
 
 def _text(raw: bytes) -> str:
@@ -141,6 +147,7 @@ def _observe(tree_id: int, inodes: dict[int, InodeRecord]) -> Iterator[Observati
             transid=inode["transid"], kind=record.kind, size=inode["size"],
             attrs=tuple(inode[name] for name in _ATTRS), nlink=inode["nlink"],
             names=tuple(sorted((n.parent, n.name) for n in record.names)),
+            extended=frozenset((n.parent, n.name) for n in record.names if n.extended),
             path=_text(b"/".join(parts)), attached=attached, extents=extents,
             signature=extent_signature(record),
             times={
@@ -273,6 +280,9 @@ class Timeline:
                     history.append(Version(observation, [shown.seen]))
                 # a log tree replayed without its base holds only what was logged
                 history[-1].whole |= shown.whole and not observation.log_only
+                history[-1].walked |= (
+                    shown.seen.committed and not shown.part and not observation.log_only
+                )
         return found
 
     def events(self, tree_id: int) -> Iterator[dict]:
@@ -305,7 +315,8 @@ class Timeline:
             )
             for before, after in zip(history, history[1:], strict=False):
                 names = before.whole and after.whole
-                for kind, detail in _changes(before.observation, after.observation, names):
+                renames = all(v.whole or v.walked for v in (before, after))
+                for kind, detail in _changes(before.observation, after.observation, names, renames):
                     yield (
                         base
                         | _event(kind, after, before)
@@ -419,13 +430,26 @@ def _event(kind: str, version: Version, before: Version | None) -> dict:
     } | _seen(version)  # fmt: skip
 
 
-def _changes(before: Observation, after: Observation, names: bool = True
-             ) -> Iterator[tuple[str, dict]]:  # fmt: skip
+def _changes(before: Observation, after: Observation, names: bool = True,
+             renames: bool = False) -> Iterator[tuple[str, dict]]:  # fmt: skip
     """The events between two versions. `names` False: one of them was not seen in a whole walk,
-    so a name it lacks may sit in a leaf that walk did not reach; no name change is derived."""
+    so a name it lacks may sit in a leaf that walk did not reach; no name change is derived,
+    except with `renames`: each was seen in a whole walk or in a committed walk with gaps, so
+    each INODE_REF item it shows was read whole. Then one name replaced by another in the same
+    directory, both in INODE_REF items, is a rename. The key of an INODE_REF is (inode,
+    INODE_REF, directory) and a second name in that directory extends the item; only when it
+    cannot grow does the name go to an INODE_EXTREF item, keyed by a hash of the name
+    (`btrfs_insert_inode_ref`, fs/btrfs/inode-item.c:307-364). A move, a link or an unlink
+    still needs whole walks: a gap can hide the item of another directory."""
     old, new = set(before.names), set(after.names)
     gone, come = sorted(old - new), sorted(new - old)
-    if names and len(gone) == 1 and len(come) == 1:
+    single = len(gone) == 1 and len(come) == 1
+    within = (
+        single
+        and gone[0][0] == come[0][0]
+        and not any(parent == gone[0][0] for parent, _ in before.extended | after.extended)
+    )
+    if single and (names or (renames and within)):
         (old_parent, old_name), (new_parent, new_name) = gone[0], come[0]
         kind = "rename" if old_parent == new_parent else "move"
         yield (

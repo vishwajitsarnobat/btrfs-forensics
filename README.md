@@ -667,9 +667,13 @@ root, the backup roots and the roots only the scan found.
   incomplete walk proves nothing. Names are compared only between versions seen in a whole walk:
   a version seen only through walks with gaps, fragments or lone leaves (any of them can miss the
   leaf that holds a name), or only in a log tree replayed without its base, gives no `rename`,
-  `move`, `link` or `unlink`, and no `touch` when its names differ. `subvolume_deleted` is one
-  event for a tree that a later state, whose whole root tree was found, no longer names. Several
-  changes between two surviving states show as their net effect.
+  `move`, `link` or `unlink`, and no `touch` when its names differ. One exception: a `rename`
+  within one directory is still derived when a version was seen in a committed walk with gaps,
+  if the old and the new name are in the same directory and no name the two versions show in
+  that directory is in an INODE_EXTREF item. Every name of an inode in one directory is in one
+  INODE_REF item, and a walk that reads the item at all reads it whole. `subvolume_deleted` is
+  one event for a tree that a later state, whose whole root tree was found, no longer names.
+  Several changes between two surviving states show as their net effect.
 - **`modify` lists the byte ranges whose extent differs** between the two versions (`delta`:
   `offset`, `length`, `change` `added`, `removed` or `replaced`), comparing what the extent items
   point at (address and offset into it, compression, inline bytes), not how they are cut, and

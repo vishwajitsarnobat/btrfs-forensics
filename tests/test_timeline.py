@@ -23,6 +23,7 @@ from tests.test_recover import (
     ROOT_DIR_ITEMS,
     dir_items_,
     file_items,
+    inode_extref,
     inode_item,
     inode_ref,
     synthetic,
@@ -223,6 +224,51 @@ def test_a_name_that_a_walk_did_not_reach_is_no_link_and_no_unlink():
     assert kinds(events, 257) == ["create"]
 
 
+def test_a_rename_within_one_directory_is_proved_through_a_whole_inode_ref_item():
+    """Issue #84: EXP-009 lost the renames of `moves/m_4.txt` and `m_5.txt`, whose old names were
+    seen only through committed walks with gaps. Every name of an inode in one directory is in
+    one INODE_REF item, which a walk reads whole or not at all, so a rename within one directory
+    is proved from such a walk. A move, a link or an unlink is not: a gap can hide the item of
+    another directory. Nor is anything from a lone leaf, or a name in an INODE_EXTREF item."""
+    docs = dir_items_(300, b"docs")
+    named = [*ROOT_DIR_ITEMS, *docs, *file_items(257, b"m_4.txt", b"x")]
+    renamed = [*ROOT_DIR_ITEMS, *docs, *file_items(257, b"m_4.moved", b"x", transid=11)]
+    moved = [*ROOT_DIR_ITEMS, *docs, *file_items(257, b"m_4.moved", b"x", parent=300,
+                                                 transid=12)]  # fmt: skip
+    linked = [*ROOT_DIR_ITEMS, *docs, *file_items(257, b"m_4.moved", b"x", parent=300,
+                                                  nlink=2, transid=13),
+              ((257, K["INODE_REF"], 256), inode_ref(b"other"))]  # fmt: skip
+    trees = {"backup:8": named, "backup:9": renamed, "backup:10": moved, "current": linked}
+    expected = {
+        (): ["create", "rename", "move", "link"],
+        ("backup:8",): ["create", "rename", "move", "link"],  # the old name's item was read
+        ("backup:9",): ["create", "rename", "link"],  # no move: either side may hide a name
+        ("current",): ["create", "rename", "move"],  # no link: the other name may have been there
+    }
+    with synthetic(trees) as (conn, _, _):
+        timeline = Timeline(conn)
+        for gapped, told in expected.items():
+            for shown in timeline.trees[5]:
+                shown.complete = shown.seen.source not in gapped
+            assert kinds(list(timeline.events(5)), 257) == told, gapped
+        rename = [e for e in timeline.events(5) if e["event"] == "rename"][0]
+        assert (rename["from"]["name"], rename["to"]["name"]) == ("m_4.txt", "m_4.moved")
+    # seen under the old name only in a lone leaf: a part of a tree, not a walk of a state
+    lone = {"items": named, "generation": 8}
+    events = events_of({"backup:9": renamed, "current": renamed}, [lone], uncommitted=True)
+    assert kinds(events, 257) == ["create"]
+    # the old name in an INODE_EXTREF item: other names of that directory need not be with it
+    inode_item_, _, extent = file_items(257, b"m_4.txt", b"x")
+    extended = [*ROOT_DIR_ITEMS, inode_item_, ((257, K["INODE_EXTREF"], 99),
+                                               inode_extref(256, b"m_4.txt")), extent]  # fmt: skip
+    with synthetic({"backup:8": extended, "current": renamed}) as (conn, _, _):
+        timeline = Timeline(conn)
+        assert kinds(list(timeline.events(5)), 257) == ["create", "rename"]  # walked whole
+        for shown in timeline.trees[5]:
+            shown.complete = shown.seen.source != "backup:8"
+        assert kinds(list(timeline.events(5)), 257) == ["create"]
+
+
 def test_an_uncommitted_version_with_a_stale_inode_item_is_marked_inconsistent():
     stale = {"generation": 9, "items": [
         *ROOT_DIR_ITEMS, ((257, K["INODE_ITEM"], 0), inode_item(SECTOR, generation=7)),
@@ -397,6 +443,32 @@ def test_names_change_only_where_the_scenario_changed_them(deep):
     changed = [(e["event"], e["objectid"], e["path"]) for e in events
                if e["event"] in ("link", "unlink", "move")]  # fmt: skip
     assert [c for c in changed if c[0] != "unlink" or c[1] not in unlinked] == []
+
+
+def test_a_rename_is_reported_whenever_committed_walks_show_both_names(deep):
+    """EXP-009 addendum A: the renames of `moves/m_4.txt` and `m_5.txt` were lost because their
+    old names were seen only through committed walks with gaps. A rename within one directory
+    is proved from such a walk through its INODE_REF item (issue #84), so every logged rename
+    whose old and new names committed walks of this image show is reported."""
+    log = DEEP.with_suffix(".log").read_text()
+    logged = re.findall(r"=== EVENT rename (\d+) (\d+) (\S+) (\S+)", log)
+    if not logged:
+        pytest.skip("m4_deep was built before its scenario logged events: rebuild it")
+    timeline = Timeline(deep, tree_id=5, uncommitted=True)
+    versions = timeline.versions(5)
+    reported = {e["objectid"] for e in timeline.events(5) if e["event"] == "rename"}
+    shown = 0
+    for number, _, old, new in logged:
+        names = {
+            name
+            for (objectid, _), history in versions.items() if objectid == int(number)
+            for version in history if any(seen.committed for seen in version.seen)
+            for _, name in version.observation.names
+        }  # fmt: skip
+        if {old.rsplit("/", 1)[-1].encode(), new.rsplit("/", 1)[-1].encode()} <= names:
+            shown += 1
+            assert int(number) in reported, (old, new)
+    assert shown >= len(logged) // 2
 
 
 def test_events_agree_with_the_generations_the_log_holds(deep):
