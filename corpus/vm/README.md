@@ -78,6 +78,8 @@ python3 corpus/vm/probe_stale_metadata.py images/scenarios/x.img
 | `make_image.sh NAME` | truncate + pinned mkfs (`SIZE`, `CSUM`, `MKFS_ARGS`; `MKFS=mkfs.btrfs` for the host's) + guest run → `images/scenarios/NAME.{img,log}` |
 | `scenarios/s01.guest.sh` | Subvolume, 3 files, snapshot, delete 2 (one inline), 6 commits, full balance |
 | `scenarios/wide.guest.sh` | Trees with internal nodes: 48 subvolumes, 1500 files, deletions between commits, a snapshot, no balance |
+| `scenarios/reuse.guest.sh` | Six data chunks, three removed (`balance -dusage=0`): the next chunk reuses the topmost one's logical range on other physical bytes (EXP-010) |
+| `scenarios/reuse_same.guest.sh` | The control: the next chunk reuses the topmost one's logical range on the same physical bytes |
 | `scenarios/discard_{none,async,sync}.sh` | The three §10.4 discard rows |
 | `probe_stale_metadata.py` | Prints `fsid_blocks stale_blocks needle_copies nonzero_blocks` (definitions in its docstring) |
 
@@ -109,6 +111,10 @@ Notes:
 - `DISCARD=1` alone makes the async row: kernels ≥ 6.2 enable
   `discard=async` automatically on a discard-capable device. The log line
   `=== MOUNTED` shows the effective mount options.
+- Without `DISCARD` the virtio disk still offers discard, so the guest kernel mounts with
+  `discard=async` all the same (see `=== MOUNTED` in any log); QEMU drops the TRIMs, so no
+  bytes change, but the kernel's removal of empty block groups waits for its discard. Pass
+  `nodiscard` in `MOUNT_OPTS` to take that path out (scenario `reuse`).
 - The pinned `mkfs.btrfs` 6.6.3 does **not** enable the block-group tree by
   default (compat_ro 0x3). Use `MKFS_ARGS="-O block-group-tree"` when tree
   11 must be present.
