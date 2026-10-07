@@ -2170,6 +2170,14 @@ the original of a duplicate), `provenance.backref` (per data extent: `agrees`, `
   source kind on the corpus and the share of `confirmed` files whose hash the scenario logged,
   with a committed script and the prediction registered first.
 
+**M6c status 2026-10-07: done** (catalog.md, M6c entry; `tests/test_tiers.py`,
+`tests/test_exp020.py`; EXP-020). Each bullet of the definition of done is a test. On 26 images no
+artifact fires `backref_disagrees`, every current file with checksummed data is `confirmed`, and
+the only `mismatch` among them is `unattached`. One thing the design did not foresee: the
+scenarios' logs hash each file once, after writing it, so 37 `confirmed` files (versions created
+empty, or committed in the middle of a write) have no logged hash; none was shown wrong (EXP-020
+§6.1). On this corpus 98 % of `confirmed` files rest on `content_in_leaf` (small inline files).
+
 **M6f: foreign-FSID discovery** (issue #54; design fixed 2026-10-07, before implementation).
 
 *What it is.* An optional mode, `btrfska scan --foreign` and `btrfska catalog build --foreign`,
