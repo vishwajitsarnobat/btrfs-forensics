@@ -67,7 +67,7 @@ Maintenance rules:
     hashing it (build record, test) takes about three minutes.
   - Default tier (unchanged, `./setup.sh`): 40 images in a fresh clone, 218 s of build commands
     in all, 1.2 GiB on disk, 21 GiB apparent.
-- **Verified.** `tests/test_matrix.py` (184 tests over the 46 images: the csum type, block-group
+- **Verified.** `tests/test_matrix.py` (188 tests over the 47 matrix and large images: the csum type, block-group
   tree flag, MIXED_GROUPS, device count, size, chunk profiles and file-extent compression each
   row claims, read from the image; the mount options in effect carry the intended discard option;
   every log parses, its history is consistent, and every file live at the end is in the current
