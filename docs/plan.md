@@ -1952,8 +1952,10 @@ whose header carries the tree fsid, so neither is a candidate today (README, sca
    DEV_ITEMs and in CHUNK_ITEM stripes; a foreign superblock copy names one in its dev_item. A
    device uuid equal to the current superblock's dev_item uuid means the same device under a new
    fsid: `fsid_change` (`btrfstune -u` keeps the device uuid; btrfs-progs v6.6.3
-   tune/change-uuid.c:145-197). Only other device uuids mean a new mkfs: `reformat`. None
-   surviving: `undetermined`. Separately, a current superblock with METADATA_UUID whose fsid
+   tune/change-uuid.c:145-197). Only other device uuids mean a new mkfs: `reformat`. Without a
+   device uuid, a foreign generation above the current superblock's also means `reformat`:
+   btrfstune leaves the generation alone, so blocks written before an fsid change are never newer
+   than the filesystem that carries on. Neither: `undetermined`. Separately, a current superblock with METADATA_UUID whose fsid
    differs from metadata_uuid reports an fsid change made through metadata_uuid (`btrfstune -m`):
    its tree blocks were never rewritten, so there are no foreign headers to find.
 6. **Records, no schema change.** `scan --json` adds `foreign_node` records (one per foreign
@@ -1982,7 +1984,7 @@ snapshot, churn with deletions; every file names the fsid it was written under):
 *Definition of done.*
 - on `m6_reformat` and `m6_reformat_geometry` the old fsid (from the scenario's log) is found,
   validated in its own geometry (inferred on the first, from the foreign superblock on the
-  second: nodesize 32 KiB, crc32c), and reported as `reformat` when a device uuid survives;
+  second: nodesize 32 KiB, crc32c), and reported as `reformat`;
 - on `m6_fsid_u` the pre-change fsid is found, its valid blocks are never live blocks of the
   current filesystem, and it is reported as `fsid_change`; on `m6_fsid_m` no foreign fsid is
   found and the metadata_uuid change is reported;
