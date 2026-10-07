@@ -64,6 +64,58 @@ Maintenance rules:
   reuse note in its own row). 1217 tests passed, none skipped (1211 in the full run, and the 6 that need the pinned tools once they were linked in); ruff clean; `sha256sum -c`
   OK.
 
+## 2026-10-07 — M6d: hiding detection, reserved ranges from the feature flags
+
+- **Branch:** `feature/m6-hiding-detection` (from `main` at `e74b282`, merged with `main` at
+  `f1b211c`; issue #52). New `src/btrfska/hiding/` (`findings.py`, `areas.py`, `trees.py`,
+  `detect.py`, `cli.py`), `corpus/hide_and_seek.py`, `corpus/vm/scenarios/hidden.guest.sh`,
+  `tests/test_hiding.py`, `tests/test_hiding_images.py`. Changed `src/btrfska/cli.py`,
+  `catalog/build.py` and `catalog/cli.py` (`--hiding`), `corpus/mutate.py` (ten subcommands, and
+  a C-speed zero check that makes every mutate row about four times faster), `corpus/manifest.tsv`
+  (twelve rows), `setup.sh`, `README.md`, `docs/evidence-db.md`, `docs/plan.md` (M6d),
+  `corpus/vm/README.md`.
+- **Why.** Claim C5: Toolan & Humphries 2026 say detection of btrfs data hiding is unbuilt and
+  easy, and their published superblock reserved range is a pre-5.0 layout (research.md §10.13).
+- **What changed.** `btrfska hiding IMAGE [--json]` checks fourteen techniques: superblock reserved
+  bytes (0x264-0x32A always; `metadata_uuid`, `nr_global_roots`, `remap_root*` only while their
+  incompat flag is clear; backup-slot padding), superblock padding, sys_chunk_array slack,
+  overwritten superblock slots, the boot area, backup-root divergence, node slack, diverging
+  block copies, inode reserved bytes, nanosecond timestamps, STRING_ITEMs, file slack (with the
+  data checksum's verdict on the sector), device slack and invisible names. Each rule cites the
+  kernel at v7.0 for why mkfs.btrfs and the kernel never produce what it reports. Two legitimate
+  residues found while building it are counted, not reported: the sys_chunk_array tail that
+  removing a system chunk leaves (volumes.c:3204 memmoves without clearing), and the reserved
+  bytes of log-tree inode items (tree-log.c fills an empty item field by field). Device slack
+  where a historical chunk map (M5a) had a stripe is a removed chunk's and is counted too; the
+  maps are discovered only when bytes past the last extent are not zero. `catalog build --hiding`
+  stores the summary and findings in `scan_summary` under `hiding` and the report lines as
+  `problems` with source `hiding`: no schema change.
+- **Corpus.** Eleven `corpus/mutate.py` rows, one per technique, over the four csum types
+  (`m6_hide_sb_reserved`, `_sb_gated`, `_sb_padding`, `_chunk_array`, `_backup_roots`, `_pre_sb`,
+  `_inode_reserved`, `_nsec`, `_string_item`, `_file_slack`, `_device_slack`), `m4_planted_slack`
+  for node slack, and the guest row `m6_hidden_snapshot` (a U+FEFF snapshot moved into `.lib32`,
+  and a normally named one). The four btrfs images of `fkie-cad/hide-and-seek-dataset` at
+  `decd14b` are fetched by URL and pinned by SHA-256 into `images/hide-and-seek/` (no licence:
+  never committed; tests skip without them).
+- **What the images say** (one build each; tests assert the claims relative to each image):
+  every planted row is reported with its technique at the planted bytes and nothing else; the
+  planting subcommands leave every rewritten superblock and tree block valid in all four csum
+  types. The clean corpus (every other row, 27 images incl. `m1_unknown_incompat`) and
+  `sandbox.img` give no finding except `m6_reformat_geometry`: two `device_slack` findings, the
+  bytes of the larger filesystem the `--mixed -b 60M` mkfs replaced (past the new last extent and
+  past the new device size), as M6f found. On `m5_reuse` 41 779 389 bytes past the last extent
+  are explained by a historical chunk map (the chunk balance removed). mkfs's stale slack (2 to 6
+  block copies per image) and system-chunk tail (every image) are counted. Hide-and-seek:
+  `btrfs_superblock` shows mirror 1 overwritten with "HIDDEN DATA" (`superblock_slot`; the
+  metadata's reserved-area offsets hold nothing, as fishy-btrfs.md §4.2 found), `btrfs_inode_reserved`
+  the five inode items at exactly the metadata's offsets plus the DUP copy left unchanged
+  (`copy_divergence`), `btrfs_hidden_snapshot` the U+FEFF entry in `.lib32` (a plain directory in
+  that image, not a subvolume, so the rule covers every directory entry: `hidden_name`), and
+  `btrfs_raid1_slack` dev2 the 50 MiB past its last device extent (dev1 quiet).
+- **Verified.** ruff; `uv run pytest` (1278 passed, nothing skipped, with the corpus and the
+  hide-and-seek images present); `sha256sum -c tests/fixtures/SHA256SUMS`; the fresh-clone proof
+  (`./setup.sh` in `images/scratch/`). The false-positive measurement is issue #53.
+
 ## 2026-10-07 — M6b: free-space-tree forensics and the overwrite risk of recovered data
 
 - **Branch:** `feature/m6-free-space-tree` (from `main` at `4334698`; issue #50). New

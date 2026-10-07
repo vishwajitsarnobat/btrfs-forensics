@@ -12,6 +12,10 @@ as the chain of custody. A pass that fails leaves no database behind.
 With `foreign`, a second pass over the same regions looks for tree blocks of other filesystems
 (scan/foreign.py). Its summary goes into `scan_summary` under `foreign` and each of its findings
 into `problems` with source `foreign`; foreign blocks are not `nodes` rows.
+
+With `hiding`, the hiding detector (hiding/detect.py) runs on the current state, with the
+historical chunk maps this pass found. Its summary and findings go into `scan_summary` under
+`hiding` and its report lines into `problems` with source `hiding`.
 """
 
 import json
@@ -25,6 +29,7 @@ from btrfska import __version__
 from btrfska.catalog import db
 from btrfska.catalog.content import ContentWriter
 from btrfska.catalog.schema import SCHEMA_VERSION, s64, u64
+from btrfska.hiding import detect as hiding_detect
 from btrfska.scan.classify import Classified, scan_image
 from btrfska.scan.foreign import foreign_scan, report_lines
 from btrfska.scan.kernel_numpy import NodeRecord
@@ -407,6 +412,7 @@ def build_catalog(
     max_states: int = MAX_STATES,
     max_maps: int = MAX_MAPS,
     foreign: bool = False,
+    hiding: bool = False,
 ) -> Built:
     """Scan `image_path` once and write its evidence database to `db_path` (which must not exist).
 
@@ -470,6 +476,12 @@ def build_catalog(
                     others = foreign_scan(img, fs, scan.plan.regions)
                     summary = summary | {"foreign": others}
                     _insert_problems(conn, "foreign", report_lines(others))
+                if hiding:
+                    maps = [entry.chunk_map for entry in found.chunk_maps]
+                    findings, hidden = hiding_detect.detect(img, fs, lambda: maps)
+                    records = [finding.record() for finding in findings]
+                    summary = summary | {"hiding": hidden | {"records": records}}
+                    _insert_problems(conn, "hiding", hiding_detect.report_lines(findings, hidden))
                 after = img.sha256() if rehash else None
                 conn.execute(
                     "UPDATE scan_runs"

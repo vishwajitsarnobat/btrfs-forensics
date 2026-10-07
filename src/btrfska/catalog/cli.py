@@ -36,6 +36,7 @@ def cmd_build(args: argparse.Namespace) -> int:
             rehash=not args.no_rehash,
             max_states=args.max_states,
             foreign=args.foreign,
+            hiding=args.hiding,
         )
     except NoValidSuperblock:
         _note("NO_VALID_SUPERBLOCK")
@@ -63,6 +64,13 @@ def cmd_build(args: argparse.Namespace) -> int:
     print("rows: " + ", ".join(f"{name} {count}" for name, count in built.rows.items()))
     for line in report_lines(summary["foreign"]) if "foreign" in summary else ():
         print(line)
+    if "hiding" in summary:
+        hidden = summary["hiding"]
+        counts = [f"{name} {count}" for name, count in hidden["by_technique"].items() if count]
+        print(
+            f"hiding: {hidden['findings']} findings ({', '.join(counts) or 'none'}); details in "
+            "`problems` (source hiding)"
+        )
     return 0 if built.image_unchanged is not False else EXIT_ERROR
 
 
@@ -159,6 +167,12 @@ def add_parser(sub) -> None:
         "--foreign",
         action="store_true",
         help="also look for tree blocks of other filesystems; findings go to `problems` and to "
+        "the scan summary",
+    )
+    build.add_argument(
+        "--hiding",
+        action="store_true",
+        help="also run the hiding detector (btrfska hiding); findings go to `problems` and to "
         "the scan summary",
     )
     build.add_argument(

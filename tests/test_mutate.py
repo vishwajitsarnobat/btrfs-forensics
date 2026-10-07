@@ -297,3 +297,23 @@ def test_flip_data_inverts_one_byte_per_mirror_asked_for():
             for offset in offsets:
                 assert old.mmap[offset] ^ 0xFF == new.mmap[offset]
         assert "repairable.txt at logical" in result.stdout and "mirror 2 of 2" in result.stdout
+
+
+def test_hiding_planters_refuse_what_they_cannot_plant_and_leave_no_file():
+    with scratch_dir("test_mutate_") as d:
+        result = run(REPO_ROOT / "sandbox.img", d / "out.img", "plant-file-slack", "nothing.txt")
+        assert result.returncode != 0 and "no file 'nothing.txt'" in result.stderr
+        assert not (d / "out.img").exists()
+        result = run(REPO_ROOT / "sandbox.img", d / "out.img", "plant-pre-sb", "--offset", "0")
+        assert result.returncode != 0 and "not inside the first 64 KiB" in result.stderr
+        assert not (d / "out.img").exists()
+
+
+def test_a_feature_gated_field_in_use_is_not_planted_in():
+    src = REPO_ROOT / "images" / "scenarios" / "m6_fsid_m.img"
+    if not src.exists():
+        pytest.skip("m6_fsid_m.img absent: build it with corpus/build.py")
+    with scratch_dir("test_mutate_") as d:
+        result = run(src, d / "out.img", "plant-sb-reserved", "--field", "metadata_uuid")
+        assert result.returncode != 0 and "METADATA_UUID is set" in result.stderr
+        assert not (d / "out.img").exists()
