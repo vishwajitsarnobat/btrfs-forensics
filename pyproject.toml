@@ -31,7 +31,11 @@ dev = [
 testpaths = ["tests"]
 # Repo root on sys.path so tests can `from conftest import SANDBOX_SHA256`.
 pythonpath = ["."]
-markers = ["sandbox: needs sandbox.img", "vm: needs corpus/vm images"]
+markers = [
+    "sandbox: needs sandbox.img",
+    "vm: needs corpus/vm images",
+    "matrix: needs the matrix tier (corpus/build.py --tier matrix)",
+]
 addopts = "-ra --import-mode=importlib"
 
 [tool.ruff]
