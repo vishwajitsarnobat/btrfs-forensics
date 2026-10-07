@@ -318,6 +318,7 @@ class ChunkMap:
         self.rejected = tuple(rejected)
         self.problems = tuple(found)
         self._starts = [chunk.logical for chunk in accepted]
+        self._stripes: list | None = None  # (devid, offset, size, index, chunk), for logical_of
 
     def chunk_for(self, logical: int) -> Chunk:
         index = bisect.bisect_right(self._starts, logical) - 1
@@ -398,6 +399,69 @@ class ChunkMap:
     def order(self) -> tuple[ChunkMap, ...]:
         """The maps a read through this one consults: itself."""
         return (self,)
+
+    def logical_of(self, devid: int | None, physical: int) -> tuple[int, int, Chunk] | None:
+        """(logical address, bytes that stay contiguous from there, chunk) of the byte at
+        `physical` on device `devid` (None: any device), as btrfs_rmap_block maps it
+        (block-group.c:2202-2268): the stripe holding it, its 64 KiB stripe number and offset,
+        and for RAID0 and RAID10 stripe_nr * num_stripes + index over sub_stripes. None when no
+        stripe holds it, or when the chunk is RAID5/6 (not mapped back here)."""
+        if self._stripes is None:
+            found = []
+            for chunk in self.chunks:
+                size = stripe_size(chunk)
+                for index, stripe in enumerate(chunk.stripes):
+                    if size:
+                        found.append((stripe.devid, stripe.offset, size, index, chunk))
+            found.sort(key=lambda entry: (entry[0], entry[1]))
+            self._stripes = found
+            self._stripe_keys = [(entry[0], entry[1]) for entry in found]
+        at = len(self._stripes)
+        if devid is not None:
+            at = bisect.bisect_right(self._stripe_keys, (devid, physical))
+        for stripe_devid, offset, size, index, chunk in reversed(self._stripes[:at]):
+            if devid is not None and stripe_devid != devid:
+                break
+            if not offset <= physical < offset + size:
+                continue
+            profile = chunk.type & PROFILE_MASK
+            if profile & (BG["RAID5"] | BG["RAID6"]):
+                return None
+            stripe_nr, stripe_offset = divmod(physical - offset, STRIPE_LEN)
+            if profile & (BG["RAID0"] | BG["RAID10"]):
+                stripe_nr = (stripe_nr * chunk.num_stripes + index) // max(chunk.sub_stripes, 1)
+                return (
+                    chunk.logical + stripe_nr * STRIPE_LEN + stripe_offset,
+                    (STRIPE_LEN - stripe_offset),
+                    chunk,
+                )
+            return chunk.logical + physical - offset, offset + size - physical, chunk
+        return None
+
+    def logical_ranges(
+        self, devid: int | None, physical: int, length: int
+    ) -> Iterator[tuple[int | None, int]]:
+        """[physical, + length) on device `devid` as (logical address or None, length) pieces:
+        `logical_of` for each mapped piece, None for bytes no stripe holds (up to the next
+        stripe on the device) or that lie in a RAID5/6 chunk."""
+        end = physical + length
+        while physical < end:
+            mapped = self.logical_of(devid, physical)
+            if mapped is not None:
+                step = min(mapped[1], end - physical)
+                yield mapped[0], step
+            else:
+                after = [
+                    offset for stripe_devid, offset, _, _, _ in self._stripes
+                    if offset > physical and devid in (None, stripe_devid)
+                ]  # fmt: skip
+                inside = [
+                    offset + size for stripe_devid, offset, size, _, _ in self._stripes
+                    if offset <= physical < offset + size and devid in (None, stripe_devid)
+                ]  # fmt: skip
+                step = min([end, *after, *inside]) - physical
+                yield None, step
+            physical += step
 
     def notes(self, used: ChunkMap, logical: int, segments) -> tuple[str, ...]:
         return ()
