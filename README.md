@@ -88,6 +88,12 @@ which package provides it. No root is used and nothing is written outside the
 repository folder. [`corpus/vm/README.md`](corpus/vm/README.md) explains how
 the images are made and what is pinned.
 
+The evaluation corpus of plan.md M7, 46 more images over the matrix of sizes,
+operations, compression, checksums, block-group tree, discard, reclaim and
+layouts, is a separate tier that `setup.sh` does not build (about half an hour
+of guest runs): `uv run python corpus/build.py --tier matrix`. Its 100 GiB image
+is built locally only, with `--tier large`.
+
 ## Install and run
 
 By hand, without `setup.sh`:
