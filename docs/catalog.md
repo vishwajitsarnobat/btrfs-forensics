@@ -60,9 +60,11 @@ Maintenance rules:
   a later, longer victim had rewritten the sector holding their end past the end. The kernel
   zeroes those bytes before it checksums (extent_io.c:1857-1858); the sector is now also tried
   that way and reported as `tail_rewritten`.
-- **Verified.** `ruff check`, `ruff format --check`, `uv run pytest` (1 0XX passed, nothing
-  skipped), `sha256sum -c tests/fixtures/SHA256SUMS`; the fresh-clone proof of `./setup.sh` with
-  the new corpus rows.
+- **Verified.** `ruff check`, `ruff format --check`, `sha256sum -c tests/fixtures/SHA256SUMS`;
+  fresh-clone proof: the branch cloned into `images/scratch/`, `./setup.sh` built every corpus row
+  including the two new ones and ran 1 051 tests, all passed, nothing skipped; the clone was
+  deleted. In the working checkout 1 050 passed and one test of EXP-009 skipped, because the
+  shared `m4_deep` there predates the event log EXP-009 added.
 
 ## 2026-10-07 — EXP-009: how right the timeline is, per event type, on `m4_deep`
 
