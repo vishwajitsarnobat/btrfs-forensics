@@ -2122,6 +2122,29 @@ one run of 15 (365/353/18/828), the async and sync rows never.
   is new for any generation or only outside the current chunk map. Read
   find-root's scan range in the btrfs-progs source and register the
   prediction first (`paper-draft.md` §10).
+- **E-timeline: EXP-009, how right `btrfska timeline` is on `m4_deep`** (issue #55; design fixed
+  with the maintainer on 2026-10-07, before any measurement). C3 has tests (M5d) but no measured
+  number. The timeline is compared with what the guest did, event by event:
+  - *Ground truth.* Scenario `deep` logged hashes only, and did no rename. It now also logs every
+    create, rename and delete in tree 5 as `=== EVENT KIND INODE GENERATION PATH [NEW PATH]`,
+    printed after the `sync` that committed it, with the superblock's generation read in the
+    guest by `btrfs inspect-internal dump-super` (which only reads). Every round also renames a
+    small file once (`moves/m_R.txt`: created in round R, renamed in R + 1, deleted in R + 2,
+    each in the padding commit the round makes anyway, so the number of commits does not
+    change). The file unlinked while open is logged as `unlink`, not as a delete.
+  - *Matching.* An event the timeline reports matches a logged event of the same type when the
+    file identity agrees (inode number and creation generation; for a rename also the new name)
+    and the logged generation lies within the event's bounding interval (`create`: its exact
+    transaction; `rename`, `delete`: `generations`, both ends included). `never_committed` is the
+    delete of a file that no commit held. Precision and recall per type (create, rename,
+    delete), over every reported event of tree 5 except the top directory, which mkfs made.
+  - *Also reported.* The share of the reported events flagged `order_assumed` or `log_only`;
+    the width of the delete intervals; events of kinds the scenario never does (`move`, `link`).
+  - *Definition of done.* EXP-009.md with hypothesis and predictions committed before the first
+    build of the extended scenario; N = 5 fresh builds by a committed `experiments/exp009.py`,
+    median and range, host named; the corpus change proved from a fresh clone (`./setup.sh`,
+    every test passing, nothing skipped); a test that the extended log agrees with the image's
+    creation generations; the result written up whichever way it goes.
 - **Minimum experiment set for paper 1** (EXP records, ≥ 5 regenerations
   where a guest runs; details in `paper-draft.md` §10):
   - E-rec: file-level recovery per source, on no-balance, aged and ≥ 8 GiB
