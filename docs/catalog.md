@@ -20,6 +20,51 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — M6b: free-space-tree forensics and the overwrite risk of recovered data
+
+- **Branch:** `feature/m6-free-space-tree` (from `main` at `4334698`; issue #50). New
+  `src/btrfska/substrate/freespace.py`, `src/btrfska/recover/space.py`, `tests/test_freespace.py`,
+  `tests/test_freespace_images.py`, `experiments/EXP-019.md`, `experiments/exp019.py`. Changed
+  `substrate/chunks.py` (`ChunkMap.logical_of`, `logical_ranges`), `recover/engine.py`,
+  `recover/cli.py` (`--discard`, a `free space:` line), `recover/maps.py` (`stored_map` public),
+  `catalog/schema.py` (version 9), `README.md`, `docs/evidence-db.md`, `docs/plan.md` (M6b),
+  `tests/test_recover.py`.
+- **Why.** Claim C2: no tool reports free-space-tree state. A recovered file is worth more when
+  the examiner knows whether its bytes are still held, free, or already given to something else,
+  how soon they could go, and when they were freed.
+- **What changed.** FREE_SPACE_INFO, FREE_SPACE_EXTENT and FREE_SPACE_BITMAP items are parsed as
+  the kernel loads them (bitmap runs carried across items, the extent count checked), hostile
+  items skipped and reported. The current state's free space tree is read from the database; a
+  filesystem without one (or with an untrusted one) gets free space derived from its extent tree
+  and block groups, and where both exist they are cross-checked. Every extent `recover` reads from
+  disk, and every tree block an artifact's items came from, is placed by the physical copy read,
+  mapped back through the current chunk map (btrfs_rmap_block): `in_use`, `free`, `allocated`,
+  `partial`, `no_block_group`. An ordinal overwrite-risk score (0 `none` to 4 `reallocated`)
+  follows kernel behaviour step by step: free space in a block group before new chunks, discard
+  per block-group kind, unused block groups, zoned reclaim; every rule cited and listed per
+  artifact. The discard mode is stated (`--discard`) or observed (`trimmed_metadata`,
+  `trimmed_data`, `not_trimmed`, `unknown`). The free space trees of older states date a free:
+  `freed_in` names the last state that held the bytes allocated and the first that held them
+  free. Schema 9: `artifacts.space_verdict`, `overwrite_risk`, `risk_reasons`, `space_source`;
+  `provenance.space_verdict`, `block_space`; `space` in `read_record`; `free_space` in the run
+  summary; the same in `manifest.jsonl`.
+- **Numbers** (EXP-019; 24 kept images, one run each, and 20 fresh builds on the i5-1335U host):
+  the free space tree and the derivation from the extent tree agree to the byte on all 23 opened
+  images and all 20 builds, and no item, current or older, is skipped or inconsistent; observed
+  mode `trimmed_metadata` on 5/5 `sync` builds, `not_trimmed` on 5/5 `none` and 5/5 `async`
+  (async with a quick unmount is not visible on the image, as EXP-002 found); on 7 `m4_deep`
+  images every recovered regular victim (10 per image) is dated by `freed_in.by` to exactly the
+  commit the guest log deleted it in; every complete file of the current state on every image is
+  `in_use` with score 0. Reallocated bytes appear only on `m5_reuse` and its control
+  `m5_reuse_same` (registered prediction partly wrong: the control reuses the same physical
+  bytes, so it shows them too); the registered "12 victims per build" was wrong, 10 survive.
+- **Verified.** 41 unit tests (every hostile item, the bitmap run carry, each verdict and risk
+  rule, the reverse mapping per profile against `copies()`, a fuzz of random items) and 22 image
+  tests (cross-check on 14 images, the trio's modes, `freed_in` against the log, stated modes,
+  the fallback giving the same placements). 1141 tests passed, none skipped (1177 after merging
+  `main` with M6f and the INODE_REF rule); ruff clean;
+  `sha256sum -c` OK.
+
 ## 2026-10-07 — Renames within one directory proved through INODE_REF, and EXP-009 addendum B
 
 - **Branch:** `feature/timeline-inode-ref-renames` (from `main` at `4334698`; issue #84).
