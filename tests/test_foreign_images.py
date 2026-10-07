@@ -36,6 +36,7 @@ def image(name: str):
 
 def lives(name: str) -> list[dict]:
     """The `=== FS` line of every life in the image's log, in order."""
+    image(name)  # skips when the image (and so its log) is absent
     log = (SCENARIOS / f"{name}.log").read_text()
     keys = ("fsid", "metadata_uuid", "dev_uuid", "nodesize", "csum_type")
     found = [dict(zip(keys, match, strict=True)) for match in LIFE.findall(log)]
