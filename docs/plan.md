@@ -2156,8 +2156,7 @@ risk, tier and rules), so a filter on its own row sees them.
 and reach, the joins, the csum trees and extent trees asked, the chunk maps, the allocation view,
 the original of a duplicate), `provenance.backref` (per data extent: `agrees`, `disagrees`,
 `unknown`), and `backref` in `provenance.read_record`; `by_tier` and `tier_rules` in
-`recovery_runs.summary`; the same keys in `manifest.jsonl`; a `confidence:` line on stdout. The
-hiding-detection branch takes version 11.
+`recovery_runs.summary`; the same keys in `manifest.jsonl`; a `confidence:` line on stdout.
 
 *Definition of done.*
 - every artifact of every run has a tier, its rules and its chain;
