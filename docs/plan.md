@@ -1661,9 +1661,9 @@ rule:
   commit held it), and `between` and `generations` are `null`: when it ended is not known.
 - **Names are compared only between versions seen in a whole walk.** A version seen only through
   walks with gaps, fragments or lone leaves (each can miss the leaf that holds an INODE_REF), or
-  only in a log tree replayed without its base, gives no `rename`, `move`, `link` or `unlink`,
-  and no `touch` (which says that the names did not change). Its other changes are still
-  reported.
+  only in a log tree replayed without its base, gives no `rename`, `move`, `link` or `unlink`;
+  when its names differ from those of the version beside it, no `touch` either (a `touch` says
+  that the names did not change). Its other changes are still reported.
 
 *Definition of done.* Tests that fail before the fix: a forged catalog for each `not_seen` reason
 and for the proof; a forged walk with a gap that misses a name, and a lone leaf that does; on
