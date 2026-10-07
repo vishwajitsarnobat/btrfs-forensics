@@ -6,6 +6,8 @@
 #   scenario=NAME        run /scenarios/NAME.sh (from corpus/vm/scenarios/NAME.guest.sh)
 #   mountopts=OPTS       btrfs mount options, e.g. compress=zstd,commit=5,discard=sync
 #                        (empty or absent = kernel defaults)
+#   sc_KEY=VALUE         a scenario parameter, set as the shell variable sc_KEY
+#                        (run_scenario.sh SCENARIO_ARGS)
 #
 # The scenario body runs with the filesystem mounted at $MNT. Afterwards the
 # filesystem is unmounted and the VM powers off.
@@ -20,6 +22,11 @@ for word in $(cat /proc/cmdline); do
     case $word in
         scenario=*)  SCENARIO=${word#scenario=} ;;
         mountopts=*) MOUNTOPTS=${word#mountopts=} ;;
+        sc_*=*)
+            key=${word%%=*}
+            # the value is assigned, never evaluated; the name is checked first
+            case $key in *[!a-z0-9_]*) echo "bad scenario argument: $word" ;;
+                         *) eval "$key=\${word#*=}" ;; esac ;;
     esac
 done
 
