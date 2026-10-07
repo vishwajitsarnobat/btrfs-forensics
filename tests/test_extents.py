@@ -39,8 +39,12 @@ INODE = 257
 SECTOR = 4096
 
 
-def inode_item(size: int, mode: int = 0o100644) -> bytes:
-    values = dict.fromkeys(ondisk.INODE_ITEM.fields, 0) | {"size": size, "mode": mode}
+def inode_item(size: int, mode: int = 0o100644, flags: int = 0) -> bytes:
+    values = dict.fromkeys(ondisk.INODE_ITEM.fields, 0) | {
+        "size": size,
+        "mode": mode,
+        "flags": flags,
+    }
     return struct.pack(ondisk.INODE_ITEM.format, *(values[f] for f in ondisk.INODE_ITEM.fields))
 
 
@@ -63,10 +67,10 @@ def data_chunk(profile: str = "SINGLE", stripes=((1, DATA_PHYS),)) -> Chunk:
 
 
 @contextmanager
-def filesystem(extents, size, data=None, chunk=None, mode=0o100644):
+def filesystem(extents, size, data=None, chunk=None, mode=0o100644, flags=0):
     """A one-leaf fs tree holding inode 257 and `extents` ((file offset, item bytes) pairs), with
     `data` ({physical: bytes}) written into a 128 MiB sparse image."""
-    items = [((INODE, K["INODE_ITEM"], 0), inode_item(size, mode))]
+    items = [((INODE, K["INODE_ITEM"], 0), inode_item(size, mode, flags))]
     items += [((INODE, K["EXTENT_DATA"], offset), item) for offset, item in extents]
     leaf = make_node(META_LOGICAL, items=items, owner=ondisk.FS_TREE_OBJECTID, generation=7)
     chunks = [

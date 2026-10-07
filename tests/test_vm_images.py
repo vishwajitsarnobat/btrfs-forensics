@@ -80,11 +80,12 @@ M2 = ["m2_logtree"]
 M3 = ["m3_wide"]
 M4 = ["m4_planted_slack", "m4_deep", "m4_deep_lost_parent"]
 M5 = ["m5_delsubvol", "m5_delsubvol_lost_items"]
+M6 = ["m6_datacsum", "m6_datacsum_flipped"]
 
 
 def test_manifest_lists_every_m1_and_m2_image():
     rows = manifest_rows()
-    for name in [*HEALTHY, *DERIVED, *M2, *M3, *M4, *M5]:
+    for name in [*HEALTHY, *DERIVED, *M2, *M3, *M4, *M5, *M6]:
         assert name in rows
         assert rows[name]["command"]
         # The manifest is a recipe: an image's bytes differ on every build (new filesystem UUID),
@@ -92,7 +93,7 @@ def test_manifest_lists_every_m1_and_m2_image():
         assert "sha256" not in rows[name]
 
 
-@pytest.mark.parametrize("name", [*HEALTHY, *DERIVED, *M2, *M3, *M4, *M5])
+@pytest.mark.parametrize("name", [*HEALTHY, *DERIVED, *M2, *M3, *M4, *M5, *M6])
 def test_local_image_is_unchanged_since_it_was_built(name):
     assert_unchanged_since_built(image(name))
 
