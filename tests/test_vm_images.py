@@ -79,7 +79,7 @@ DERIVED = [
 M2 = ["m2_logtree"]
 M3 = ["m3_wide"]
 M4 = ["m4_planted_slack", "m4_deep", "m4_deep_lost_parent"]
-M5 = ["m5_delsubvol", "m5_delsubvol_lost_items"]
+M5 = ["m5_delsubvol", "m5_delsubvol_lost_items", "m5_reuse", "m5_reuse_same"]
 
 
 def test_manifest_lists_every_m1_and_m2_image():
