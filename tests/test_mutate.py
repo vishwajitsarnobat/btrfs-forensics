@@ -459,3 +459,12 @@ def test_plant_device_slack_at_refuses_bytes_outside_what_device_free_gives():
     for at, message in ((last - 1, b"x"), (end - 1, b"xy")):
         with pytest.raises(SystemExit, match="not all past the last device extent"):
             M.plant_device_slack(path, message, at)
+
+
+def test_plant_file_slack_refuses_an_inline_file_and_reaches_files_in_subdirectories():
+    path = corpus_image("m6_datacsum")
+    with pytest.raises(SystemExit, match="not in an uncompressed regular extent"):
+        M.plant_file_slack(path, "inline.txt", b"x", False)
+    deep = corpus_image("m4_deep")
+    with pytest.raises(SystemExit, match="no file 'victims' in directory 7"):
+        M.plant_file_slack(deep, "victims", b"x", False, parent=7)

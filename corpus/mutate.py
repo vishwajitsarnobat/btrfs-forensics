@@ -521,10 +521,13 @@ def plant_string_item(path: Path, message: bytes) -> tuple[dict[int, bytes], str
         return rewrite_block(img, node, fs.reader.ctx, edit), note
 
 
-def plant_file_slack(path: Path, name: str, message: bytes, keep_csum: bool, at: int = 0):
-    """`message` past the end of file NAME (top directory of the current fs tree) in its last
-    sector, `at` bytes after the end, in every copy; unless `keep_csum`, the sector's
-    EXTENT_CSUM entry is recomputed and the csum-tree leaf rewritten (Göbel et al. 2024 §3.2)."""
+def plant_file_slack(
+    path: Path, name: str, message: bytes, keep_csum: bool, at: int = 0, parent: int = 256
+):
+    """`message` past the end of file NAME (top directory of the current fs tree, or directory
+    inode `parent` of it) in its last sector, `at` bytes after the end, in every copy; unless
+    `keep_csum`, the sector's EXTENT_CSUM entry is recomputed and the csum-tree leaf rewritten
+    (Göbel et al. 2024 §3.2)."""
     key = ondisk.ITEM_KEYS
     with open_image(path) as img:
         fs = open_filesystem(img)
@@ -533,13 +536,14 @@ def plant_file_slack(path: Path, name: str, message: bytes, keep_csum: bool, at:
         names, sizes, logical = {}, {}, None
         for node in fs_leaves(fs):
             for item in node.items:
-                if item.key.type == key["INODE_REF"] and item.key.offset == 256:
+                if item.key.type == key["INODE_REF"] and item.key.offset == parent:
                     for ref in items.inode_refs(item.data):
                         names[ref["name"]] = item.key.objectid
                 elif item.key.type == key["INODE_ITEM"]:
                     sizes[item.key.objectid] = items.inode_item(item.data)["size"]
         if name not in names:
-            sys.exit(f"{path}: no file {name!r} in the top directory")
+            where = "the top directory" if parent == 256 else f"directory {parent}"
+            sys.exit(f"{path}: no file {name!r} in {where}")
         objectid = names[name]
         size = sizes[objectid]
         if not size % ss or at < 0 or at + len(message) > ss - size % ss:
@@ -551,9 +555,10 @@ def plant_file_slack(path: Path, name: str, message: bytes, keep_csum: bool, at:
                 if (item.key.objectid, item.key.type) != (objectid, key["EXTENT_DATA"]):
                     continue
                 extent = items.file_extent(item.data)
+                if extent["type"] != ondisk.FILE_EXTENT_REG:  # inline: no sector of its own
+                    continue
                 covers = item.key.offset <= sector < item.key.offset + extent["num_bytes"]
-                if (extent["type"] == ondisk.FILE_EXTENT_REG and not extent["compression"]
-                        and extent["disk_bytenr"] and covers):  # fmt: skip
+                if not extent["compression"] and extent["disk_bytenr"] and covers:
                     logical = extent["disk_bytenr"] + extent["offset"] + sector - item.key.offset
         if logical is None:
             sys.exit(f"{name!r}: its last sector is not in an uncompressed regular extent")

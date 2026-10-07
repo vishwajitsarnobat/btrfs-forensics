@@ -337,24 +337,26 @@ def inode_plants(base: str, path: Path, img, fs) -> list[Plant]:
 
 def file_slack_plants(base: str, path: Path, img, fs) -> list[Plant]:
     ss = fs.reader.ctx.sectorsize
-    names, sizes = {}, {}
+    refs, inodes = [], {}
     for node in M.fs_leaves(fs):
         for item in node.items:
-            if item.key.type == ondisk.ITEM_KEYS["INODE_REF"] and item.key.offset == 256:
+            if item.key.type == ondisk.ITEM_KEYS["INODE_REF"]:
                 for ref in items.inode_refs(item.data):
-                    names[ref["name"]] = item.key.objectid
+                    refs.append((ref["name"], item.key.offset, item.key.objectid))
             elif item.key.type == ondisk.ITEM_KEYS["INODE_ITEM"]:
-                sizes[item.key.objectid] = items.inode_item(item.data)["size"]
-    name, why = None, "no regular file in the top directory with a tail in an uncompressed extent"
-    for candidate in sorted(names):
-        if names[candidate] != 256 and sizes.get(names[candidate], 0) % ss:
-            done, why = attempt(M.plant_file_slack, path, candidate, b"\1", False)
+                inodes[item.key.objectid] = items.inode_item(item.data)
+    name = None
+    why = "no regular file in the fs tree with a tail in an uncompressed regular extent"
+    for candidate, parent, objectid in sorted(refs, key=lambda r: (r[1], r[0])):
+        inode = inodes.get(objectid)
+        if inode and inode["mode"] & 0o170000 == 0o100000 and inode["size"] % ss:
+            done, _ = attempt(M.plant_file_slack, path, candidate, b"\1", False, 0, parent)
             if done:
-                name = candidate
+                name, size = candidate, inode["size"]
                 break
     if name is None:
         return [Plant("file_slack", "any", na=why)]
-    tail = ss - sizes[names[name]] % ss
+    tail = ss - size % ss
     rng = rng_for(base, "file_slack", name)
     some = rng.randint(2, max(2, tail - 1))
     plants = []
@@ -363,7 +365,7 @@ def file_slack_plants(base: str, path: Path, img, fs) -> list[Plant]:
                              (tail, 0, True)):  # fmt: skip
         label = f"{name} {length}@{at}" + (", data checksum kept" if keep else "")
         data = payload(base, "file_slack", label, length)
-        made, why = attempt(M.plant_file_slack, path, name, data, keep, at)
+        made, why = attempt(M.plant_file_slack, path, name, data, keep, at, parent)
         plant = Plant("file_slack", label, capacity=tail, na=why)
         if made:
             plant.patches, plant.spans = made, block_spans(img, made, ss, skip=0)
