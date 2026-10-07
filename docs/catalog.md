@@ -20,6 +20,21 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — The mentor demo, tracked and runnable
+
+- **Branch:** `docs/demo` (from `main` at `1330f43`). Added `docs/demo/README.md`,
+  `docs/demo/demo.sh`, `docs/demo/check_truth.py`. Docs only.
+- **Why.** The demo shown to the mentor lived in an untracked `docs/notes.md` and in scripts under
+  the gitignored `images/scratch/demo/`, so nobody else could run it. Now one command runs it after
+  `./setup.sh`.
+- **What changed.** Ten steps from the trust gate to the read-only check, written as a table in the
+  README and as a script. Counts that depend on the build of the corpus images (states found,
+  files recovered, the image hash, run time) are printed by the script and no longer written in
+  the text, because guest runs are not bit-stable. The ground-truth checker reads the recovery
+  manifest once and indexes it by hash.
+- **Verified.** `docs/demo/demo.sh` run end to end on this checkout (exit 0); `ruff check` and
+  `ruff format --check` clean.
+
 ## 2026-10-07 — Prior art of October recorded, EXP-004 status corrected
 
 - **Branch:** `docs/prior-art-october` (from `main` at `0cea88e`). Changed `docs/research.md`,
