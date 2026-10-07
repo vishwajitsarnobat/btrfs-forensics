@@ -1866,6 +1866,15 @@ mismatch). The corpus scripts change, so a fresh clone runs `./setup.sh`.
 - README and evidence-db.md document every new key and column; EXP-013 counts the verdicts per
   source kind on the corpus, with a committed script and the prediction registered first.
 
+**M6a status 2026-10-07: done** (catalog.md, M6a entry; `tests/test_datacsum.py`,
+`tests/test_datacsum_images.py`; EXP-013). Each bullet of the definition of done is a test. One
+thing the design did not foresee: a sector that holds the end of a file can be written again past
+the end by a later file at the same address, and then fails its checksum while the file's bytes
+are intact. The kernel zeroes the rest of that sector before it checksums it
+(extent_io.c:1857-1858), so the sector is also tried with those bytes zeroed and reported as
+`tail_rewritten` (ten sectors on `m4_deep`). Only the sectors that hold the file's bytes are
+checked; an extent that lies wholly past the inode's size is not checked at all.
+
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
 - Corpus generator = `corpus/vm/` scaled up (already in use since M1):
   scenario scripts × matrix below, per-image manifest (per-file SHA-256,

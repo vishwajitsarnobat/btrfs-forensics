@@ -20,6 +20,50 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — M6a: recovered content verified against the data checksums (EXTENT_CSUM)
+
+- **Branch:** `feature/m6-extent-csum` (from `main` at `b918555`, rebased on `bef52dd`; issue
+  #49). New `src/btrfska/substrate/datacsum.py`, `src/btrfska/recover/csums.py`,
+  `corpus/vm/scenarios/datacsum.guest.sh`, `tests/test_datacsum.py`,
+  `tests/test_datacsum_images.py`, `experiments/EXP-013.md`, `experiments/exp013.py`. Changed
+  `substrate/extents.py`, `substrate/ondisk.py`, `recover/engine.py`, `recover/cli.py`,
+  `catalog/schema.py` (version 8), `cli.py` (`cat`), `corpus/mutate.py` (`flip-data`, and an
+  `images/` that is a symlink is accepted), `corpus/manifest.tsv`, `README.md`,
+  `docs/evidence-db.md`, `docs/plan.md` (M6a), tests.
+- **Why.** The risk table says content is Confirmed only by a data-checksum match, and M6c's tiers
+  need that verdict. Until now `complete` meant only that every byte was read; LZO decodes
+  damaged streams without error, and bytes from a freed chunk may have been overwritten.
+- **What changed.** Every data extent `recover` or `cat` reads is checked sector by sector against
+  the EXTENT_CSUM items of a csum tree, with the csum size of the superblock's type (all four).
+  The tree is the one of the state the file comes from (`state_trees`, tree 7), walked in the
+  database, then the current one; a tree read without a gap that has no checksum for a sector
+  decides that it has none. A log tree is asked first for its own EXTENT_CSUM items, a lone leaf
+  for the oldest state not older than it. Verdicts per extent and per file: `match`, `mismatch`
+  (with the sector addresses), `partial_match`, `no_csum` (with the reason: inline, prealloc,
+  hole, nodatasum, no item), `unavailable`. DUP and RAID1 copies are judged per sector, as the
+  kernel's read repair does: a failing first copy is replaced by a matching one, and listed.
+  Hostile EXTENT_CSUM items (misaligned, bad size, overflowing, overlapping, conflicting) are
+  skipped or reported. Schema 8: `artifacts.csum_verdict`, `artifacts.csum_sources`,
+  `provenance.csum_verdict`; `manifest.jsonl`, `cat`'s records and the run summary carry them.
+  Two corpus images: `m6_datacsum` (data DUP, crc32c, a nodatasum file written after
+  `remount,nodatasum`, prealloc, inline and zstd files) and `m6_datacsum_flipped` (one sector
+  flipped on one mirror of one file, on both of another).
+- **Numbers (EXP-013, 20 fixed images, one run each).** Files per source kind, `match` /
+  `mismatch` / `no_csum` / not checked: anchored 151 / 1 / 9 393 / 29; log tree 10 / 0 / 8 / 0;
+  orphan item 2 / 0 / 0 / 0; orphan node 20 / 0 / 1 716 / 296; no `partial_match` or
+  `unavailable`. No current-state file with data on disk fails (92 checked); the one mismatch is
+  the flipped `damaged.txt`; 0 of 212 files with a logged hash is a `mismatch`; 0 of 123 `match`
+  files with a logged name has another hash. Most corpus files are inline, which have no data
+  checksum. H4 (stale states lose their checksums) is refuted as registered: no corpus image has
+  a surviving old state whose data was overwritten.
+- **Found on the way.** Ten anchored victims of `m4_deep`, hash-exact, first came out `mismatch`:
+  a later, longer victim had rewritten the sector holding their end past the end. The kernel
+  zeroes those bytes before it checksums (extent_io.c:1857-1858); the sector is now also tried
+  that way and reported as `tail_rewritten`.
+- **Verified.** `ruff check`, `ruff format --check`, `uv run pytest` (1 0XX passed, nothing
+  skipped), `sha256sum -c tests/fixtures/SHA256SUMS`; the fresh-clone proof of `./setup.sh` with
+  the new corpus rows.
+
 ## 2026-10-07 — EXP-009: how right the timeline is, per event type, on `m4_deep`
 
 - **Branch:** `feature/exp009-timelines` (from `main` at `b918555`; issue #55). Changed
