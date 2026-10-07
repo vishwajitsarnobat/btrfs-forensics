@@ -9,6 +9,8 @@ from btrfska.recover.engine import RecoveryError, recover
 from btrfska.recover.output import OutputError
 from btrfska.substrate import ondisk
 from btrfska.substrate.datacsum import VERDICTS
+from btrfska.substrate.freespace import LEVELS
+from btrfska.substrate.freespace import VERDICTS as SPACE_VERDICTS
 from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat
 
 EXIT_ERROR = 1
@@ -50,6 +52,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
             graph=args.graph,
             logs=args.logs,
             maps=args.maps,
+            discard=args.discard,
             rehash=not args.no_rehash,
             note=lambda line: _note(f"btrfska recover: {line}"),
         )
@@ -83,6 +86,17 @@ def cmd_recover(args: argparse.Namespace) -> int:
     print(f"artifacts: {counts}; {done.bytes_written} bytes written")
     verdicts = {v: sum(n for (_, k), n in (done.by_csum or {}).items() if k == v) for v in VERDICTS}
     print("data checksums: " + ", ".join(f"{v} {n}" for v, n in verdicts.items()))
+    space = done.free_space or {}
+    discard = space.get("discard", {})
+    how = "stated" if discard.get("stated") else "observed"
+    print(
+        f"free space: {space.get('source') or 'none'}"
+        f"{'' if space.get('complete') else ' (incomplete)'}, discard {discard.get('mode')} "
+        f"({how}); "
+        + ", ".join(f"{v} {(done.by_space or {}).get(v, 0)}" for v in SPACE_VERDICTS)
+        + "; overwrite risk: "
+        + ", ".join(f"{level} {(done.by_risk or {}).get(level, 0)}" for level in LEVELS)
+    )
     incomplete = sum(
         done.counts.get(name, 0) for name in ("partial", "refused_encrypted", "failed")
     )
@@ -144,6 +158,13 @@ def add_parser(sub) -> None:
         help="own (default): read a root's file data through the chunk map of its own time, then "
         "through newer maps, and say which map each extent went through; current: through the "
         "current chunk map only, so data in chunks a balance removed stays unmapped",
+    )
+    parser.add_argument(
+        "--discard",
+        choices=("none", "async", "sync"),
+        help="the discard mode the filesystem was mounted with, when it is known (the mount "
+        "options are not on disk); without it the overwrite risk uses the mode observed on the "
+        "image",
     )
     parser.add_argument(
         "--no-dedup",
