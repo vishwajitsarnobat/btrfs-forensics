@@ -2045,7 +2045,7 @@ commits the space was freed.
   `not_trimmed`; `m4_deep` and `m6_datacsum`: every file of the current state `in_use` with score
   0, and deleted files of older states classified with a `freed_in` where the trees survive;
 - schema 9 documented column by column, README's `recover` section documents every new key and
-  `--discard`; EXP-018 measures the classification across the corpus with a committed script, the
+  `--discard`; EXP-019 measures the classification across the corpus with a committed script, the
   prediction registered first.
 
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
