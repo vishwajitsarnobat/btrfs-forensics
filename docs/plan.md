@@ -1672,6 +1672,10 @@ and for the proof; a forged walk with a gap that misses a name, and a lone leaf 
 no longer leaves `never_committed` out. README and this section describe the rule. EXP-009 is
 re-run (N = 5) and the results added to EXP-009.md as an addendum, the original results kept.
 
+**Status 2026-10-07: done** (catalog.md; EXP-009 addendum A). Every bullet is a test in
+`tests/test_timeline.py`; the three new tests failed before the fix (the m4_deep one by the
+`link` of `pad/p2`). EXP-009 re-run: no wrong event in five builds, rename recall 0.870 → 0.783.
+
 **M5 status 2026-09-21: the definition of done holds; three items of its scope are open.**
 Parts M5a (historical chunk maps, EXP-007), M5b (integrity and linkage), M5c-1 (the orphan graph,
 EXP-008) and M5d (timelines), after the prior-art re-run (research.md §11). Bullet by bullet:
@@ -2192,6 +2196,12 @@ one run of 15 (365/353/18/828), the async and sync rows never.
     order; about 3 % rest on a log tree alone (the flash files). Follow-up: `never_committed`,
     and name changes seen through walks with gaps, should need evidence rather than absence
     (EXP-009 §8).
+  - **Re-run 2026-10-07 after the M5d fix** (EXP-009, addendum A; issue #78). On five new builds,
+    each measured by the code before and after the fix: delete precision 1.0 in every build
+    (0.98 in one before), no `link` or `move` (one per build before), creates and flags
+    unchanged; rename recall 0.870 → 0.783, because two right renames rested on versions seen
+    only through walks with gaps. A refinement that would keep them is described there and left
+    to the maintainer.
 - **Minimum experiment set for paper 1** (EXP records, ≥ 5 regenerations
   where a guest runs; details in `paper-draft.md` §10):
   - E-rec: file-level recovery per source, on no-balance, aged and ≥ 8 GiB
