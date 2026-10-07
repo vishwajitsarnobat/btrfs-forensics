@@ -333,35 +333,37 @@ def test_m2_logtree_log_blocks_are_live_log_tree_copies():
         fs = open_filesystem(img)
         scan = scan_image(img, fs)
         classified = list(scan.classified)
-    assert (fs.fields["generation"], fs.fields["log_root"]) == (8, 30982144)
+    generation, log_root = fs.fields["generation"], fs.fields["log_root"]
     # btrfs inspect-internal dump-tree -t 18446744073709551610 (btrfs-progs v6.6.3): the log root
-    # tree leaf 30982144 names one subvolume log, leaf 30965760 (sv1, key offset 256); both are
-    # generation 9 = superblock + 1, owner TREE_LOG, one copy per METADATA|DUP stripe.
+    # tree leaf names one subvolume log leaf (sv1, key offset 256); both are generation
+    # superblock + 1, owner TREE_LOG, one copy per METADATA|DUP stripe. Addresses differ between
+    # builds and hosts, so they are taken from the image.
     log = sorted(
         (c.record.bytenr, c.record.generation, c.record.owner, c.status, c.record.valid)
         for c in classified
         if c.log_tree
     )
-    assert log == [(30965760, 9, LOG, "live", True)] * 2 + [(30982144, 9, LOG, "live", True)] * 2
+    blocks = sorted({row[0] for row in log})
+    assert len(blocks) == 2 and log_root in blocks
+    assert log == [(b, generation + 1, LOG, "live", True) for b in blocks for _ in range(2)]
     log_copies = {(c.record.bytenr, c.record.physical) for c in classified if c.log_tree}
     assert log_copies == scan.reach.log
     # The current state and its log walk cleanly; the oldest backup roots name reused blocks.
     assert [p for p in scan.reach.problems if not p.startswith("backup:")] == []
-    # An earlier log commit of the same transaction (the first fsync) left its log root tree leaf
-    # 30932992 and sv1 log leaf 30949376 (4 items) behind, superseded by the second commit. The
-    # log walk does not reach them, so their generation 9 stays a failed check: invalid.
+    # An earlier log commit of the same transaction (the first fsync) can leave its log root tree
+    # leaf and sv1 log leaf behind, superseded by the second commit. The log walk does not reach
+    # them, so their generation (superblock + 1) is their only failed check: invalid, in pairs.
     stale = sorted(
         (c.record.bytenr, c.status, [k.name for k in c.record.checks if k.ok is False])
         for c in classified
-        if c.record.generation == 9 and not c.log_tree
+        if c.record.generation == generation + 1 and not c.log_tree
     )
-    assert [(b, s, f) for b, s, f in stale] == [(30932992, "invalid", ["generation"])] * 2 + [
-        (30949376, "invalid", ["generation"])
-    ] * 2
+    assert all(s == "invalid" and f == ["generation"] for _, s, f in stale)
+    assert all(stale.count(row) == 2 for row in stale)
     live = {(c.record.bytenr, c.record.physical) for c in classified if c.status == "live"}
     assert live == scan.reach.live
     summary = scan.summary
-    assert (summary["log_tree"], summary["log_tree_blocks"]) == (4, 2)
+    assert (summary["log_tree"], summary["log_tree_blocks"]) == (4, 2)  # 2 blocks x DUP
     assert (summary["walk_only"], summary["extent_tree_only"]) == (0, 0)
     if shutil.which("btrfs"):
         dump = subprocess.run(
