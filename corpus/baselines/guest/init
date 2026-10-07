@@ -34,6 +34,9 @@ mount -t btrfs /dev/vdd $T/work || fail "cannot mount the work disk"
 mount -t proc proc $T/proc
 mount -t sysfs sys $T/sys
 mount -t devtmpfs dev $T/dev
+# POSIX semaphores (Python multiprocessing, used by mbkn-btrfs-rescue) live in /dev/shm
+mkdir -p $T/dev/shm
+mount -t tmpfs -o size=64m shm $T/dev/shm
 mount -t tmpfs -o size=256m tmp $T/tmp
 mkdir -p $T/work/in $T/work/out
 tar -xf /dev/vdc -C $T/work/in || fail "cannot unpack the job input"
@@ -49,7 +52,7 @@ echo "=== JOB-EXIT $(cat $T/work/out/job-status)"
 tar -cf /dev/vde -C $T/work/out . || fail "cannot write the output"
 sync
 echo "=== OUTPUT-WRITTEN"
-umount $T/tmp $T/dev $T/sys $T/proc
+umount $T/tmp $T/dev/shm $T/dev $T/sys $T/proc
 umount $T/work
 umount $T
 poweroff -f
