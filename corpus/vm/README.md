@@ -85,6 +85,8 @@ python3 corpus/vm/probe_stale_metadata.py images/scenarios/x.img
 | `scenarios/reformat.sh` | A life, the pinned mkfs over the same image again (`NEW_CSUM`, `NEW_MKFS_ARGS`), and unless `NEW_LIFE=0` a second life |
 | `scenarios/fsid_change.sh` | A life, the pinned `btrfstune -f $TUNE` (`-u` or `-m`), a second life |
 | `scenarios/hidden.guest.sh` | A snapshot named U+FEFF moved into `.lib32` and a normally named one, after Schwietert & Hilgert 2025 (plan.md M6d) |
+| `scenarios/stability_use.guest.sh` | Uses an existing image as Toolan & Humphries 2026 did to test whether hidden data survives: read-only scrub, read every file, create, modify and delete files over six more commits; prints scrub errors, unreadable files and BTRFS kernel messages (EXP-021; no corpus row) |
+| `scenarios/stability_balance.guest.sh` | `stability_use`, then a full balance (EXP-021; no corpus row) |
 | `probe_stale_metadata.py` | Prints `fsid_blocks stale_blocks needle_copies nonzero_blocks` (definitions in its docstring) |
 
 Derived images and the manifest (one level up, in `corpus/`):
