@@ -941,6 +941,29 @@ skips the hash, and the run is recorded as not checked).
   bytes allocated (`after`) and the first that held them all free (`by`). The per-extent record
   is `space` in `provenance.read_record`; stdout ends with a `free space:` line (source, discard
   mode, artifacts per verdict and per risk level).
+- **Confidence tiers** (plan.md M6c). Every artifact gets a `tier`, `confirmed`, `probable` or
+  `unattached`, and `tier_rules`, the rules of the table below that fired. Two questions decide
+  it. *Is the artifact tied to a committed state?* Yes when a walk from a committed root tree
+  reached it, every block through its parent's checked key pointer; for a lone leaf, a fragment
+  or a log tree, only when every data extent it read from disk matched the csum tree of a
+  cataloged state whose extent tree gives that extent to this inode. *Is its content proven?* Yes
+  when its data checksum is `match` in its own state's csum tree (a log tree's own items) or in
+  that of a state whose extent tree gives the extent to this inode, or when it has no data on
+  disk, so that its content lies in leaves whose checksum verified. A contradiction gives
+  `unattached`; both give `confirmed`; one gives `probable`; neither gives `unattached`. So
+  `confirmed` needs a checksum over the content and a commit that held it, a `mismatch` is never
+  `confirmed`, and data without a checksum is at most `probable`. **Decoding never raises a
+  tier**: a compressed extent's checksum covers its bytes on disk before decoding, an inline
+  extent's the leaf. The tier is about content and state, not the path (`attached`). A
+  `duplicate` repeats its original's notes (after one line naming it), verdicts, tier and rules,
+  plus `duplicate`. `provenance_chain` names every source the artifact rests on: `root`
+  (`source`, `kind`, `state_id`, `tree_id`, `subvolume`, `bytenr`, `generation`, `level`,
+  `named_by`), `leaves` (`bytenr`, `generation`, `owner`, `reach` of every leaf its items came
+  from), `joins` (their kinds), `csum_trees`, `extent_trees` (each state asked for
+  back-references, with `complete`: walked without a gap, null when the state names none),
+  `chunk_maps`, `space_source` and `duplicate_of`. Per extent, `provenance.read_record` has
+  `backref` (`state` and `verdict` for each extent tree asked). stdout ends with a `confidence:`
+  line that counts the artifacts per tier.
 - **A file is not `complete` when one of its extents is newer than its INODE_ITEM** (`missing`
   reason `inode_item_older_than_extent`). A commit always updates the inode item, so no committed
   tree holds such a file; a leaf written in the middle of a transaction can, and then the data is
@@ -974,11 +997,36 @@ skips the hash, and the run is recorded as not checked).
   `inode_transid`, `kind`, `path`, `attached`, `names`, `size`, `mode`, `xattrs`,
   `symlink_target`, `status`, `bytes_written`, `sha256`, `extent_signature`, `duplicate_of`,
   `output_path`, `chunk_maps`, `joined`, `missing`, `problems`, `csum_verdict` (`null` when
-  nothing was checked: no content, a duplicate, a refusal), `csum_sources` (a list), `space_verdict`, `overwrite_risk`,
+  nothing was checked: no content, a refusal; a duplicate repeats its original's), `csum_sources` (a list), `space_verdict`, `overwrite_risk`,
   `risk_reasons` (a list), `space_source` (`null` when there is no allocation to place the
-  artifact in), and `inode` (the whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
+  artifact in), `tier`, `tier_rules` (a list), `provenance_chain` (an object), and `inode` (the whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
 - Exit status 0 when every file is complete; 1 when any is `partial`, `refused_encrypted` or
   `failed`, or on an error (unknown root, wrong image, `DIR` exists); 2 for a refused format.
+
+The tier rules, in the order `tier_rules` lists them. *Tied* and *proven* are the two questions
+above; a contradiction gives `unattached` whatever else fired.
+
+| Rule | Effect | Fires when | Why |
+|---|---|---|---|
+| `blocks_validated` | required | every leaf the artifact's items came from has a valid copy: every check of its validation record passed | a block that failed a check is no evidence of what the kernel wrote |
+| `block_not_validated` | contradicts | one has none | as above |
+| `anchored` | tied | `source_kind` `anchored_root` or `orphan_item` | reached from a committed root tree through checked key pointers |
+| `backref_attributed` | tied | not anchored, and every data extent read from disk is `match` in the csum tree of a state whose extent tree back-references it to this inode | a committed state held these bytes for this inode: the kernel runs every delayed back-reference before a commit writes its roots (transaction.c:2473, :2502) |
+| `not_committed` | not tied | neither: a fragment, a lone leaf, a log tree | no commit vouches for it |
+| `csum_match` | proven | `csum_verdict` `match`, and every csum tree that decided a sector is the artifact's own (its state's, a log tree's own items) or a state's whose extent tree gives the extent to this inode | the bytes are those the filesystem checksummed for this file |
+| `content_in_leaf` | proven | no data on disk: inline, hole and prealloc extents only, or not a regular file | the content lies in leaves whose checksum verified |
+| `csum_match_unattributed` | unproven | `match`, but decided by another state's csum tree whose extent tree does not give the extent to this inode | a later file at the same address has a checksum of its own |
+| `csum_partial_match`, `csum_unavailable`, `csum_no_csum`, `csum_not_checked` | unproven | data on disk with that verdict (`no_csum`: NODATASUM, or none in a csum tree read without a gap), or no verdict | nothing proves those bytes |
+| `not_complete` | unproven | not every byte of the content was read: `partial`, `failed`, `refused_encrypted`, a symlink target that could not be read, an inode logged without content | unread bytes are not proven |
+| `no_inode_item` | unproven | items but no INODE_ITEM | size and type are unknown |
+| `backref_agrees` | support | anchored, and the extent tree of its own state gives every data extent read from disk to this inode | the commit's file tree and extent tree agree |
+| `backref_unknown` | none | that extent tree is missing, or walked with a gap and without the extent | absence behind a gap proves nothing |
+| `backref_disagrees` | contradicts | anchored, and that extent tree, walked without a gap, has no data extent of that address and length that an EXTENT_DATA_REF gives to this inode number (of any tree: snapshots share extents), or a SHARED_DATA_REF through a leaf holding the file extent (extent-tree.c:2569-2578, :5006-5009) | a commit leaves no file extent without its back-reference |
+| `generation_owner_consistent` | support | no item newer than its leaf, no inode created after its last change, no leaf newer than the root block that reached it, every leaf's owner passing the owner check for the tree read | the copy-on-write order of a commit |
+| `generation_inconsistent`, `owner_inconsistent` | contradicts | one of those fails | items or blocks that do not belong together |
+| `inode_item_older_than_extent` | contradicts | the `missing` reason of that name | the data and the inode item are from two moments: neither version |
+| `csum_mismatch` | contradicts | `csum_verdict` `mismatch` | the bytes are not those checksummed |
+| `duplicate` | inherits | `status` `duplicate` | the same file as an earlier artifact, whose tier this repeats |
 
 ```sh
 uv run btrfska catalog build sandbox.img --db images/scratch/sandbox.db --full-sweep
