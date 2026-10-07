@@ -13,6 +13,7 @@ from btrfska.scan.classify import Classified, failure_counts, scan_image
 from btrfska.scan.kernel_numpy import MAX_WORKERS
 from btrfska.scan.roots import State, discover_image
 from btrfska.substrate import csum, ondisk, superblock
+from btrfska.substrate.datacsum import Csums, tree_from_image
 from btrfska.substrate.extents import read_file
 from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat, open_filesystem
 from btrfska.substrate.image import open_image
@@ -323,6 +324,24 @@ def cmd_walk(args: argparse.Namespace) -> int:
     return 0
 
 
+def _csums(fs, args: argparse.Namespace) -> Csums:
+    """The csum trees `cat` verifies data against (plan.md M6a, decision 2): the one of the root
+    set asked for, then the current one; a `bytenr:` root has no set and asks the current one."""
+    sets = []
+    if parse_root_spec(args.root)[0] != "bytenr":
+        sets.append(find_root_set(fs.fields, args.root))
+    if not sets or sets[0].source != "current":
+        sets.append(find_root_set(fs.fields, "current"))
+    trees = []
+    for root_set in sets:
+        try:
+            root = resolve_tree(fs.reader, root_set, "csum")
+        except RootNotFound:
+            root = None
+        trees.append(tree_from_image(fs.reader, root, root_set.source))
+    return Csums(trees, fs.reader.ctx.csum_type, fs.reader.ctx.sectorsize)
+
+
 def cmd_cat(args: argparse.Namespace) -> int:
     """File bytes to stdout, only when the whole file reads; JSON records and a summary to stderr.
 
@@ -342,15 +361,15 @@ def cmd_cat(args: argparse.Namespace) -> int:
             _note(f"btrfska: error: {exc}")
             return EXIT_ERROR
         no_holes = bool(fs.fields["incompat_flags"] & ondisk.INCOMPAT["NO_HOLES"])
-        result = read_file(fs.reader, start, args.inode, no_holes=no_holes)
+        csums = _csums(fs, args)
+        result = read_file(fs.reader, start, args.inode, no_holes=no_holes, csums=csums)
         common = {"root": root, "inode": args.inode, "unsupported_format": fs.unsupported_format}
         for extent in result.extents:
             emit({"record": "extent", **common, **asdict(extent)})
         summary = result.record()
-        emit(
-            {"record": "file", **common}
-            | {key: summary[key] for key in ("size", "complete", "extents", "errors", "problems")}
-        )
+        summary["problems"] += [note for tree in csums.trees for note in tree.notes()]
+        keys = ("size", "complete", "extents", "errors", "problems", "csum", "csum_sources")
+        emit({"record": "file", **common} | {key: summary[key] for key in keys})
         if not result.complete:
             _note(f"btrfska cat: error: {'; '.join(result.failures)}")
             return EXIT_ERROR
@@ -358,7 +377,10 @@ def cmd_cat(args: argparse.Namespace) -> int:
         for chunk in result.chunks():
             out.write(chunk)
         out.flush()
-    _note(f"btrfska cat: inode {args.inode}, {result.size} bytes, {len(result.extents)} extents")
+    _note(
+        f"btrfska cat: inode {args.inode}, {result.size} bytes, {len(result.extents)} extents, "
+        f"data checksums: {summary['csum']}"
+    )
     return 0
 
 

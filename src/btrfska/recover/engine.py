@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from btrfska import __version__
 from btrfska.catalog import db
 from btrfska.catalog.schema import s64
+from btrfska.recover.csums import CsumTrees
 from btrfska.recover.dbtree import (
     Leaf,
     Root,
@@ -51,6 +52,7 @@ from btrfska.recover.logs import base_inodes, base_root, log_roots, replay
 from btrfska.recover.maps import Readers
 from btrfska.recover.output import PARTIAL, FileSink, OutputError, OutputTree
 from btrfska.substrate import items, ondisk
+from btrfska.substrate.datacsum import Csums, artifact_verdict
 from btrfska.substrate.extents import FileAssembly, stream_extent
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
@@ -80,6 +82,7 @@ class Recovered:
     by_source: dict[tuple[str, str], int] | None = None  # (source kind, status) -> artifacts
     fragments: int = 0  # fragments read (`graph`), and how many there are
     fragments_found: int = 0
+    by_csum: dict[tuple[str, str], int] | None = None  # (source kind, csum verdict) -> artifacts
 
 
 def _now() -> str:
@@ -125,6 +128,9 @@ class _Run:
         self.first_copy: dict[tuple[int, int, int | None, str], int] = {}
         self.counts: Counter[str] = Counter()
         self.by_source: Counter[tuple[str, str]] = Counter()  # (source kind, status)
+        self.by_csum: Counter[tuple[str, str]] = Counter()  # (source kind, csum verdict)
+        self.csums: Csums | None = None  # the csum trees the root being read is verified against
+        self.csum_trees: CsumTrees | None = None  # every csum tree of the run (recover/csums.py)
         self.bytes_written = 0
         self.last_objectid: int | None = None  # of the orphan leaf being read, else None
         self.uncommitted = False  # the root being read is no committed tree (orphan sources)
@@ -167,7 +173,9 @@ class _Run:
         """Stream the file into `sink`: (extent reads with their SHA-256, missing, problems)."""
         size = None if record.inode is None else record.inode["size"]
         found = [(item, leaf.bytenr) for item, leaf in record.extents]
-        assembly = FileAssembly(self.reader, found, size, no_holes=self.no_holes)
+        nodatasum = bool(record.inode and record.inode["flags"] & ondisk.INODE_NODATASUM)
+        assembly = FileAssembly(self.reader, found, size, no_holes=self.no_holes,
+                                csums=self.csums, nodatasum=nodatasum)  # fmt: skip
         reads, missing = [], []
         # The last inode of an orphan leaf: its remaining extent items may be in the next leaf,
         # and with NO_HOLES a range without an item looks exactly like a hole.
@@ -304,6 +312,8 @@ class _Run:
             "output_path": None,
             "chunk_maps": "[]",
             "joined": json.dumps(record.joins),
+            "csum_verdict": None,
+            "csum_sources": "[]",
         }
         reads, missing, same = [], [], None
         mode = None if inode is None else inode["mode"]
@@ -347,6 +357,8 @@ class _Run:
                     problems += found
                     through = [e.chunk_map for e, _ in reads if e.chunk_map and not e.error_kind]
                     row["chunk_maps"] = json.dumps(list(dict.fromkeys(through)))
+                    verdict, sources = artifact_verdict(e.csum for e, _ in reads)
+                    row["csum_verdict"], row["csum_sources"] = verdict, json.dumps(sources)
                     digest = sink.close(mode, _times(inode))
                     row["bytes_written"] = sink.written
                     self.bytes_written += sink.written
@@ -377,6 +389,8 @@ class _Run:
             self.first_copy.setdefault(same, artifact_id)
         self.counts[row["status"]] += 1
         self.by_source[row["source_kind"], row["status"]] += 1
+        if row["csum_verdict"] is not None:
+            self.by_csum[row["source_kind"], row["csum_verdict"]] += 1
         self._provenance(artifact_id, record, reads)
         self.out.record(
             {k: v for k, v in row.items() if k != "path_raw"}
@@ -388,6 +402,7 @@ class _Run:
                 "root_generation": root.generation,
                 "names": json.loads(row["names"]),
                 "xattrs": json.loads(row["xattrs"]),
+                "csum_sources": json.loads(row["csum_sources"]),
                 "missing": missing,
                 "problems": problems,
                 "inode": inode,
@@ -434,12 +449,13 @@ class _Run:
                     digest,
                     None if extent is None else extent.error_kind,
                     None if extent is None else json.dumps(asdict(extent)),
+                    None if extent is None or extent.csum is None else extent.csum.verdict,
                 )
             )  # fmt: skip
         self.conn.executemany(
             "INSERT INTO provenance (artifact_id, seq, role, content_id, slot, bytenr, generation,"
-            " physical, block_status, file_offset, length, extent_sha256, error_kind, read_record)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " physical, block_status, file_offset, length, extent_sha256, error_kind, read_record,"
+            " csum_verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
 
@@ -502,6 +518,7 @@ def recover_roots(
     run = _Run(conn, readers.current, out, note, no_holes=no_holes, dedup=dedup)
     gaps = {}
     sectorsize = readers.current.ctx.sectorsize
+    run.csum_trees = trees = CsumTrees(conn, readers.current.ctx.csum_type, sectorsize)
     covered: set[int] = set()  # leaves read under a fragment are not read again on their own
     for root, leaf in (*((root, None) for root in (*roots, *fragments, *logs)), *orphans):
         if leaf is not None and leaf.content_id in covered:
@@ -520,6 +537,7 @@ def recover_roots(
             leaves = [leaf]
         inodes = collect(conn, leaves)
         run.last_objectid = max(inodes, default=None) if leaf is not None else None
+        below = None
         if root.kind == "log_tree":
             covered.update(found_leaf.content_id for found_leaf in leaves)
             below = base_root(conn, root)
@@ -533,6 +551,7 @@ def recover_roots(
                 record.joins.append(join)
         elif graph and leaf is not None:
             named = _join_lone_leaf(conn, run, root, leaf, inodes, sectorsize)
+        run.csums = trees.for_root(root, leaves if root.kind == "log_tree" else (), below)
         located = paths(inodes, named)
         for objectid in sorted(located):
             run.artifact(recovery_id, root, inodes[objectid], located[objectid])
@@ -642,6 +661,10 @@ def recover(
                     "by_source": {
                         f"{kind} {status}": n for (kind, status), n in run.by_source.items()
                     },
+                    "by_csum": {
+                        f"{kind} {verdict}": n for (kind, verdict), n in run.by_csum.items()
+                    },
+                    "csum_trees": run.csum_trees.summary(),
                     "orphan_leaves": len(lone),
                     "fragments": len(tops),
                     "fragments_found": total_fragments,
@@ -656,6 +679,7 @@ def recover(
                 conn.commit()
         return Recovered(recovery_id, os.fspath(output_dir), rehash, resolved, gaps,
                          dict(run.counts), run.bytes_written, len(lone),
-                         dict(run.by_source), len(tops), total_fragments)  # fmt: skip
+                         dict(run.by_source), len(tops), total_fragments,
+                         dict(run.by_csum))  # fmt: skip
     finally:
         conn.close()
