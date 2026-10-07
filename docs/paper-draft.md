@@ -180,10 +180,10 @@ covers, from research.md §6 and §10.1–§10.2.
 
 | # | Candidate contribution | Status | Evidence | Honest scope and what is missing |
 |---|---|---|---|---|
-| N1 | **A validated forensic read path** that records every check on every physical copy of every tree block and refuses unsupported incompat bits | **Partially supported**: btrfska's side has committed evidence; the comparison with dissect.btrfs 1.10 has no committed script (§8 row 5, Not ready) | EXP-001 (0 rejected blocks, 10/10 files byte-identical on four csum types); oracle tests, 152 of 152 file reads equal (catalog.md M1c, `uv run pytest -q tests/oracle`); walks equal `dump-tree` block by block (`test_walks_match_dump_tree_block_by_block`, catalog.md M1b); `m1_unknown_incompat` refused with exit 2; `m1_badnode_both` reported as `invalid_node` | The dissect.btrfs observations (no checksum, header-field or incompat-bit validation; an unknown incompat bit opens; zero-filled unmapped reads) come from manual tests in research.md §10.2 and §10.9, with no committed script. No comparison enters the paper until a small script and an EXP record are committed (plan.md §7). Validation of known formats is not novel in itself (btrfs-progs, rustutils validate); the contribution is a forensic read path that records every check per copy |
+| N1 | **A validated forensic read path** that records every check on every physical copy of every tree block and refuses unsupported incompat bits | **Partially supported**: btrfska's side has committed evidence; the comparison with dissect.btrfs 1.10 has no committed script (§8 row 5, Not ready) | EXP-001 (0 rejected blocks, 10/10 files byte-identical on four csum types); oracle file reads, 152 of 152 equal on the four images of the M1c tests and 25 161 of 25 161 readable by dissect on all 21 images, 0 differing, 370 of 370 equal to guest or script SHA-256s (EXP-016); walks equal `dump-tree` block by block (`test_walks_match_dump_tree_block_by_block`, catalog.md M1b); `m1_unknown_incompat` refused with exit 2; `m1_badnode_both` reported as `invalid_node` | The dissect.btrfs observations (no checksum, header-field or incompat-bit validation; an unknown incompat bit opens; zero-filled unmapped reads) come from manual tests in research.md §10.2 and §10.9, with no committed script. No comparison enters the paper until a small script and an EXP record are committed (plan.md §7). Validation of known formats is not novel in itself (btrfs-progs, rustutils validate); the contribution is a forensic read path that records every check per copy |
 | N2 | **DUP-mirror provenance** and the kernel's read/repair policy | **Partially supported** | btrfska reads and validates every copy and reports divergent valid copies (`m1_badnode`, catalog.md M1b). Kernel policy read from v7.0 source: DUP reads mirror 1 and falls back only on failure; RAID1/1C3/1C4/10 pick a stripe by PID under the default `pid` policy; a fallback read on a read-write mount rewrites the failed mirror (research.md §10.8) | The kernel behaviour is read from source, not measured. On the corpus all 144 DUP pairs were identical (research.md §10.8), so no natural divergence was observed. The hiding-place hypothesis is untested (M6) |
-| N3 | **Foreign superblock copies** as evidence of a previous filesystem | **Partially supported** | Selection anchors the fsid on the first valid copy, following btrfs-progs recover mode, and reports foreign copies (`m1_foreign_mirror`, catalog.md M1a review fixes; research.md §10.7) | btrfs-progs already skips foreign copies; the new part is reporting them as evidence. One synthetic image; no real reformatted device. Tree blocks of a foreign fsid are not scanned at all (README "Limitations"; planned M6) |
-| N4 | **LZO decode success is not evidence of correct content** (measured) | **Supported now**, small | Committed harness `tests/oracle/lzo_hostile.py`, seeds 1–5: 227 (218–231) of 300 bit-flipped 4 KiB streams decode to wrong bytes within the bound in btrfska, lzallright and dissect.util native; dissect.util's native decoder raises a non-`Exception` panic on 37 (31–46) (catalog.md M1c review fixes table) | LZO has no integrity check by design, so the qualitative point is known; the contribution is the measurement and the design rule that follows (decode success never raises confidence). There is no EXP record yet: promote the harness to one. `TODO:` consider reporting the dissect.util panic upstream before publication |
+| N3 | **Foreign superblock copies** as evidence of a previous filesystem | **Partially supported** | Selection anchors the fsid on the first valid copy, following btrfs-progs recover mode, and reports foreign copies (`m1_foreign_mirror`, catalog.md M1a review fixes; research.md §10.7). EXP-017: on `m1_foreign_mirror` btrfska selects mirror 0 and reports mirror 1 (another fsid, generation 1000) as foreign, while generation alone would pick mirror 1, whose chunk root then fails on checksum and fsid; on 20 control images nothing is foreign | btrfs-progs already skips foreign copies; the new part is reporting them as evidence. One synthetic image; no real reformatted device. Tree blocks of a foreign fsid are not scanned at all (README "Limitations"; planned M6) |
+| N4 | **LZO decode success is not evidence of correct content** (measured) | **Supported now**, small | EXP-014 (committed harness `tests/oracle/lzo_hostile.py`, seeds 1–5): 227 (218–231) of 300 bit-flipped 4 KiB streams decode to wrong bytes within the bound in btrfska, lzallright and dissect.util native; dissect.util's native decoder raises a non-`Exception` panic on 37 (31–46). The three decoders fail on the same streams and return identical wrong bytes on every one, and 209 (196–210) of the wrong outputs are exactly 4 KiB long | LZO has no integrity check by design, so the qualitative point is known; the contribution is the measurement and the design rule that follows (decode success never raises confidence). One sector content per seed (low-entropy text). `TODO:` consider reporting the dissect.util panic upstream before publication |
 | N5 | **Old-root discovery beyond the backup roots, including states outside the current chunk map** | **Partially supported** | 31 candidate root-tree blocks (states) beyond the 4 backup states on every s01 image without trims, 30 complete; generations 3–16 have no block the current chunk map places (EXP-002 §6.3, §6.5; research.md §10.11) | Discovering roots beyond the backups is **not new**: `btrfs-find-root` does it, and Beyond Carving's Algorithm 3 scans the chunk-mapped tree regions for root-tree blocks (`docs/papers/pandey_beyond_carving_2026.pdf` §VI.E.1). What is ours: scanning unmapped gaps (and DATA with `--full-sweep`), per-copy validation, the candidate definition (N8), completeness and failure classes. Survival is a balance and short-life artefact (EXP-002 §6.5). **Measured against find-root in EXP-004 (predictions registered first, all three held on 13 of 13 images): find-root printed 229 of 229 states inside the current chunk map and 0 of 133 outside it; an added image with a two-level root tree gave 11 of 11 and 0 of 1 (EXP-004 §6.7). The claim is therefore discovery *outside the current chunk map*, nothing more.** A Beyond Carving-style scan as a third column is still open (M7) |
 | N6 | **Discard's effect on surviving metadata history** | **Supported now, as an observation** | EXP-000 (N = 15): sync keeps 8.7 % of stale blocks; async with a quick unmount equals no discard. EXP-002: under sync, 2 of 35 candidate root-tree blocks, 0 backup-reachable blocks, 6 of 14 distinct slot blocks survive; no block freed by the kernel during the scenario survives | Virtio TRIM on a sparse raw file, not an SSD; one scenario; quick unmount only; mechanism read from source. `TODO:` survey prior work on TRIM and SSD forensics (research.md has none) before claiming novelty |
 | N7 | **Tools that assume crc32c silently find nothing on other checksum types** | **Supported for the legacy prototype only** | EXP-001: legacy accepts 0 blocks and lists 0 files on xxhash64, sha256 and blake2b images (rejects 368, 402, 368) | Framed as a regression proof of our own prototype, it is weak. Generalising needs baseline runs (M7). research.md §10.2 notes SecurityRonin's README mentions crc32c only, and §10.6 item 9 reads crc32c-only verification in the `btrfs-core` 0.1.5 crate source: neither was run, so do not claim they fail |
@@ -848,7 +848,9 @@ item 7.
 ### 6.5 Supporting deterministic results (no EXP record yet)
 
 These are pure parses of fixed images (plan.md §7 allows one run plus the image hash), regenerable
-by committed commands. Promote the ones the paper uses to EXP records.
+by committed commands. Promote the ones the paper uses to EXP records. The sandbox reconciliation, the oracle
+file reads and the LZO bit flips below were promoted on 2026-10-07 (EXP-015, EXP-016, EXP-014);
+the other tables still have no record.
 
 **Scan classes per image** (research.md §10.10; `uv run btrfska scan IMAGE`, targeted; image hashes
 in `corpus/manifest.tsv`). Counts are physical copies.
@@ -875,15 +877,17 @@ in `corpus/manifest.tsv`). Counts are physical copies.
 | `s01_discard_none_r1`, `s01_discard_async_r1` | 35 | 26/26 (14/14) | 31 (3, 6, 7 ×2, 8–34) | 30 | none |
 | `s01_discard_sync_r1` | 2 | 14/26 (6/14) | 1 (3) | 0 | 12 `zeroed` |
 
-**Sandbox reconciliation** (catalog.md M2a; `uv run pytest -q tests/test_scan_classify.py`): the
+**Sandbox reconciliation** (promoted to [EXP-015](../experiments/EXP-015.md); catalog.md M2a): the
 prototype's 71 generation-defined orphans are 8 `live` + 34 `backup_reachable` + 28 `unreferenced`
-+ 1 `invalid`.
++ 1 `invalid`, and the generation rule misses 2 unreferenced generation-14 copies.
 
-**Oracle file reads** (catalog.md M1c; `uv run pytest -q tests/oracle`): 152 file reads across
-`sandbox.img`, `m1_xxhash` (zstd), `m1_lzo`, `m1_zlib`; 0 mismatches, 0 incomplete reads.
+**Oracle file reads** (promoted to [EXP-016](../experiments/EXP-016.md); catalog.md M1c): 152 file
+reads across `sandbox.img`, `m1_xxhash` (zstd), `m1_lzo`, `m1_zlib`; 0 mismatches, 0 incomplete
+reads. Over all 21 images: 25 211 reads, 25 161 equal, 0 differing, 50 that dissect cannot open
+(`m1_mirror_damage`, zeroed primary superblock).
 
-**LZO hostile-input harness, bit flips** (catalog.md M1c review fixes; `uv run python
-tests/oracle/lzo_hostile.py --seeds 1 2 3 4 5 --json images/scratch/exp/lzo_hostile.json`); median
+**LZO hostile-input harness, bit flips** (promoted to [EXP-014](../experiments/EXP-014.md); catalog.md
+M1c review fixes); median
 (range) over 5 seeds, 300 streams per seed:
 
 | Corpus | Decoder | Correct / returned | Wrong ≤ 4 KiB | > 4 KiB | `Exception` | non-`Exception` |
@@ -922,8 +926,8 @@ statement (small quiescent images, one scenario).
 **F3. "Generation below the superblock" is neither "orphan" nor "deleted".** It counts live blocks
 unchanged since an older generation (8 on `sandbox.img`, 10 stale copies on the none/async s01
 images) and misses current-generation orphans (2 on `sandbox.img`), because a block already written
-to disk in the running transaction is copied again on its next change. *Evidence:* catalog.md M2a
-reconciliation; EXP-002 §6.1; research.md §10.10 (ctree.c:621-625). *Confidence:* High for the
+to disk in the running transaction is copied again on its next change. *Evidence:* EXP-015;
+catalog.md M2a reconciliation; EXP-002 §6.1; research.md §10.10 (ctree.c:621-625). *Confidence:* High for the
 counts; Medium for the mechanism (source reading).
 
 **F4. On one scenario, 31 candidate root-tree blocks (states) survive beyond the 4 backup states,
@@ -966,13 +970,13 @@ measured); the hiding-place use is a Low-confidence hypothesis.
 **F9. Most corrupt LZO streams still decode.** About three quarters of single-bit flips of a 4 KiB
 LZO sector (227, range 218–231, of 300 per seed) decode to wrong bytes within the output bound in
 btrfska, lzallright and dissect.util's native decoder; the native decoder also panics with a
-non-`Exception` on 31–46 per seed. The kernel skips zlib's adler32 check too. *Evidence:* catalog.md
-M1c review fixes table; research.md §10.9. *Confidence:* High (committed seeded harness).
+non-`Exception` on 31–46 per seed. The kernel skips zlib's adler32 check too. *Evidence:* EXP-014;
+research.md §10.9. *Confidence:* High (committed seeded harness).
 
 **F10. A valid superblock copy of another filesystem can survive at a mirror offset and would win a
 generation-only selection.** btrfska anchors the fsid on the first valid copy (btrfs-progs recover
 rule) and reports the foreign copy as evidence of a previous filesystem. *Evidence:*
-`m1_foreign_mirror`, catalog.md M1a review fix 1; research.md §10.7. *Confidence:* High for the
+EXP-017 (`m1_foreign_mirror`, 20 control images); catalog.md M1a review fix 1; research.md §10.7. *Confidence:* High for the
 synthetic case; not observed on a real device.
 
 **F11. mkfs leaves tree blocks the kernel would reject.** Every s01 image has 5 or 6 generation-1
@@ -1001,16 +1005,16 @@ command, no EXP record yet: promote), **Not ready** (numbers from scratch script
 | # | Claim | Where in draft | Evidence | Regenerating command | Status |
 |---|---|---|---|---|---|
 | 1 | Legacy accepts 0 blocks and lists 0 files on xxhash64/sha256/blake2b; btrfska 23/25/23 accepted, 10/10 files | Abstract A; §5.6; F1 | `experiments/EXP-001.md` §6 | `uv run python experiments/exp001.py --runs 2` | Ready |
-| 2 | 152/152 oracle file reads equal dissect.btrfs and guest SHA-256s | §4.2 N1; §6.5 | catalog.md M1c "Oracle results" | `uv run pytest -q tests/oracle` | Ready-det |
+| 2 | 152/152 oracle file reads equal dissect.btrfs and guest SHA-256s (25 161/25 161 on all 21 images) | §4.2 N1; §6.5 | `experiments/EXP-016.md` §6 | `uv run python experiments/exp016.py run; … table` | Ready |
 | 3 | Walks equal `dump-tree` block by block | §4.2 N1 | catalog.md M1b | `uv run pytest -m vm -q tests/test_vm_images.py -k walks_match_dump_tree_block_by_block` | Ready-det |
 | 4 | Unknown incompat bit refused, exit 2 | §5.4 R5 | catalog.md M1a, M1c DoD table | `uv run btrfska info images/scenarios/m1_unknown_incompat.img` | Ready-det |
 | 5 | dissect.btrfs validates no csum/header/incompat bit and zero-fills unmapped reads | §4.2 N1 | research.md §10.2, §10.9 | none committed | Not ready |
 | 6 | Kernel DUP read and repair policy | §4.2 N2; F8 | research.md §10.8 | source reading (v7.0 line refs) | Ready as a source citation; not a measurement |
-| 7 | Foreign superblock copy reported, not selected | §4.2 N3; F10 | catalog.md M1a review fix 1 | `uv run btrfska info images/scenarios/m1_foreign_mirror.img` | Ready-det (synthetic) |
-| 8 | 227 (218–231) of 300 LZO bit flips decode to wrong bytes | §4.2 N4; F9 | catalog.md M1c review fixes | `uv run python tests/oracle/lzo_hostile.py --seeds 1 2 3 4 5 --json images/scratch/exp/lzo_hostile.json` | Ready-det (promote to EXP) |
+| 7 | Foreign superblock copy reported, not selected; generation alone would pick it | §4.2 N3; F10 | `experiments/EXP-017.md` §6 | `uv run python experiments/exp017.py` | Ready (synthetic) |
+| 8 | 227 (218–231) of 300 LZO bit flips decode to wrong bytes | §4.2 N4; F9 | `experiments/EXP-014.md` §6 | `uv run python experiments/exp014.py --seeds 1 2 3 4 5` | Ready |
 | 9 | Coverage agreement on 48/48 images | §5.6 RQ2; F6 | `experiments/EXP-002.md` §6.1 | `uv run python experiments/exp002.py run …; … table` | Ready (the 45 regenerated images need `exp000.py run` first) |
 | 10 | Classes per mode (e.g. none: 316 (314–316) unreferenced) | §6.3 | EXP-002 §6.2 | as 9 | Ready |
-| 11 | 71 legacy orphans = 8 + 34 + 28 + 1 | F3; §6.5 | catalog.md M2a | `uv run pytest -q tests/test_scan_classify.py` | Ready-det |
+| 11 | 71 legacy orphans = 8 + 34 + 28 + 1 | F3; §6.5 | `experiments/EXP-015.md` §6 | `uv run python experiments/exp015.py sandbox.img` | Ready |
 | 12 | 24–26 of 338–371 orphans backup-reachable (7 %) | F2; §4.2 N10 | research.md §10.10 | `uv run btrfska scan images/scenarios/<image>.img` per image | Ready-det |
 | 13 | 31 states beyond the backups, 30 complete | Abstract A; F4 | EXP-002 §6.3, §6.6; research.md §10.11 | `uv run btrfska roots images/scenarios/s01_discard_none_r1.img --full-sweep` | Ready; **CHECK** 8–13 vs 8–14 (Appendix A item 5) |
 | 14 | Survival is a balance and short-life artefact | §5.6; §6.3 caveats | EXP-002 §6.5 | source reading (extent-tree.c lines) + `roots --json` placement fields | Ready as stated (mechanism not measured) |
@@ -1083,7 +1087,7 @@ from plan.md §5.
 | G10 | Discard external validity | Virtio sparse-file TRIM ≠ SSD | M7 | `nodiscard` row, async idle ≥ 130 s row (plan.md M7), and if possible one real SSD with discard passed through; survey TRIM/SSD forensics literature (`TODO`, absent from research.md) |
 | G11 | Corpus release (C7) and artifact | DFRWS values reproducibility; no public Btrfs image corpus with per-file ground truth across these axes was found, but Wani & Bhat (2018) and Schwietert & Hilgert (2025) published datasets that must be cited (research.md §5.1) | M7 | Zenodo DOI, manifest with per-file SHA-256 and operation logs, one command to regenerate the tables |
 | G12 | Hiding detection (C5) and FST (C2) | Out of scope for paper 1 per plan.md §8 | M6 | Keep for paper 2; mention only as future work |
-| G13 | Paper-readiness of existing numbers | plan.md §7 rule | now | Promote LZO harness, per-image scan/roots tables and oracle results to EXP records; commit the hostile-walk and memory scripts; re-run EXP-003 §6.1 on a clean commit with more density points; commit a dissect.btrfs validation script if N1's comparison is used |
+| G13 | Paper-readiness of existing numbers | plan.md §7 rule | now; **partly done 2026-10-07**: the LZO harness (EXP-014), the sandbox reconciliation of the two orphan definitions (EXP-015), the oracle file reads (EXP-016) and the foreign mirror (EXP-017) have records and scripts, and their numbers reproduced exactly | Still open: promote the per-image scan/roots tables to EXP records; commit the hostile-walk and memory scripts; re-run EXP-003 §6.1 on a clean commit with more density points; commit a dissect.btrfs validation script if N1's comparison is used |
 | G14 | Blocked related work | Toolan & Humphries 2026 is the C5 target list; Plum & Dewald and Oh & Hwang are CoW analogs | done 2026-09-21, except the prior-art watch | The three papers and ExtSFR are read (research.md §10.13). Two project claims were corrected: ExtSFR is not database-backed and does verify by hash; the published superblock reserved range is a pre-5.0 layout. Remaining: re-run the prior-art watch before submission (plan.md §8) |
 
 **Near-term experiment E-findroot: done on 2026-09-21 as [EXP-004](../experiments/EXP-004.md).**
@@ -1119,7 +1123,7 @@ generation, or only for states outside the current chunk map (G5, G9; N5).
 6. E-tiers: tier calibration against ground truth (G7), if C4 is claimed.
 7. E-perf: non-sparse 10 GiB and larger images, sha256/blake2b candidates, multi-worker scaling
    (EXP-003 follow-ups).
-8. E-robust: hostile-input bounds as an EXP record (walk cost, memory, LZO harness) (G13).
+8. E-robust: hostile-input bounds as an EXP record (walk cost, memory; the LZO harness is EXP-014) (G13).
 9. E-fp: discovery false-positive rate on forged images: planted checksum-valid owner-1 blocks at
    other levels, forged newer parents (the residual vector of catalog.md M2b review fix 4) and
    blocks copied from another image; count reported states that are not real root trees, per
