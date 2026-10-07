@@ -15,7 +15,13 @@ compare extent items (address, offset, length, compression, inline bytes); no fi
 
 With `uncommitted`, fragments, lone leaves and dropped log leaves (recover/graph.py's sources)
 add observations. They sort before the committed state of their generation, are marked, and
-never produce a `delete`: absence from a block that was never a state proves nothing.
+never produce a `delete`: absence from a block that was never a state proves nothing. An identity
+seen only there is `never_committed` only when the tree as the transaction that created it
+committed it was walked whole and does not hold it; otherwise it is `not_seen` (EXP-009).
+
+Names are compared only between versions seen in a whole walk: a walk with gaps, a fragment or a
+lone leaf can miss the leaf that holds an INODE_REF, and the missing name is no `unlink` (EXP-009
+found a `link` that never happened from such a version).
 """
 
 import hashlib
@@ -91,6 +97,7 @@ class Observation:
 class Version:
     observation: Observation
     seen: list[Seen] = field(default_factory=list)
+    whole: bool = False  # seen in at least one walk of the whole tree: its names are all there
 
 
 def _text(raw: bytes) -> str:
@@ -157,6 +164,12 @@ class _TreeAt:
     seen: Seen
     complete: bool  # walked without a gap
     observations: dict[tuple[int, int], Observation]  # (objectid, created) -> observation
+    generation: int = 0  # of the tree's root block: the transaction that last changed the tree
+    part: bool = False  # a fragment or a lone leaf: only a part of the tree, even without a gap
+
+    @property
+    def whole(self) -> bool:
+        return self.complete and not self.part
 
 
 def _states(conn: sqlite3.Connection) -> list[tuple[int, int, str, bool, tuple[int, int]]]:
@@ -195,10 +208,11 @@ class Timeline:
 
     def _add(
         self, root: Root, seen: Seen, tree_id: int | None = None, inodes: dict | None = None,
-        gaps: list | None = None,
+        gaps: list | None = None, part: bool = False,
     ) -> None:  # fmt: skip
         """Walk `root` (or take its `inodes` and `gaps` as given) and file what it shows under
-        `tree_id`: the root's own tree, or for a log tree the subvolume it logged."""
+        `tree_id`: the root's own tree, or for a log tree the subvolume it logged. `part`: the
+        root is a fragment or a lone leaf, not the root of a whole tree."""
         tree_id = root.tree_id if tree_id is None else tree_id
         key = (tree_id, root.bytenr, root.generation, root.level)
         if key not in self._walked:
@@ -209,7 +223,9 @@ class Timeline:
             observations = {(o.objectid, o.created): o for o in _observe(tree_id, inodes)}
             self._walked[key] = (not gaps, observations)
         complete, observations = self._walked[key]
-        self.trees.setdefault(tree_id, []).append(_TreeAt(seen, complete, observations))
+        self.trees.setdefault(tree_id, []).append(
+            _TreeAt(seen, complete, observations, root.generation, part)
+        )
 
     def _add_uncommitted(self) -> None:
         _, tops = fragment_roots(self.conn, MAX_FRAGMENTS)
@@ -219,12 +235,13 @@ class Timeline:
                 leaves, gaps = tree_leaves(self.conn, root)
                 covered.update(leaf.content_id for leaf in leaves)
                 inodes = collect(self.conn, leaves)
-                self._add(root, Seen(root.source, root.generation, False), None, inodes, gaps)
+                self._add(root, Seen(root.source, root.generation, False), None, inodes, gaps,
+                          part=True)  # fmt: skip
         for root, leaf in orphan_leaves(self.conn):
             if leaf.content_id in covered or root.tree_id == ondisk.TREE_LOG_OBJECTID:
                 continue  # a log leaf alone does not say which subvolume it logged: see below
             if self.tree_id in (None, root.tree_id):
-                self._add(root, Seen(root.source, root.generation, False))
+                self._add(root, Seen(root.source, root.generation, False), part=True)
         # Log trees, dropped or live, each under the subvolume its log root names, replayed over
         # the commit before the log as recovery replays them (recover/logs.py): a fast fsync logs
         # only what changed, so a log leaf on its own is no version of a file.
@@ -254,6 +271,8 @@ class Timeline:
                     history[-1].seen.append(shown.seen)
                 else:
                     history.append(Version(observation, [shown.seen]))
+                # a log tree replayed without its base holds only what was logged
+                history[-1].whole |= shown.whole and not observation.log_only
         return found
 
     def events(self, tree_id: int) -> Iterator[dict]:
@@ -285,7 +304,8 @@ class Timeline:
                 }
             )
             for before, after in zip(history, history[1:], strict=False):
-                for kind, detail in _changes(before.observation, after.observation):
+                names = before.whole and after.whole
+                for kind, detail in _changes(before.observation, after.observation, names):
                     yield (
                         base
                         | _event(kind, after, before)
@@ -297,15 +317,7 @@ class Timeline:
     def _ending(self, base: dict, history: list[Version], committed: list[_TreeAt], identity):
         sightings = [(s, v) for v in history for s in v.seen if s.committed]
         if not sightings:
-            last = history[-1].seen[-1]
-            yield (
-                base
-                | _event("never_committed", history[-1], None)
-                | {
-                    "transaction": None,
-                    "generations": [last.generation - 1, last.generation],
-                }
-            )
+            yield base | self._uncommitted_ending(base["created"], history, committed)
             return
         final, last = max(sightings, key=lambda pair: pair[0].order)
         later = [tree for tree in committed if tree.seen.order > final.order]
@@ -329,6 +341,34 @@ class Timeline:
                     "generations": [final.generation, after.generation],
                 }
             )
+
+    @staticmethod
+    def _uncommitted_ending(created: int, history: list[Version], committed: list[_TreeAt]) -> dict:
+        """The end of an identity no committed state holds. A file created in transaction
+        `created` that outlives it is in that transaction's commit, so `never_committed` needs
+        the tree as that commit left it (a root block of generation `created`, named by a
+        committed root tree) walked whole and without the identity. A root tree written before
+        the commit still names the tree as an earlier commit left it: the ROOT_ITEM is rewritten
+        during the commit (`commit_fs_roots`, fs/btrfs/transaction.c:1471-1541) with the
+        generation of the root block (fs/btrfs/root-tree.c:117-123), so it is not that proof.
+        Anything less is `not_seen`: absence from what survives proves nothing."""
+        last = history[-1]
+        if any(s.generation != created for v in history for s in v.seen):
+            reason = ("seen after the transaction that created it, so a commit held it, but no "
+                      "committed state that holds it survives")  # fmt: skip
+        else:
+            walks = [tree for tree in committed if tree.generation == created]
+            if walks and all(tree.complete for tree in walks):
+                return _event("never_committed", last, None) | {
+                    "transaction": None, "generations": [created - 1, created],
+                }  # fmt: skip
+            reason = (
+                "the tree as the commit of its creating transaction left it was walked with "
+                "gaps: absence proves nothing" if walks else
+                "no committed state shows the tree as the commit of its creating transaction "
+                "left it: whether a commit held it is unknown"
+            )  # fmt: skip
+        return _event("not_seen", last, last) | {"reason": reason, "transaction": None}
 
     def subvolume_events(self) -> Iterator[dict]:
         """`subvolume_deleted` for a tree that a later state, whose whole root tree was found,
@@ -379,10 +419,13 @@ def _event(kind: str, version: Version, before: Version | None) -> dict:
     } | _seen(version)  # fmt: skip
 
 
-def _changes(before: Observation, after: Observation) -> Iterator[tuple[str, dict]]:
+def _changes(before: Observation, after: Observation, names: bool = True
+             ) -> Iterator[tuple[str, dict]]:  # fmt: skip
+    """The events between two versions. `names` False: one of them was not seen in a whole walk,
+    so a name it lacks may sit in a leaf that walk did not reach; no name change is derived."""
     old, new = set(before.names), set(after.names)
     gone, come = sorted(old - new), sorted(new - old)
-    if len(gone) == 1 and len(come) == 1:
+    if names and len(gone) == 1 and len(come) == 1:
         (old_parent, old_name), (new_parent, new_name) = gone[0], come[0]
         kind = "rename" if old_parent == new_parent else "move"
         yield (
@@ -392,7 +435,7 @@ def _changes(before: Observation, after: Observation) -> Iterator[tuple[str, dic
                 "to": {"parent": new_parent, "name": _text(new_name), "path": after.path},
             },
         )
-    else:
+    elif names:
         for parent, name in come:
             yield "link", {"name": {"parent": parent, "name": _text(name)}}
         for parent, name in gone:
