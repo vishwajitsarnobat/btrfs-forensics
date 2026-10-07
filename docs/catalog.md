@@ -61,7 +61,7 @@ Maintenance rules:
   image tests (current files `confirmed` on six csum/codec images with no disagreement, the
   nodatasum file `probable`, the flipped mismatch `unattached`, `m4_deep` orphans confirmed only
   with `csum_match` and `backref_attributed`, every `b.bin` version of `m5_reuse` carrying the
-  reuse note in its own row). 1217 tests passed, none skipped (1211 in the full run, and the 6 that need the pinned tools once they were linked in); ruff clean; `sha256sum -c`
+  reuse note in its own row). 1217 tests passed, none skipped; 1318 after merging `main` with M6d (1314 in the full run, and the 4 hide-and-seek image tests once those images were linked in); ruff clean; `sha256sum -c`
   OK.
 
 ## 2026-10-07 — M6d: hiding detection, reserved ranges from the feature flags
