@@ -28,12 +28,14 @@ MERGED = ("bin", "sbin", "lib", "lib64")
 # Mount points of the guest's /init (corpus/baselines/guest/init) and the job's directories.
 MOUNT_POINTS = ("proc", "sys", "dev", "tmp", "work", "root")
 # The links dpkg's alternatives and diversions would make (maintainer scripts of dash, gawk,
-# gcc, g++, rustc-1.89, cargo-1.89 and golang-1.24-go), so the recipes call the usual names.
+# automake, gcc, g++, rustc-1.89, cargo-1.89 and golang-1.24-go), so recipes call the usual names.
 ALTERNATIVES = {
     "usr/bin/sh": "dash",
     "usr/bin/awk": "gawk",
     "usr/bin/cc": "gcc",
     "usr/bin/c++": "g++",
+    "usr/bin/aclocal": "aclocal-1.16",
+    "usr/bin/automake": "automake-1.16",
     "usr/bin/rustc": "../lib/rust-1.89/bin/rustc",
     "usr/bin/cargo": "../lib/rust-1.89/bin/cargo",
     "usr/bin/go": "../lib/go-1.24/bin/go",

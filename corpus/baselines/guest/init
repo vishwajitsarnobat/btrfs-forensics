@@ -41,7 +41,7 @@ tar -xf /dev/vdc -C $T/work/in || fail "cannot unpack the job input"
 echo "=== JOB-START"
 {
     chroot $T /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/usr/sbin HOME=/work/home \
-        TERM=linux LANG=C.UTF-8 /bin/bash /work/in/job.sh
+        TERM=linux LANG=C /bin/bash /work/in/job.sh
     echo $? > $T/work/out/job-status
 } 2>&1 | tee $T/work/out/console.log
 echo "=== JOB-EXIT $(cat $T/work/out/job-status)"
