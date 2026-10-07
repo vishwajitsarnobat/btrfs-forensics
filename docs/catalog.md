@@ -20,6 +20,46 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — M6e: the hiding detector on planted images, after use, and on clean builds (EXP-021)
+
+- **Branch:** `feature/m6-hiding-validation` (from `main` at `31c7393`; issue #53). New
+  `experiments/exp021.py`, `experiments/EXP-021.md` (registration `649a5be`, pushed before the
+  script existed), `tests/test_exp021.py`, `corpus/vm/scenarios/stability_use.guest.sh` and
+  `stability_balance.guest.sh`. Changed `corpus/mutate.py` (keyword arguments for where and how
+  much to plant; defaults unchanged, every planted corpus row rebuilds byte-identical),
+  `tests/test_mutate.py`, `corpus/vm/README.md`, `docs/plan.md` (M6e, C5).
+- **Why.** The M6 definition of done: the detector finds every planted technique, and its
+  false-positive rate is measured on clean images (maintainer decision of 2026-10-07: plant with
+  our own `corpus/mutate.py` and guest scenarios, check against the hide-and-seek images).
+- **Detection** (deterministic): 596 plants of the 14 techniques on seven bases (`m1_xxhash`,
+  `m1_sha256_bgt`, `m1_blake2b`, `m6_datacsum`, `s01_discard_none_r1`, `m3_wide`, `m4_deep`; all
+  four csum types), seeded payloads of one byte to the whole area, at its first byte, its last
+  byte and a random place. 563/563 plants within a rule's scope reported with a finding covering
+  the planted bytes; 465/507 exactly at them (the other 42: chunk-array findings include mkfs's
+  stale tail, partly overwritten superblock slots are reported as the whole slot). 0/28 of the
+  plants the rules cannot see by design (nanosecond values below 10^9, slack behind a copied item
+  header). No collateral finding beyond the registered one.
+- **Stability** (N = 5 guest runs per subject and workload; every count 0/5 or 5/5): superblock
+  reserved bytes, gated fields and padding, chunk-array slack, the boot area, STRING_ITEMs, file
+  slack with its checksum and hidden names survive use and a full balance, and neither the
+  pinned `btrfs check` nor the kernel notices them. Node slack, inode reserved bytes, a one-copy
+  plant, backup roots and backup-slot padding are erased by use (the first three linger in
+  superseded blocks); an overwritten superblock slot is noticed by scrub and rewritten. Not
+  predicted: 8 of 16 nanosecond bytes survive (mtime and otime are written back as read), device
+  slack is no longer past the last extent after a balance, and a full balance fails on file slack
+  whose checksum was kept (check-data-csum, scrub and reading the file all notice it).
+- **False positives:** 0 unexplained findings on 29 kept clean images (27 corpus rows,
+  `sandbox.img`, the clean hide-and-seek member) and 60 fresh builds (5 each of 12 recipes); the
+  two `device_slack` on `m6_reformat_geometry` are the replaced filesystem, as in M6d. Units
+  examined include 14 166 inodes, 4 958 block copies, 180 file tails, 19 596 directory entries and
+  22.9 GB past last device extents.
+- **Found on the way.** No detector bug. One planter bug: `plant_file_slack` crashed on a file
+  with an inline extent (test first, fixed). The guest's btrfs-progs cannot print a scrub summary
+  (no `libgcc_s` in the initramfs), so scrub errors are read from the kernel's messages.
+- **Verified.** ruff; `uv run pytest` (see the PR); `sha256sum -c tests/fixtures/SHA256SUMS`;
+  the planted corpus rows rebuilt byte-identical with the changed `mutate.py`; the fresh-clone
+  proof (`./setup.sh` in `images/scratch/`).
+
 ## 2026-10-07 — M6d: hiding detection, reserved ranges from the feature flags
 
 - **Branch:** `feature/m6-hiding-detection` (from `main` at `e74b282`, merged with `main` at
