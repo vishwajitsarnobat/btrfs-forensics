@@ -1,0 +1,50 @@
+#!/bin/sh
+# Guest /init for baseline jobs (packed by corpus/baselines/vm.sh next to the corpus initramfs
+# and started with rdinit=/baseline_init). The disks, in the order vm.sh attaches them:
+#
+#   /dev/vda  the toolchain disk (images/baselines/toolchain.img), read-only; the job runs
+#             chroot'ed into it
+#   /dev/vdb  the evidence copy, read-only (QEMU readonly=on); an empty sector for build jobs
+#   /dev/vdc  the job's input, a tar on a raw disk, read-only
+#   /dev/vdd  the work disk, an empty btrfs the job writes to
+#   /dev/vde  the output: /work/out of the job as a tar on a raw disk, for the host to unpack
+#
+# The job is /work/in/job.sh (corpus/baselines/guest/job.sh). Its console output goes to the
+# serial console and to /work/out/console.log. Then the output is written and the VM powers off.
+export PATH=/bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+
+for m in xor raid6_pq libblake2b btrfs; do
+    insmod /lib/modules/$m.ko || echo "insmod $m failed"
+done
+echo "=== GUEST $(cat /proc/version)"
+
+fail() { echo "=== JOB-FAIL $*"; poweroff -f; }
+T=/tc
+mkdir -p $T
+mount -t btrfs -o ro /dev/vda $T || fail "cannot mount the toolchain disk"
+mount -t btrfs /dev/vdd $T/work || fail "cannot mount the work disk"
+mount -t proc proc $T/proc
+mount -t sysfs sys $T/sys
+mount -t devtmpfs dev $T/dev
+mount -t tmpfs -o size=256m tmp $T/tmp
+mkdir -p $T/work/in $T/work/out
+tar -xf /dev/vdc -C $T/work/in || fail "cannot unpack the job input"
+
+echo "=== JOB-START"
+{
+    chroot $T /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/usr/sbin HOME=/work/home \
+        TERM=linux LANG=C.UTF-8 /bin/bash /work/in/job.sh
+    echo $? > $T/work/out/job-status
+} 2>&1 | tee $T/work/out/console.log
+echo "=== JOB-EXIT $(cat $T/work/out/job-status)"
+
+tar -cf /dev/vde -C $T/work/out . || fail "cannot write the output"
+sync
+echo "=== OUTPUT-WRITTEN"
+umount $T/tmp $T/dev $T/sys $T/proc
+umount $T/work
+umount $T
+poweroff -f
