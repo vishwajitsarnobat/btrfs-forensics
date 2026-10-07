@@ -66,6 +66,79 @@ Maintenance rules:
   deleted. In the working checkout 1 050 passed and one test of EXP-009 skipped, because the
   shared `m4_deep` there predates the event log EXP-009 added.
 
+## 2026-10-07 — M5f: logical-range reuse, per-generation maps against a merged map (EXP-010)
+
+- **Branch:** `feature/exp010-range-reuse` (from `main` at `b918555`), issue #57. Added
+  `corpus/vm/scenarios/reuse.guest.sh`, `corpus/vm/scenarios/reuse_same.guest.sh`, two rows of
+  `corpus/manifest.tsv` (`m5_reuse`, `m5_reuse_same`), `experiments/EXP-010.md`,
+  `experiments/exp010.py`, `tests/test_reuse.py`, `tests/test_exp010.py`; changed
+  `corpus/vm/README.md`, `tests/test_vm_images.py`, `docs/plan.md`. Nothing under `src/`, no
+  schema change.
+- **Why.** C6 reads each state through the chunk map of its own time; `mbkn-btrfs-rescue` reads
+  every version through one map merged newest-wins per chunk start (research.md §12). The two
+  differ only where one logical range was held by two chunks on different physical bytes, and no
+  corpus image had such a range (issue #48). Without one, EXP-007 could not tell the designs apart.
+- **What changed.** Scenario `reuse` fills six 64 MiB data chunks of a 512 MiB image, deletes the
+  files of the topmost and of two lower adjacent ones, removes the three with `balance
+  -dusage=0`, and writes again: the new chunk starts at the topmost one's logical address
+  (`find_next_chunk`) and lands on the 128 MiB hole of the two lower ones. Scenario
+  `reuse_same`, the layout issue #48 proposed, is the control: there the new chunk lands back on
+  the removed chunk's own bytes. The first pilot showed why: a data chunk asks for a 1 GiB device
+  extent and, finding no such hole, takes the largest one (volumes.c:5529, 1883-1946 at v7.0),
+  not the first that fits as the issue #48 answer assumed. The merged map is an emulation in
+  `exp010.py`, not a `recover` option (plan.md M5f, decision 2): btrfska never merges maps, and a
+  reading known to be wrong in the case under test does not belong among the tool's choices.
+  Both scenarios mount with `nodiscard`: without `DISCARD` the virtio disk still offers discard,
+  so the kernel turns on `discard=async` (README note added).
+- **Numbers (EXP-010, N = 5 per scenario, no spread).** Layout as designed 5 of 5 in both. On
+  `reuse`: 2 full versions of `b.bin`, both hash-exact under `--maps own`, both `complete` with a
+  wrong SHA-256 under the merged map and under `--maps current`; both carry the reuse note; the
+  dev_extents map rejects the reused address; 0 of 86 other file artifacts differ between own and
+  merged. On `reuse_same`: 0 artifacts differ; `b.bin` is wrong in all readings with no note.
+  Not predicted: a `duplicate` artifact does not repeat its original's note; the control's
+  `z.bin` is overwritten inside a surviving chunk, invisible to every map.
+- **Verified.** Registration committed and pushed (`3bf711f`) before any file was read through a
+  map; ten fresh builds and the two corpus images measured, all unchanged; `ruff check`,
+  `ruff format --check`, `sha256sum -c tests/fixtures/SHA256SUMS`; a fresh clone of the branch
+  went through the steps of `./setup.sh` (run one by one, so that each image build and the test
+  run took the shared lock of the parallel sessions): 22 images built, 1008 tests passed,
+  nothing skipped.
+## 2026-10-07 — G13 records: EXP-014 to EXP-017 for four numbers without a record
+
+- **Branch:** `feature/g13-records` (from `main` at `b918555`; issue #56). Added
+  `experiments/exp014.py` to `exp017.py`, `experiments/EXP-014.md` to `EXP-017.md` and
+  `tests/test_exp014.py` to `test_exp017.py`; changed `docs/plan.md` (plan and DoD under §8
+  "Paper-readiness experiments"; EXP-014 cited in §3.5 and §9) and `docs/paper-draft.md` (N1, N3,
+  N4, F3, F9, F10, §6.5, traceability rows 2, 7, 8 and 11, gap G13).
+- **Why.** Four numbers the paper uses came from tests or a harness with no EXP record and no
+  script that prints them as a table, which plan.md §7 does not allow. EXP-009 to EXP-012 are
+  reserved for paper experiments and EXP-013 is taken by another branch.
+- **What changed and the numbers.** All images are fixed files, so one run is the measurement.
+  Every number the documents quote reproduced exactly; no document number had to be corrected.
+  - **EXP-014, LZO bit flips** (seeds 1–5, 300 flips of a compressed 4 KiB sector per seed; the
+    harness's own bit-flip corpus): 227 (218–231) decode to wrong bytes without an error in
+    btrfska, lzallright 0.2.6 and dissect.util 3.24 native, 267 (258–277) in dissect.util's pure
+    Python decoder; dissect.util native panics on 37 (31–46). New: the three decoders fail on the
+    same streams and return identical wrong bytes on every one, and 209 (196–210) of the wrong
+    outputs are exactly 4 KiB long.
+  - **EXP-015, the two orphan definitions on `sandbox.img`**: 71 legacy orphans = 8 live +
+    34 backup-reachable + 28 unreferenced + 1 invalid; 2 current-generation unreferenced copies
+    are orphans the generation rule misses; all 11 disagreeing blocks listed with addresses, and
+    the full sweep gives the same table.
+  - **EXP-016, oracle file reads over the whole corpus** (21 images): 152 of 152 reads equal on
+    the four images of the M1c claim (150 of 150 equal to guest or script hashes); over all
+    images 25 211 reads, 25 161 equal to dissect.btrfs, 0 differing, 50 that dissect cannot open
+    (`m1_mirror_damage`: dissect reads mirror 0 only), 370 of 370 equal to expected hashes.
+    dissect's directory walk misses `open_unlinked.txt` on the two `m4_deep` images (an
+    ORPHAN_ITEM inode with no directory entry); read by inode it gives the guest's hash.
+  - **EXP-017, the foreign mirror**: on `m1_foreign_mirror` btrfska selects mirror 0 and reports
+    mirror 1 (other fsid, generation 1000); generation alone would pick mirror 1, whose chunk root
+    then fails on checksum and fsid. On the 20 control images the rules agree and nothing is
+    foreign.
+- **Verified.** Each script run as in its record's §5 on this host's corpus build (environment
+  record in each EXP file, commit `0eedb0e`, clean tree); the new tests assert the claims relative
+  to the image read (14 tests); `uv run ruff check .`, `uv run ruff format --check .`,
+  `uv run pytest` and `sha256sum -c tests/fixtures/SHA256SUMS` as in the pull request.
 ## 2026-10-07 — EXP-009: how right the timeline is, per event type, on `m4_deep`
 
 - **Branch:** `feature/exp009-timelines` (from `main` at `b918555`; issue #55). Changed

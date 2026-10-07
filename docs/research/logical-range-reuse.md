@@ -1,5 +1,14 @@
 # When does Btrfs give a new chunk a logical range an older chunk held?
 
+> **Correction (EXP-010, 2026-10-07).** The placement rule below is wrong. A data chunk asks for
+> a 1 GiB device extent (`volumes.c:5449, 5529`; `space-info.c:216-217`). When no hole is that large,
+> `find_free_dev_extent` returns the *largest* hole (`volumes.c:1883-1946`), not the first one that
+> fits. The layout of §4.2 therefore put the new chunk back on the removed chunk's own bytes, as the
+> first pilot build showed. That layout became the same-physical control `m5_reuse_same`. The
+> different-physical case needs a hole larger than the removed chunk's own extent, which
+> `m5_reuse` makes by removing two adjacent lower chunks as well (experiments/EXP-010.md).
+
+
 - **Date:** 2026-10-07
 - **Question:** GitHub issue #48. Claim C6 reads old file versions through one chunk map per
   generation (plan.md M5a, EXP-007). A single merged chunk map in which the newest record wins
@@ -26,7 +35,7 @@
    match). Removing several top chunks lowers the next start further. Removing a chunk that is not
    the topmost never leads to reuse of its range.
 3. **Logical reuse alone does not make a merged map translate wrongly.** Device space is handed out
-   first-fit, from the lowest hole on the *committed* device tree (`find_free_dev_extent`,
+   first-fit (corrected above: the largest hole when none is 1 GiB), from the lowest hole on the *committed* device tree (`find_free_dev_extent`,
    `volumes.c:1808-1946`). When the removed chunk's device extent is the lowest hole that fits and
    the removal has been committed, the new chunk lands on the same physical bytes, so both maps
    translate the range identically; only the content differs. A merged newest-wins map translates a
@@ -132,7 +141,8 @@ nothing to do.
 - `find_free_dev_extent` searches the device tree's **commit root** (`volumes.c:1845`; the comment
   at `volumes.c:1802-1806` says a device extent freed in the current transaction is not reported as
   available) from 1 MiB (`BTRFS_DEVICE_RANGE_RESERVED`, `volumes.c:1664-1672`) upward and returns
-  the **first hole that is large enough** (`volumes.c:1883-1903`), else the largest. Ranges of
+  the **first hole that is large enough** (`volumes.c:1883-1903`), else the largest (see the
+  correction at the top: a data chunk asks for 1 GiB, so on a small image the largest hole wins). Ranges of
   chunks created in the running transaction are skipped through the device's `alloc_state`
   (`dev_extent_hole_check` → `btrfs_find_hole_in_pending_extents`, `volumes.c:1751-1764, 1569`).
 - Consequence for reuse: if the removed chunk's device extent is the lowest hole that fits and
@@ -206,7 +216,8 @@ the next data chunks are expected at:
 
 R takes B's logical start (W is now the topmost chunk) but Z's physical bytes (the lowest hole of
 64 MiB on the committed device tree). B's old bytes at 240123904 are not handed out again.
-These numbers are a prediction from the rules in §2, not a measurement; the experiment must read
+These numbers are a prediction from the rules in §2, not a measurement, and the build did not
+follow them (correction at the top); the experiment must read
 them from the image.
 
 ### 4.3 Guest script outline (`corpus/vm/scenarios/reuse.guest.sh`)
