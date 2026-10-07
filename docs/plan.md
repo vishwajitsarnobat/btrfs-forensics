@@ -1954,6 +1954,100 @@ are intact. The kernel zeroes the rest of that sector before it checksums it
 `tail_rewritten` (ten sectors on `m4_deep`). Only the sectors that hold the file's bytes are
 checked; an extent that lies wholly past the inode's size is not checked at all.
 
+**M6b: free-space-tree forensics and overwrite risk** (issue #50; claim C2; design fixed
+2026-10-07, before implementation). Kernel citations are to v7.0.
+
+*What it is.* Every extent `recover` reads from disk, and every tree block an artifact's items
+came from, is placed in the current state's allocation: still held by the same extent, free, or
+allocated to another extent. Each gets an overwrite-risk score built from documented kernel
+behaviour, and the free space trees of older states say, where they survive, between which two
+commits the space was freed.
+1. **Items, as the kernel reads them.** FREE_SPACE_INFO (198) is keyed (block group start, 198,
+   length) and holds `extent_count` and `flags` (btrfs_tree.h:262-266, :1243-1248;
+   USING_BITMAPS 1<<0). FREE_SPACE_EXTENT (199) is keyed (start, 199, length) with no payload
+   (:268-272). FREE_SPACE_BITMAP (200) is keyed (start, 200, length) and holds one bit per sector,
+   least significant bit first (:274-280; free-space-tree.c:152-156 sizes it, :176-195 sets bits,
+   :510-530 tests them). The items of one block group follow its INFO item in key order, and the
+   INFO flag says which kind they are (free-space-tree.c:1673-1710). Bitmaps are read as the
+   kernel reads them: runs of set bits, merged across adjacent bitmaps, are free extents
+   (:1536-1614).
+2. **Hostile input.** There is no tree-checker rule for these items; the kernel ASSERTs that an
+   entry lies inside its block group (free-space-tree.c:1568, :1646) and fails the load with
+   -EIO when the count of free extents differs from `extent_count` (:1603-1611, :1660-1668).
+   btrfska skips and reports: an INFO item whose size is not 8 or whose range is empty, passes
+   2^64 or overlaps another INFO; an entry before any INFO or outside its block group; an entry
+   whose start or length is not sector-aligned or is zero; a bitmap whose size is not
+   ceil(length / sectorsize / 8) (which also bounds it by the leaf: nothing is allocated from
+   the key's claim); an entry of the kind the INFO flag does not name. Overlapping free ranges are
+   merged and reported. A count mismatch marks the block group `inconsistent`; its ranges are
+   kept and the run says so.
+3. **Which allocation view.** The current state's: its tree 10 when the superblock has
+   FREE_SPACE_TREE and FREE_SPACE_TREE_VALID (the kernel rebuilds a tree without VALID,
+   disk-io.c:3062-3067) and the tree is walked in the database without a gap. Otherwise free space
+   is derived from its extent tree (tree 2: EXTENT_ITEM, and METADATA_ITEM of one node) and its
+   block groups (BLOCK_GROUP_ITEM, in tree 11 with BLOCK_GROUP_TREE): a block group minus its
+   extents minus the superblock stripes the kernel excludes (block-group.c:2277-2330, through
+   the reverse mapping of :2202-2268) is free. The kernel keeps both in step in every commit
+   (extent-tree.c:3187 adds a freed extent to the free space tree, :4973 removes an allocated
+   one), so where both exist they are compared and every disagreement is reported. A space cache
+   v1 is not read: the derivation stands in for it. The source used is named in every record.
+   Block group usage and flags always come from the BLOCK_GROUP_ITEMs.
+4. **Placing an extent.** By the physical bytes it was read from (the copy used), mapped back to
+   a logical address through the current chunk map as btrfs_rmap_block does
+   (block-group.c:2202-2268; RAID5/6 not mapped). This also places bytes read through a
+   historical map after a balance. Verdicts: `in_use` (the current extent tree has an extent at
+   the same address and length, allocated no later than the file extent's generation, or for a
+   tree block a tree block of the same generation: the same allocation, still referenced);
+   `free` (no byte is allocated now); `allocated` (every byte belongs to another extent);
+   `partial` (some bytes do); `no_block_group` (no current block group holds the bytes: their chunk
+   was removed, so the device space is unallocated). An extent that could not be read, or a view
+   that is missing, gives no verdict.
+5. **Overwrite risk** (an ordinal score, each step one kernel behaviour; no weights):
+   0 `none` for `in_use` (space is freed only when the last reference goes,
+   extent-tree.c:3187); 1 `low` for `no_block_group` (new chunks are allocated only after the
+   allocator has searched the free space of the existing block groups, extent-tree.c:3733-3755,
+   :4368); 2 `medium` for `free` in a block group (the next allocation may take it);
+   3 `high` for `free` when at least one of: discard applies to the block group (`sync`: every
+   range freed at commit, extent-tree.c:2997-3005; `async`: data-only block groups only,
+   discard.c:116, :696, after 120 s, :56, and re-queued at the next mount, free-space-cache.c:2679);
+   the block group is unused (used 0: queued for deletion at mount, block-group.c:2533-2538, and
+   trimmed whole at that commit under `sync`, extent-tree.c:3058-3063); the block group is
+   reclaim-eligible under the kernel's default (only zoned filesystems have one, 75 % used,
+   zoned.h:29 and space-info.c:254-255; otherwise reclaim is off until sysfs enables it, which is
+   not on disk). 4 `reallocated` for `allocated` and `partial`. A file's score is the highest
+   of its data extents (of its tree blocks when it has no data extent read from disk); every
+   rule that fired is listed.
+6. **Discard mode.** As stated by the examiner (`recover --discard none|async|sync`), else as
+   observed on the image: `trimmed_metadata` when a block a committed state points to reads as
+   zeros (the scan's `zeroed` walk failures: only `sync` or a FITRIM discards metadata block
+   groups, discard.c:116); `trimmed_data` when, among sampled freed data extents of the current
+   map's time, a first sector reads as zeros although a csum tree holds a non-zero checksum for
+   it; `not_trimmed` when freed tree blocks or freed data still hold their bytes; `unknown`
+   otherwise. Only a stated or observed trim raises a score. `async` with a quick unmount leaves
+   the image exactly as no discard does (EXP-002), so it is observable only when stated.
+7. **Freed between two commits.** For each extent, the free space trees of the states not older
+   than the artifact's own (read without a gap, each through its own state's chunk map) give the
+   newest state in which the bytes were allocated and the first in which they were wholly free:
+   the space was freed by a commit in between (`freed_in`).
+8. **Records.** Schema version 9: `artifacts.space_verdict`, `artifacts.overwrite_risk` (0-4),
+   `artifacts.risk_reasons`, `artifacts.space_source`; `provenance.space_verdict` (the data
+   extent's) and `provenance.block_space` (the tree block's); the full record as `space` in
+   `provenance.read_record`; `free_space` in `recovery_runs.summary` (source, cross-check, discard
+   mode and its evidence, counts per verdict and score); the same keys in `manifest.jsonl`; a
+   `free space:` line on stdout.
+
+*Definition of done.*
+- synthetic: extents, bitmaps (across two items) and their count; every hostile item of 2
+  skipped or reported without a crash; each verdict and each risk rule;
+- on every corpus image with a free space tree, the free space derived from the extent tree
+  equals the tree's own, sector for sector, apart from what the cross-check reports;
+- the `s01` discard trio: `sync` observed as `trimmed_metadata`, `none` and `async` as
+  `not_trimmed`; `m4_deep` and `m6_datacsum`: every file of the current state `in_use` with score
+  0, and deleted files of older states classified with a `freed_in` where the trees survive;
+- schema 9 documented column by column, README's `recover` section documents every new key and
+  `--discard`; EXP-018 measures the classification across the corpus with a committed script, the
+  prediction registered first.
+
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
 - Corpus generator = `corpus/vm/` scaled up (already in use since M1):
   scenario scripts × matrix below, per-image manifest (per-file SHA-256,
