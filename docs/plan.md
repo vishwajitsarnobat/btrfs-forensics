@@ -2007,6 +2007,72 @@ checked; an extent that lies wholly past the inode's size is not checked at all.
 - **DoD:** one command regenerates corpus + all baseline numbers + our
   numbers into the paper's tables.
 
+**M7 is built as features.** M7a is the corpus matrix (issue #58). The Bhat & Wani axes (#59) and
+the beyond-4-generations variants (#60) are separate tickets and are not part of M7a.
+
+**M7a: the corpus matrix** (design fixed 2026-10-07, before the images were built).
+
+*What it is.* One guest scenario, `matrix` (`corpus/vm/scenarios/matrix.guest.sh`), run by one
+host script, `corpus/vm/scenarios/matrix.sh`, whose environment names the value of every axis;
+`corpus/matrix.py` lists the configurations and writes them as manifest rows.
+1. **Axes.** Size {512 MiB, 8 GiB, 100 GiB}, sparse images. Operation {delete, overwrite,
+   create/delete stress, snapshot + delete, balance, defrag}, each after the same population of
+   subvolume `data` (inline, regular, random and large files, and 40 MiB of random bulk that fills
+   whole data block groups). Compression {none, zstd, lzo, zlib}, mounted `compress-force=`.
+   Checksum {crc32c, xxhash, sha256, blake2b}. Block-group tree {off: `-O ^block-group-tree`, on}.
+   Discard {none: no unmap, `nodiscard`; async: unmap, `discard=async`, unmount right after the
+   workload; idle: the same with 130 s idle before the unmount; sync: unmap, `discard=sync`; and
+   the control nodiscard: unmap, `nodiscard`}. The discard option is always given: the virtio disk
+   advertises discard even without unmap, and kernels since 6.2 then mount with `discard=async`
+   by themselves (EXP-010's finding). Reclaim {off, on: `bg_reclaim_threshold` 50 written to
+   `/sys/fs/btrfs/<fsid>/allocation/data/` before the operation; the knobs are
+   `bg_reclaim_threshold`, `dynamic_reclaim` and `periodic_reclaim` (v7.0 `fs/btrfs/sysfs.c:925-950`,
+   `:961-983`, `:994-1016`, listed at `:1023-1046` under the path comment at `:1021`), and
+   `reclaim_count`/`reclaim_bytes` (`:906-907`) record what the worker did; dynamic and periodic
+   stay off, since with periodic reclaim on a free no longer queues the block group
+   (`block-group.c:3873-3876`)}. Layout {single device; MIXED_GROUPS (`mkfs -M`) on a 256 MiB
+   filesystem; two devices with data and metadata RAID1, the second attached as `/dev/vdb`}.
+2. **Design.** Full factorial for discard × operation (30 images), block-group tree × balance
+   (the two tree-on cells; tree off is in the first block) and reclaim × discard (5 reclaim-on
+   images; reclaim off is the delete column of the first block). Every other axis is one factor at
+   a time from the base: 512 MiB, delete, no compression, crc32c, tree off, discard none, reclaim
+   off, single device. 46 images in the `matrix` tier, plus the 100 GiB one in the `large` tier.
+3. **Ground truth.** The serial log records every file state, not only the last: every create,
+   modify, overwrite, rename and delete as `=== EVENT KIND INODE GENERATION PATH [NEW PATH]
+   [sha256=HEX]`, the format of scenario `deep` with the content hash added; the generation is the
+   superblock's, read after the sync that committed the change, and the long commit interval
+   (300 s) keeps every commit the scenario's own. Balance, defrag and the settle phases are
+   `=== PHASE` lines. The log also records the host's mkfs version and arguments, the image size,
+   the device count and whether discards reach the file (new `=== HOST-*` lines written by
+   `make_image.sh` for every image), the guest kernel, the mount options asked for and those in
+   effect (`/proc/mounts`), every axis (`=== MATRIX`) and the reclaim counters. `corpus/groundtruth.py`
+   parses it and checks the history for consistency.
+4. **The cleaner.** The cleaner thread runs only when the transaction thread wakes it, once per
+   commit interval (`disk-io.c:1549-1550`). Each image therefore settles twice, after the
+   population and after the operation, for 10 s with a 5 s interval (a remount wakes the
+   transaction thread, `super.c:1566`), so that deleted subvolumes are dropped and reclaim runs as
+   on any mounted filesystem. The first settle is needed: a new data block group sits on the
+   unused list until the cleaner runs, and while it is there it cannot be queued for reclaim
+   (`block-group.c:1535-1548`); without it, reclaim never ran in a trial build.
+5. **Tiers.** `./setup.sh` and CI build the default tier, `corpus/manifest.tsv`, as before; its
+   rows do not change, because several experiments take every manifest image as their set. The
+   matrix is `corpus/matrix.tsv`, built by `corpus/build.py --tier matrix` (it takes about half
+   an hour, seven rows idle 130 s each); `corpus/large.tsv`, the 100 GiB image, is built locally
+   only, by `--tier large` (a CI runner has about 14 GB of disk).
+
+*Definition of done.*
+- `corpus/matrix.tsv` and `corpus/large.tsv` are exactly what `corpus/matrix.py` writes, and
+  cover the three factorial blocks and every value of every axis;
+- for every matrix image: the superblock's csum type, the block-group tree flag, MIXED_GROUPS,
+  the device count, the chunk profiles and the compression of its file extents are those its row
+  claims, read from the image; the log's effective mount options carry the intended discard
+  option; the reclaim-on images record the threshold and the others record 0;
+- every matrix log parses, its history is consistent, and every file live at the end is in the
+  image's current tree with the inode, creation generation and SHA-256 the log gives;
+- hostile logs make the parser raise `LogError` or nothing at all;
+- a fresh clone runs `./setup.sh`; the matrix tier is built here, one image at a time behind the
+  shared lock, with image counts, disk use and build time per tier in the catalog.
+
 ### M8 — Rust scan core + product polish (Track P, after paper submission)
 - `rust/scan-core`: memmap2 + rayon + crc32c/crc-fast + zerocopy structs
   (seed layouts from `btrfs-diskformat`); PyO3 module via maturin; numpy
