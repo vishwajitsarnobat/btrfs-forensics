@@ -27,10 +27,12 @@ first is the git tag `legacy-final`.
 - `btrfska timeline DB [--tree ID|all] [--inode N] [--uncommitted] [--json]` follows every inode
   through every cataloged state: create, modify, rename, move, link, unlink, delete, by tree,
   inode number and creation generation.
-- `btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` finds tree
+- `btrfska scan IMAGE [--full-sweep] [--workers N] [--foreign] [--json]` finds tree
   blocks of the filesystem anywhere on the image, including chunks that have
   since been removed. It classifies each one as `live`, `backup_reachable`,
-  `unreferenced` or `invalid`.
+  `unreferenced` or `invalid`. With `--foreign` it also finds the tree blocks of
+  other filesystems on the device, validates them in their own geometry and
+  says whether they show a reformat or an fsid change.
 - `btrfska roots IMAGE [--full-sweep] [--json]` finds historical tree roots
   among those blocks. It reports every candidate root-tree block (a state)
   with the trees it names and how completely they survive (chunk and log
@@ -274,7 +276,7 @@ peak of about twice the file size (explicit and implicit holes excepted).
 
 ### `btrfska scan` output
 
-`btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` looks for tree
+`btrfska scan IMAGE [--full-sweep] [--workers N] [--foreign] [--json]` looks for tree
 blocks of the filesystem anywhere on the image. It validates each one and
 classifies it against anchored walks of the current state and of every
 backup root. The command opens no file other than the image.
@@ -306,8 +308,8 @@ byte-identical. On candidate-dense input 4 workers are about as fast as one
   summary line `skipped as DATA: N bytes` says how much was left out.
 - **Foreign filesystems.** The prefilter matches only the current fsid (or
   metadata_uuid). Tree blocks of a previous filesystem on the same device,
-  and blocks written before the fsid was changed (`btrfstune -m` or `-u`),
-  are not candidates at all.
+  and blocks written before the fsid was changed (`btrfstune -u`), are not
+  candidates at all. `--foreign` looks for them separately (below).
 
 **Memory.** Candidates are classified and printed one at a time. Memory grows
 with the size of the reachable trees (the walked copies of the current state,
@@ -376,6 +378,68 @@ Each record has:
 The summary line `walk failures: current N; backup roots M (…)` counts the
 invalid nodes the walks met, by the `roots` failure classes below. On an old
 backup root, `reused` is expected and is not damage.
+
+**Other filesystems (`--foreign`).** A second pass over the same regions
+(plan.md M6f):
+- *Census.* Every 4096-byte aligned offset whose bytes look like a tree-block
+  header (WRITTEN set, no unknown flag, backref revision 0 or 1, level below 8,
+  non-zero generation and 4096-aligned non-zero bytenr) is counted under its
+  header fsid. The census holds at most 1024 fsids (a Misra-Gries summary), so
+  a flood of random fsids cannot exhaust memory; it reports how much a count
+  may lack.
+- *Selection.* An fsid other than the tree fsid and the superblock fsid with at
+  least 2 such offsets is *recurring*; at most 8 are examined, the most frequent
+  first. The fsid of every valid foreign superblock copy (`info` lists them) is
+  examined too, even without a block.
+- *Context.* Blocks are validated with the geometry of their own filesystem:
+  the foreign superblock copy's when one survives, otherwise the nodesize and
+  checksum type under which most of the first 32 blocks verify. Without a
+  superblock the generation is unknown and its check is `null`.
+- *What it was.* `fsid_change` when a foreign chunk-tree leaf or superblock
+  names the current device uuid (`btrfstune -u` keeps it); `reformat` when it
+  names only other device uuids, or when a foreign generation is above the
+  current superblock's (an fsid change never leaves newer blocks behind);
+  `undetermined` otherwise. A change through metadata_uuid (`btrfstune -m`)
+  rewrites no tree block, so it leaves no foreign block; it is reported from
+  the current superblock.
+
+The text summary adds a `foreign:` census line, one `foreign filesystem FSID:
+KIND; …` line per filesystem with its `evidence:` lines, and the metadata_uuid
+line when it applies (or `foreign: no foreign filesystem found`). Foreign
+blocks are never classified as live or orphaned: they belong to another
+filesystem. With `--json`, each candidate block of a foreign fsid is a record
+after the node records, and each foreign filesystem a record after its blocks.
+
+A `foreign_node` record has `record`, `unsupported_format`, `fsid` (the header
+fsid), `physical`, `bytenr`, `generation`, `owner`, `level`, `nritems`,
+`valid`, `checks`, `problems` and `region`, as for a node, checked in the
+foreign context (`bytenr`, `chunk_tree_uuid`, `owner`, `parent_generation` and
+`first_key` are `null`, and `generation` too without a superblock).
+
+A `foreign_filesystem` record has `record`, `unsupported_format` and:
+- `fsid`; `census_blocks`: its header-shaped offsets in the census;
+- `kind`: `reformat`, `fsid_change` or `undetermined`; `evidence`: the reasons,
+  in words;
+- `context`: `source` (`superblock`, `inferred` or `none`: no block verified,
+  the current geometry was used), `mirror`, `nodesize`, `sectorsize`,
+  `csum_type`, `csum_name`, `generation` (`null` unless from a superblock),
+  `sampled` and `verified` (blocks tried when inferring, and how many passed);
+- `superblocks`: the foreign superblock copies of this fsid, each with
+  `mirror`, `offset`, `generation`, `fsid` and `tree_fsid`;
+- `candidates`, `valid`, `invalid`, `truncated`: its blocks;
+- `generations`: `[oldest, newest]` of the valid blocks, or `null`;
+- `levels`, `owners`: valid blocks per level and per owner (at most 32 owners;
+  the rest in `owners_more`);
+- `device_uuids`: the device uuids its valid chunk-tree leaves name, with how
+  many items name each (at most 16; the rest in `device_uuids_more`);
+- `in_current_map`: valid blocks inside a stripe of the current chunk map;
+  `region_kinds`: valid blocks per region kind.
+
+The Python API (`scan.foreign.foreign_scan`) returns the whole summary:
+`alignment`, `header_shaped`, `fsids_held`, `undercount`, `current_blocks`
+(header-shaped offsets of the tree fsid), `recurring`, `left_out`,
+`filesystems` (the records above) and `metadata_uuid_change` (`null`, or the
+superblock `fsid` and the `metadata_uuid` the tree blocks carry).
 
 ### `btrfska roots` output
 
@@ -525,7 +589,7 @@ the class earliest in the list above wins:
 
 ### `btrfska catalog`
 
-`btrfska catalog build IMAGE --db PATH [--full-sweep] [--workers N] [--max-states N] [--no-rehash]`
+`btrfska catalog build IMAGE --db PATH [--full-sweep] [--workers N] [--max-states N] [--foreign] [--no-rehash]`
 scans the image once, read-only, and writes everything `scan` and `roots`
 compute, plus the superblock copies, the chunk maps (the current one, one per
 superseded chunk-tree root the scan found, and one assembled from DEV_EXTENT
@@ -546,6 +610,9 @@ column, with example queries.
 - Up to 4096 root trees are evaluated as states (`--max-states`; `btrfska roots` reports 64).
   A root tree that is not a state cannot be named to `recover`, so when an image has more
   candidates than the bound, `problems` says so.
+- `--foreign` adds the `scan --foreign` pass: its summary goes into
+  `scan_runs.scan_summary` under `foreign`, and its text lines into `problems`
+  with source `foreign`. Foreign blocks are not `nodes` rows.
 - btrfs u64 values are stored as signed 64-bit integers, so the high objectids
   read as btrfs names them: owner `-6` is the log tree.
 

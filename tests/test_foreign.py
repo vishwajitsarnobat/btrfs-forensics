@@ -30,7 +30,7 @@ from btrfska.scan.regions import Region, plan_scan
 from btrfska.substrate import csum, ondisk
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
-from tests.helpers import make_node, node_ctx, scratch_dir, write_sparse_image
+from tests.helpers import REPO_ROOT, make_node, node_ctx, scratch_dir, write_sparse_image
 
 SECTOR = 4096
 OTHER = bytes(range(100, 116))  # a foreign fsid
@@ -38,6 +38,25 @@ OTHER = bytes(range(100, 116))  # a foreign fsid
 TRAILING_GAP = (105906176, 268435456)
 # Peak Python heap of a foreign scan of a flood; the candidate-flood test's budget.
 BUDGET = 16 << 20
+# The schemas README.md documents ("`btrfska scan` output", --foreign).
+FOREIGN_NODE_KEYS = {
+    "record", "unsupported_format", "fsid", "physical", "bytenr", "generation", "owner", "level",
+    "nritems", "valid", "checks", "problems", "region",
+}  # fmt: skip
+FILESYSTEM_KEYS = {
+    "fsid", "census_blocks", "kind", "evidence", "context", "superblocks", "candidates", "valid",
+    "invalid", "truncated", "generations", "levels", "owners", "owners_more", "device_uuids",
+    "device_uuids_more", "in_current_map", "region_kinds",
+}  # fmt: skip
+CONTEXT_KEYS = {
+    "source", "mirror", "nodesize", "sectorsize", "csum_type", "csum_name", "generation",
+    "sampled", "verified",
+}  # fmt: skip
+SUPERBLOCK_KEYS = {"mirror", "offset", "generation", "fsid", "tree_fsid"}
+SUMMARY_KEYS = {
+    "alignment", "header_shaped", "fsids_held", "undercount", "current_blocks", "recurring",
+    "left_out", "filesystems", "metadata_uuid_change",
+}  # fmt: skip
 
 
 def header_sector(fsid: bytes, bytenr: int = SECTOR, generation: int = 1) -> bytearray:
@@ -212,7 +231,9 @@ def test_planted_blocks_of_another_filesystem_are_found_validated_and_identified
     records = []
     with scratch_dir("test_foreign_planted_") as d:
         summary, fields = run(derived(sandbox_img, d, "planted.img", patches), records.append)
+    assert set(summary) == SUMMARY_KEYS
     (found,) = summary["filesystems"]
+    assert set(found) == FILESYSTEM_KEYS and set(found["context"]) == CONTEXT_KEYS
     assert found["fsid"] == str(uuid.UUID(bytes=OTHER))
     assert (found["kind"], found["candidates"], found["valid"]) == ("reformat", 4, 4)
     assert found["census_blocks"] == 4
@@ -297,3 +318,13 @@ def test_at_most_max_foreign_fsids_are_examined(sandbox_img):
     assert summary["recurring"] == MAX_FOREIGN + 3 and summary["left_out"] == 3
     assert len(summary["filesystems"]) == MAX_FOREIGN
     assert foreign.MIN_BLOCKS == 2
+
+
+def test_readme_documents_every_foreign_key():
+    readme = (REPO_ROOT / "README.md").read_text()
+    section = readme.split("### `btrfska scan` output", 1)[1].split("\n### ", 1)[0]
+    keys = (
+        FOREIGN_NODE_KEYS | FILESYSTEM_KEYS | CONTEXT_KEYS | SUPERBLOCK_KEYS | SUMMARY_KEYS
+        | set(KINDS) | set(SOURCES) | {"foreign_node", "foreign_filesystem", "--foreign"}
+    )  # fmt: skip
+    assert {key for key in keys if f"`{key}`" not in section} == set()

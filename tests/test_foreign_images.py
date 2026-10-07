@@ -18,6 +18,7 @@ from btrfska.substrate import csum
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
 from tests.helpers import SCENARIOS, scratch_dir
+from tests.test_foreign import FILESYSTEM_KEYS, FOREIGN_NODE_KEYS, SUPERBLOCK_KEYS
 
 pytestmark = pytest.mark.vm
 
@@ -89,6 +90,7 @@ def test_the_other_geometry_reformat_reads_its_context_from_the_surviving_superb
     (found,) = foreign("m6_reformat_geometry")[0]["filesystems"]
     assert found["context"]["source"] == "superblock" and found["context"]["mirror"] == 1
     assert [copy["fsid"] for copy in found["superblocks"]] == [old["fsid"]]
+    assert set(found["superblocks"][0]) == SUPERBLOCK_KEYS
     assert old["dev_uuid"] in found["device_uuids"]
     assert new["dev_uuid"] not in found["device_uuids"]
     assert found["invalid"] == 0
@@ -138,6 +140,8 @@ def test_scan_json_carries_foreign_records(capsys):
     nodes = [r for r in records if r["record"] == "foreign_node"]
     (filesystem,) = [r for r in records if r["record"] == "foreign_filesystem"]
     assert len(nodes) == filesystem["candidates"]
+    assert {frozenset(r) for r in nodes} == {frozenset(FOREIGN_NODE_KEYS)}
+    assert set(filesystem) == FILESYSTEM_KEYS | {"record", "unsupported_format"}
     assert sum(r["valid"] for r in nodes) == filesystem["valid"]
     assert {r["fsid"] for r in nodes} == {filesystem["fsid"]}
     assert any(line.startswith("foreign filesystem ") for line in captured.err.splitlines())
