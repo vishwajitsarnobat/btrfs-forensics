@@ -93,6 +93,28 @@ def checksummed_on_disk(conn, artifact_id: int) -> bool:
     return on_disk and not (flags and flags[0] & ondisk.INODE_NODATASUM)
 
 
+def prefix_sha256(path: Path, size: int) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        while size and (block := f.read(min(1 << 20, size))):
+            digest.update(block)
+            size -= len(block)
+    return digest.hexdigest()
+
+
+def explain(miss: dict, logged: list[tuple[int, Path]]) -> str:
+    """Why a `confirmed` file's hash is not in the log (EXP-020 §6.1): `empty` (a version of size
+    0, created and not yet written at that commit), `prefix_of_logged` (its bytes are the start of
+    a recovered file whose hash the log has for that name: a commit in the middle of the write),
+    else `unexplained`."""
+    if miss["size"] == 0:
+        return "empty"
+    for size, path in logged:
+        if size >= miss["size"] and prefix_sha256(path, miss["size"]) == miss["sha256"]:
+            return "prefix_of_logged"
+    return "unexplained"
+
+
 def measure(image: Path) -> dict:
     work = OUT / image.stem
     shutil.rmtree(work, ignore_errors=True)
@@ -114,7 +136,8 @@ def measure(image: Path) -> dict:
         ).fetchone()[0]
         rows = conn.execute(
             "SELECT artifact_id, source_kind, state_id, path, status, sha256, csum_verdict, tier,"
-            " tier_rules FROM artifacts WHERE kind = 'file' AND status != 'duplicate'"
+            " tier_rules, size, output_path FROM artifacts"
+            " WHERE kind = 'file' AND status != 'duplicate'"
         ).fetchall()
         h2_set = {
             row[0]
@@ -123,11 +146,16 @@ def measure(image: Path) -> dict:
         }
     finally:
         conn.close()
+    logged: dict[str, list[tuple[int, Path]]] = {}  # name -> recovered files with a logged hash
+    for row in rows:
+        name = row[3].rsplit("/", 1)[-1]
+        if row[4] == "complete" and row[5] in names.get(name, ()):
+            logged.setdefault(name, []).append((row[9], work / "out" / row[10]))
     by_source, rules, proof = Counter(), Counter(), Counter()
     h1_checked, h1_wrong, h2_bad, h3 = 0, [], [], []
     orphan_match = 0
     h4 = {tier: [0, 0] for tier in TIERS}  # evaluated, right
-    for artifact_id, kind, _, path, status, digest, verdict, tier, fired in rows:
+    for artifact_id, kind, _, path, status, digest, verdict, tier, fired, size, _ in rows:
         fired = json.loads(fired)
         by_source[f"{kind} {tier}"] += 1
         rules.update(fired)
@@ -141,7 +169,8 @@ def measure(image: Path) -> dict:
             if tier == "confirmed":
                 h1_checked += 1
                 if not right:
-                    h1_wrong.append([kind, path, digest])
+                    miss = {"kind": kind, "path": path, "sha256": digest, "size": size}
+                    h1_wrong.append(miss | {"why": explain(miss, logged.get(name, []))})
         if artifact_id in h2_set and tier != "confirmed":
             h2_bad.append([path, tier, [r for r in fired if r not in ("blocks_validated",)]])
         if kind in ORPHANS:
@@ -231,6 +260,8 @@ def table(args) -> None:
                            ("H3", r["h3"]["orphan_confirmed"])):  # fmt: skip
             for entry in found:
                 print(f"{key} {r['image']}: {entry}")
+    why = Counter(miss["why"] for r in results for miss in r["h1"]["wrong"])
+    print(f"H1 misses by explanation: {dict(why)}")
 
 
 def main() -> None:
