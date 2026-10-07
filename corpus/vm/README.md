@@ -81,6 +81,9 @@ python3 corpus/vm/probe_stale_metadata.py images/scenarios/x.img
 | `scenarios/reuse.guest.sh` | Six data chunks, three removed (`balance -dusage=0`): the next chunk reuses the topmost one's logical range on other physical bytes (EXP-010) |
 | `scenarios/reuse_same.guest.sh` | The control: the next chunk reuses the topmost one's logical range on the same physical bytes |
 | `scenarios/discard_{none,async,sync}.sh` | The three §10.4 discard rows |
+| `scenarios/foreign.guest.sh` | One life of a filesystem: files, a snapshot, churn with deletions; every file names the fsid it was written under (plan.md M6f) |
+| `scenarios/reformat.sh` | A life, the pinned mkfs over the same image again (`NEW_CSUM`, `NEW_MKFS_ARGS`), and unless `NEW_LIFE=0` a second life |
+| `scenarios/fsid_change.sh` | A life, the pinned `btrfstune -f $TUNE` (`-u` or `-m`), a second life |
 | `probe_stale_metadata.py` | Prints `fsid_blocks stale_blocks needle_copies nonzero_blocks` (definitions in its docstring) |
 
 Derived images and the manifest (one level up, in `corpus/`):

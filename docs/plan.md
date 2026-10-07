@@ -1676,6 +1676,40 @@ re-run (N = 5) and the results added to EXP-009.md as an addendum, the original 
 `tests/test_timeline.py`; the three new tests failed before the fix (the m4_deep one by the
 `link` of `pad/p2`). EXP-009 re-run: no wrong event in five builds, rename recall 0.870 → 0.783.
 
+*M5d fix, part 2, 2026-10-07: renames within one directory through INODE_REF* (issue #84, branch
+`feature/timeline-inode-ref-renames`). The rule above cost EXP-009 two right renames
+(`moves/m_4.txt`, `moves/m_5.txt`): under the old name each was seen only through committed walks
+with gaps. A gap can hide a name but cannot invent one, and the names of an inode within one
+directory are one item: the key of an INODE_REF is (inode, INODE_REF, directory)
+(`btrfs_insert_inode_ref`, fs/btrfs/inode-item.c:307-309 at v7.0), a second name in the same
+directory extends that item (inode-item.c:318-333), and only when it cannot grow does the name go
+to an INODE_EXTREF item instead (inode-item.c:334-343 and 355-364). An item lies in one leaf, so
+a walk that read the item read every name it holds. One rule is added:
+- **A rename within one directory is derived when one or both versions were seen only through
+  committed walks with gaps**, if the names differ by exactly one gone and one come, both in the
+  same directory, and no name the two versions show in that directory comes from an INODE_EXTREF
+  item. The version under the old name then holds that directory's INODE_REF item, which does not
+  hold the new name, and the version under the new name holds the item without the old name. A
+  name of that directory in an INODE_EXTREF item the walk did not reach is not excluded: that
+  needs an INODE_REF item that once could not grow (hundreds of names of one inode in one
+  directory), which no corpus scenario makes.
+- Everything else stays as above: a `move`, `link` or `unlink`, or a rename whose names sit in an
+  INODE_EXTREF item, still needs both versions seen in a whole walk; versions seen only in
+  fragments, lone leaves or a log tree replayed without its base give no name change at all.
+
+*Definition of done.* Tests that fail before the change: a forged catalog whose walk with a gap
+reads a whole INODE_REF item gives the rename, and still no `link`, `unlink` or `move` from such
+a walk, and no rename when a name comes from an INODE_EXTREF item; on `m4_deep`, the renames of
+`moves/m_4.txt` and `moves/m_5.txt` are reported (every logged rename whose two names committed
+walks show) and still no `link` of `pad/p2`. README and this section describe the rule. EXP-009
+addendum B (N = 5, with predictions committed before the builds) compares the code before and
+after on the same builds.
+
+**Status 2026-10-07: done** (catalog.md; EXP-009 addendum B). The forged test and the `m4_deep`
+test failed before the change. EXP-009 addendum B: rename recall 0.783 → 0.870 in each of five
+builds, precision 1.0, no `link` or `move`, every other count the same; the timeline gains
+exactly the renames of `m_4` and `m_5`.
+
 **M5 status 2026-09-21: the definition of done holds; three items of its scope are open.**
 Parts M5a (historical chunk maps, EXP-007), M5b (integrity and linkage), M5c-1 (the orphan graph,
 EXP-008) and M5d (timelines), after the prior-art re-run (research.md §11). Bullet by bullet:
@@ -2058,6 +2092,91 @@ generations: relocation gives a data extent a newer generation and leaves the fi
 `in_use` for data is decided by the extent's back-references (same address, length and inode
 number, directly or through a shared leaf).
 
+**M6f: foreign-FSID discovery** (issue #54; design fixed 2026-10-07, before implementation).
+
+*What it is.* An optional mode, `btrfska scan --foreign` and `btrfska catalog build --foreign`,
+that finds the tree blocks of other filesystems on the device: a filesystem that was there before
+a reformat, or this filesystem before its fsid was changed. The M2 prefilter keeps only blocks
+whose header carries the tree fsid, so neither is a candidate today (README, scan limitations).
+1. **Census.** Every 4096-byte aligned offset of the scan plan's regions (the targeted plan, or
+   every range with `--full-sweep`) whose bytes look like a tree-block header is counted under its
+   header fsid. A header looks like one when its flags have WRITTEN set and no bit other than
+   WRITTEN and RELOC below the backref revision, the backref revision is 0 or 1 (btrfs_tree.h:765-766,
+   812-817), the level is below 8, and bytenr and generation are non-zero, bytenr a multiple of
+   4096. The alignment is 4096, not the current sectorsize, so a filesystem of a smaller
+   sectorsize is not missed. The count is bounded: a mergeable Misra-Gries summary holds at most
+   1024 fsids, so memory does not grow with the number of distinct fsids, and any fsid with more
+   than 1/1025 of the header-shaped offsets is kept. How much the summary may undercount is
+   reported.
+2. **Selection.** A *foreign fsid* is one that is neither the tree fsid nor the superblock fsid,
+   with at least 2 header-shaped blocks in the census; at most 8 are examined, the most frequent
+   first, and the summary says when more were left out. The tree fsid of every valid foreign
+   superblock copy (M1 `Selection.foreign`) is examined too, even with no block.
+3. **Context.** Each foreign fsid is validated with its own geometry: the nodesize, sectorsize,
+   csum type and generation of its foreign superblock copy when one survives (`context_source`
+   `superblock`). Otherwise the (nodesize, csum type) pair under which most of its first 32 blocks
+   pass their checksum, the current filesystem's pair tried first (`inferred`); the generation is
+   then unknown and the generation check is not made (`null`). When no pair verifies a single
+   block, the current geometry is used and every block is reported invalid (`none`).
+4. **Validation.** A second, exact pass finds every offset whose header carries that fsid (the
+   M2 prefilter with that fsid at 4096-byte alignment) and checks each block with `check_block`
+   in that context, without expectations, as `scan` does. Records stream; only counters are kept.
+5. **What it was.** The valid chunk-tree leaves (owner 3) of a foreign fsid name device uuids, in
+   DEV_ITEMs and in CHUNK_ITEM stripes; a foreign superblock copy names one in its dev_item. A
+   device uuid equal to the current superblock's dev_item uuid means the same device under a new
+   fsid: `fsid_change` (`btrfstune -u` keeps the device uuid; btrfs-progs v6.6.3
+   tune/change-uuid.c:145-197). Only other device uuids mean a new mkfs: `reformat`. Without a
+   device uuid, a foreign generation above the current superblock's also means `reformat`:
+   btrfstune leaves the generation alone, so blocks written before an fsid change are never newer
+   than the filesystem that carries on. Neither: `undetermined`. Separately, a current superblock with METADATA_UUID whose fsid
+   differs from metadata_uuid reports an fsid change made through metadata_uuid (`btrfstune -m`):
+   its tree blocks were never rewritten, so there are no foreign headers to find.
+6. **Records, no schema change.** `scan --json` adds `foreign_node` records (one per foreign
+   candidate, the `node` keys that make sense without the current chunk map, plus `fsid`) and one
+   `foreign_filesystem` record per fsid; the text summary adds one line per foreign filesystem.
+   `catalog build --foreign` keeps the evidence database at its schema: the summary goes into
+   `scan_runs.scan_summary` under `foreign`, and one `problems` row per finding with source
+   `foreign`. Foreign blocks are not `nodes` rows: they belong to another filesystem, and reading
+   them as one (its chunk map, its roots) is later work.
+
+*Hostile input.* A flood of header-shaped sectors, each with a new random fsid, must stay within
+the memory budget of the candidate-flood test (`tests/test_scan_hostile.py`) and select nothing;
+validation work is bounded by the offsets probed, as in `scan`, because each offset has one fsid.
+
+*Corpus.* Built in the guest by two host drivers around a new guest scenario `foreign` (files, a
+snapshot, churn with deletions; every file names the fsid it was written under):
+- `m6_reformat`: xxhash, nodesize 16 KiB, one life, then the pinned mkfs again with the same
+  options over the whole image, and no life after it;
+- `m6_reformat_geometry`: crc32c, nodesize 32 KiB, one life, then `mkfs --mixed -b 60M` with
+  xxhash (nodesize 4 KiB), and a second life. mkfs zeroes only the superblock copies inside its
+  size (btrfs-progs v6.6.3 common/device-utils.c:290-293), so the old mirror 1 at 64 MiB survives:
+  M1's foreign superblock, here from a real reformat instead of `corpus/mutate.py`;
+- `m6_fsid_u`: one life, `btrfstune -u`, a second life;
+- `m6_fsid_m`: one life, `btrfstune -m`, a second life.
+
+*Definition of done.*
+- on `m6_reformat` and `m6_reformat_geometry` the old fsid (from the scenario's log) is found,
+  validated in its own geometry (inferred on the first, from the foreign superblock on the
+  second: nodesize 32 KiB, crc32c), and reported as `reformat`;
+- on `m6_fsid_u` the pre-change fsid is found, its valid blocks are never live blocks of the
+  current filesystem, and it is reported as `fsid_change`; on `m6_fsid_m` no foreign fsid is
+  found and the metadata_uuid change is reported;
+- on `sandbox.img` and the clean corpus images the mode finds no foreign fsid (`m1_foreign_mirror`
+  reports its transplanted superblock with no blocks);
+- the random-fsid flood stays within the budget and selects nothing; a flood of one foreign fsid
+  is validated within the same budget;
+- README documents `--foreign` and every new key, evidence-db.md the `foreign` summary and
+  problems source; the fresh-clone proof builds the four images.
+
+**M6f status 2026-10-07: done** (catalog.md, M6f entry; `tests/test_foreign.py`,
+`tests/test_foreign_images.py`; EXP-018). Each bullet of the definition of done is a test, and
+EXP-018 measured the four rows over five regenerations: every reformat and fsid change was found
+and identified in every build. Two things the design did not foresee: a reformat with the same
+options leaves no old chunk-tree leaf (the new mkfs writes its chunk tree where the old one was),
+so `m6_reformat` is identified by its generations, not by a device uuid; and on a block device
+with discard, mkfs trims the whole device by default, so these file-backed images are the
+favourable case (EXP-018 §7).
+
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
 - Corpus generator = `corpus/vm/` scaled up (already in use since M1):
   scenario scripts × matrix below, per-image manifest (per-file SHA-256,
@@ -2436,6 +2555,10 @@ one run of 15 (365/353/18/828), the async and sync rows never.
     unchanged; rename recall 0.870 → 0.783, because two right renames rested on versions seen
     only through walks with gaps. A refinement that would keep them is described there and left
     to the maintainer.
+  - **Re-run 2026-10-07 after the INODE_REF rule** (EXP-009, addendum B; issue #84). A rename
+    within one directory is derived from a walk with gaps that read the directory's INODE_REF
+    item. On five new builds, each measured before and after: rename recall 0.783 → 0.870,
+    precision 1.0, still no `link` or `move`, every other count unchanged.
 - **Minimum experiment set for paper 1** (EXP records, ≥ 5 regenerations
   where a guest runs; details in `paper-draft.md` §10):
   - E-rec: file-level recovery per source, on no-balance, aged and ≥ 8 GiB

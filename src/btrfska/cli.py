@@ -10,6 +10,7 @@ from btrfska import __version__
 from btrfska.catalog import cli as catalog_cli
 from btrfska.recover import cli as recover_cli
 from btrfska.scan.classify import Classified, failure_counts, scan_image
+from btrfska.scan.foreign import ForeignRecord, foreign_scan, report_lines
 from btrfska.scan.kernel_numpy import MAX_WORKERS
 from btrfska.scan.roots import State, discover_image
 from btrfska.substrate import csum, ondisk, superblock
@@ -420,6 +421,28 @@ def _scan_record(item: Classified, unsupported_format: bool) -> dict:
     }
 
 
+def _foreign_record(record: ForeignRecord, unsupported_format: bool) -> dict:
+    """One block of a foreign fsid. Schema: README.md, "`btrfska scan` output"."""
+    return {
+        "record": "foreign_node",
+        "unsupported_format": unsupported_format,
+        "fsid": str(uuid.UUID(bytes=record.fsid)),
+        "physical": record.physical,
+        "bytenr": record.bytenr,
+        "generation": record.generation,
+        "owner": record.owner,
+        "level": record.level,
+        "nritems": record.nritems,
+        "valid": record.valid,
+        "checks": dict.fromkeys(CHECK_NAMES) | {check.name: check.ok for check in record.checks},
+        "problems": [
+            *record.problems,
+            *(f"{check.name}: {check.detail}" for check in record.checks if check.ok is False),
+        ],
+        "region": asdict(record.region),
+    }
+
+
 def _failure_line(counts: dict[str, dict[str, int]]) -> str:
     """Invalid nodes met by the current and the backup-root walks, reuse apart from damage."""
 
@@ -444,6 +467,17 @@ def cmd_scan(args: argparse.Namespace) -> int:
             if args.json:
                 record = _scan_record(item, fs.unsupported_format)
                 print(json.dumps(record, separators=(",", ":")))
+        foreign = None
+        if args.foreign:
+
+            def emit(record: ForeignRecord) -> None:
+                line = _foreign_record(record, fs.unsupported_format)
+                print(json.dumps(line, separators=(",", ":")))
+
+            foreign = foreign_scan(img, fs, result.plan.regions, emit if args.json else None)
+            for found in foreign["filesystems"] if args.json else ():
+                line = {"record": "foreign_filesystem", "unsupported_format": fs.unsupported_format}
+                print(json.dumps(line | found, separators=(",", ":")))
 
     plan, s, ctx = result.plan, result.summary, fs.reader.ctx
     probed = sum(region.end - region.start for region in plan.regions)
@@ -477,6 +511,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
             f"orphans {row['orphans']}"
         )
     lines += [f"problem: {problem}" for problem in (*plan.problems, *result.reach.problems)]
+    if foreign is not None:
+        lines += report_lines(foreign)
     for line in lines:
         print(line, file=stream)
     return 0
@@ -706,6 +742,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=_workers,
         default=1,
         help=f"worker processes, 1 to {MAX_WORKERS} (default 1)",
+    )
+    scan_cmd.add_argument(
+        "--foreign",
+        action="store_true",
+        help="also find, validate and identify tree blocks of other filesystems (other fsids)",
     )
     scan_cmd.add_argument(
         "--json", action="store_true", help="one JSON line per candidate node on stdout"

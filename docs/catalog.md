@@ -64,6 +64,86 @@ Maintenance rules:
   the fallback giving the same placements). 1141 tests passed, none skipped; ruff clean;
   `sha256sum -c` OK.
 
+## 2026-10-07 — Renames within one directory proved through INODE_REF, and EXP-009 addendum B
+
+- **Branch:** `feature/timeline-inode-ref-renames` (from `main` at `4334698`; issue #84).
+  Changed `src/btrfska/timeline/build.py`, `tests/test_timeline.py`, `README.md` (`btrfska
+  timeline`), `docs/plan.md` (M5d fix, part 2; E-timeline status), `experiments/EXP-009.md`
+  (addendum B).
+- **Why.** The fix of issue #78 derives no name change from a version seen only through walks
+  with gaps. That cost EXP-009 two right renames (`moves/m_4.txt`, `moves/m_5.txt`, rename recall
+  0.870 → 0.783). A gap can hide a name but cannot invent one, and the names of an inode in one
+  directory are one INODE_REF item, keyed (inode, INODE_REF, directory); a name goes to an
+  INODE_EXTREF item only when that item cannot grow (fs/btrfs/inode-item.c:307-364 at v7.0).
+- **What changed.** A rename within one directory is derived when a version was seen only through
+  committed walks with gaps, if exactly one name went and one came, both in the same directory,
+  and no name the two versions show there comes from an INODE_EXTREF item. Moves, links,
+  unlinks and anything from fragments, lone leaves or a log tree without its base still need
+  whole walks.
+- **Numbers** (EXP-009 addendum B; five new builds, i5-1335U host, each measured by the code
+  before (`4334698`) and after (`94bc7a3`), predictions committed first): rename recall 0.783 →
+  **0.870** in every build, precision 1.0; recall within reach 0.952 (0.909–0.952); no `link` or
+  `move`; creates, deletes, `not_seen`, `order_assumed` (0) and `log_only` (16) unchanged. Each
+  build's timeline gains exactly two events, the renames of `m_4` and `m_5`. B1 and B2 held; B3
+  held for the comparison, but its restated create recall range (0.987 to 0.989) was off in one
+  build (0.992 under both versions).
+- **Verified.** Two new tests failed before the change and pass now: forged walks with gaps (the
+  rename is proved through the INODE_REF item, while a move, a link, a lone leaf and an
+  INODE_EXTREF name give none), and on `m4_deep` every logged rename whose two names committed
+  walks show is reported. The `pad/p2` test still passes. 1080 tests passed, none skipped; ruff
+  clean; `sha256sum -c` OK.
+## 2026-10-07 — M6f: foreign-FSID discovery, a reformat or an fsid change and what survives (EXP-018)
+
+- **Branch:** `feature/m6-foreign-fsid` (from `main` at `523be2b`; issue #54). New
+  `src/btrfska/scan/foreign.py`, `corpus/vm/scenarios/foreign.guest.sh`, `reformat.sh`,
+  `fsid_change.sh`, `tests/test_foreign.py`, `tests/test_foreign_images.py`,
+  `experiments/EXP-018.md`, `experiments/exp018.py`. Changed `cli.py` (`scan --foreign`),
+  `catalog/build.py` and `catalog/cli.py` (`catalog build --foreign`), `corpus/manifest.tsv`,
+  `corpus/vm/README.md`, `README.md`, `docs/evidence-db.md`, `docs/plan.md` (M6f). **No schema
+  change** (still version 8).
+- **Why.** The M2 prefilter keeps only blocks whose header carries the tree fsid, so the tree
+  blocks of a filesystem that was on the device before a reformat, and those this filesystem wrote
+  before `btrfstune -u`, were never candidates (the M2a review; README's scan limitation). M1
+  already reported a foreign superblock copy, but nothing looked for the trees behind it.
+- **What changed.** An optional second pass over the scan plan's regions. A census counts every
+  4096-byte aligned offset that looks like a tree-block header under its header fsid, in a
+  mergeable Misra-Gries summary of at most 1024 fsids. Every recurring fsid other than the tree
+  fsid and the superblock fsid (at most 8), and the fsid of every foreign superblock copy, is then
+  validated with its own context: the foreign superblock's geometry when one survives, otherwise
+  the (nodesize, csum type) under which most of its first 32 blocks verify; without a superblock
+  the generation check is not made. What it was: `fsid_change` when its chunk-tree leaves or
+  superblock name the current device uuid (`btrfstune -u` keeps it; btrfs-progs v6.6.3
+  tune/change-uuid.c:145-197), `reformat` when they name only other device uuids or when a
+  foreign generation is above the current superblock's, `undetermined` otherwise. A change through
+  metadata_uuid (`btrfstune -m`), which rewrites no header, is read from the superblock. `scan
+  --json` gains `foreign_node` and `foreign_filesystem` records; `catalog build --foreign` puts
+  the summary into `scan_runs.scan_summary` under `foreign` and its lines into `problems` (source
+  `foreign`), so the schema stays as it is. Four corpus images, built in the guest:
+  `m6_reformat` (same options, no second life), `m6_reformat_geometry` (crc32c 32 KiB to mixed
+  xxhash 4 KiB at 60 MiB, second life; the old mirror-1 superblock survives), `m6_fsid_u`,
+  `m6_fsid_m`.
+- **Numbers (EXP-018, N = 5 regenerations of each row, this host).** Old-fsid valid blocks,
+  median (range): `m6_reformat` 196 (196-196), `reformat` from the generations, context inferred
+  (16384, xxhash64); `m6_reformat_geometry` 218 (218-218), `reformat` from the device uuids,
+  context from the surviving superblock (32768, crc32c); `m6_fsid_u` 30 (30-32) plus 5 invalid
+  (mkfs's never-written blocks), `fsid_change` from 31 chunk-tree items naming the current device;
+  `m6_fsid_m` no foreign header, the metadata_uuid change reported, 5 of 5. No other foreign
+  filesystem in any build; on 24 control images (a 25th, `m1_unknown_incompat`, is refused by the gate) only `m1_foreign_mirror`'s transplanted
+  superblock, with no block. Hostile input, on sandbox copies whose 39 680-sector trailing gap is
+  all header-shaped: a random fsid per sector selects nothing at a 10.7 MiB peak heap (0.27 s);
+  one foreign fsid in every sector is validated, all invalid, at 2.1 MiB (2.9 s). Budget 16 MiB.
+- **Must know.** On a block device with discard, mkfs trims the whole device unless `-K`
+  (common/device-utils.c:270-278), so a reformat there may leave nothing; these images are files,
+  where mkfs trims nothing. A same-options reformat followed by a second life left 2 old blocks in
+  a pilot. Foreign blocks are found and validated, not yet read as a filesystem (its chunk map and
+  roots); they are not `nodes` rows. EXP-017's open point (a real reformat with its trees) is
+  answered by `m6_reformat_geometry`.
+- **Verified.** `ruff check`, `ruff format --check`, `sha256sum -c tests/fixtures/SHA256SUMS`;
+  fresh-clone proof: the branch cloned into `images/scratch/`, `./setup.sh` built all 28 corpus
+  rows including the four new ones and ran 1 109 tests, all passed, nothing skipped; the clone was
+  deleted. In the working checkout 1 108 passed and one test of EXP-009 skipped, because the
+  shared `m4_deep` there predates the event log EXP-009 added.
+
 ## 2026-10-07 — The two wrong timeline events of EXP-009 fixed, and EXP-009 re-run
 
 - **Branch:** `fix/timeline-absence-verdicts` (from `main` at `bef52dd`; issue #78). Changed
