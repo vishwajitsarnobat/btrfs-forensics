@@ -5,12 +5,14 @@
 # files/root-BYTENR/ for each older one. Options (cmds/restore.c): -i ignore errors, -m owner,
 # mode and times, -S symlinks, -s snapshots, -x xattrs, -t root tree location.
 B=$PREFIX/bin
+mkdir -p "$OUT/live"
 "$B/btrfs" restore -i -m -S -s -x "$EVIDENCE" "$OUT/live" > "$LOGS/restore-live.txt" 2>&1
 status=$?
 "$B/btrfs-find-root" "$EVIDENCE" > "$LOGS/find-root.txt" 2>&1
 # the candidate roots are the `Well block N(gen: ...` lines, the parse undelete-btrfs uses
 sed -n 's/^Well block \([0-9]*\)(gen.*/\1/p' "$LOGS/find-root.txt" | sort -un > "$LOGS/roots.txt"
 while read -r bytenr; do
+    mkdir -p "$OUT/root-$bytenr"
     "$B/btrfs" restore -t "$bytenr" -i -m -S -s -x "$EVIDENCE" "$OUT/root-$bytenr" \
         >> "$LOGS/restore-roots.txt" 2>&1
 done < "$LOGS/roots.txt"

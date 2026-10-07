@@ -217,3 +217,15 @@ def test_fls_listings_become_paths():
         "r\t262\tpad/sub/deep name.txt",
         "r\t263\ttop.txt",
     ]
+
+
+def test_a_directory_of_runs_is_scored_run_by_run():
+    with scratch_dir("test_baselines_") as d:
+        for tool in ("a", "b"):
+            run = d / tool / "img"
+            run.mkdir(parents=True)
+            (run / "run.tsv").write_text(f"tool\t{tool}\n")
+            (run / "files.tsv").write_text(HEADER)
+        (d / "a" / "stray").mkdir()
+        assert score.run_dirs([d]) == [d / "a" / "img", d / "b" / "img"]
+        assert score.run_dirs([d / "b" / "img"]) == [d / "b" / "img"]

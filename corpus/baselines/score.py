@@ -172,16 +172,28 @@ def score_run(run_dir: Path, log: Path | None = None) -> dict:
     return result
 
 
+def run_dirs(paths: list[Path]) -> list[Path]:
+    """The run directories named, or found below a named directory (images/baselines/runs)."""
+    found = []
+    for path in paths:
+        if (path / "run.tsv").exists() and (path / "files.tsv").exists():
+            found.append(path)
+            continue
+        below = sorted(p.parent for p in path.rglob("run.tsv") if (p.parent / "files.tsv").exists())
+        if not below:
+            print(f"score.py: no run.tsv and files.tsv in or below {path}", file=sys.stderr)
+            sys.exit(1)
+        found += below
+    return found
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("runs", nargs="+", type=Path, help="run directories of run.sh")
     parser.add_argument("--log", type=Path, help="scenario log (default: the image's own)")
     parser.add_argument("--json", action="store_true", help="one JSON object per run")
     args = parser.parse_args()
-    for run_dir in args.runs:
-        if not (run_dir / "run.tsv").exists() or not (run_dir / "files.tsv").exists():
-            print(f"score.py: {run_dir} has no run.tsv and files.tsv", file=sys.stderr)
-            sys.exit(1)
+    for run_dir in run_dirs(args.runs):
         r = score_run(run_dir, args.log)
         if args.json:
             print(json.dumps(r))
