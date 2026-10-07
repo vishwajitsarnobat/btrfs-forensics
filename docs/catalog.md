@@ -53,8 +53,10 @@ Maintenance rules:
   `z.bin` is overwritten inside a surviving chunk, invisible to every map.
 - **Verified.** Registration committed and pushed (`3bf711f`) before any file was read through a
   map; ten fresh builds and the two corpus images measured, all unchanged; `ruff check`,
-  `ruff format --check`, the full `pytest` with nothing skipped, `sha256sum -c
-  tests/fixtures/SHA256SUMS`; a fresh clone of the branch ran `./setup.sh` to the end.
+  `ruff format --check`, `sha256sum -c tests/fixtures/SHA256SUMS`; a fresh clone of the branch
+  went through the steps of `./setup.sh` (run one by one, so that each image build and the test
+  run took the shared lock of the parallel sessions): 22 images built, 1008 tests passed,
+  nothing skipped.
 
 ## 2026-10-07 — The mentor demo, tracked and runnable
 
