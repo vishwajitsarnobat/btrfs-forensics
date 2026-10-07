@@ -276,7 +276,7 @@ lzallright==0.2.6`, scratch only):
 - a truncated stream (all three raise a catchable error);
 - 300 single-bit flips of one compressed 4 KiB sector.
 
-**Also observed** (`tests/oracle/lzo_hostile.py`, seeds 1–5, M1c): per seed,
+**Also observed** (`tests/oracle/lzo_hostile.py`, seeds 1–5, M1c; recorded as EXP-014): per seed,
 218–231 (median 227) of the 300 bit-flipped streams decoded "successfully" to
 wrong bytes within the 4 KiB bound in btrfska, lzallright and dissect.util's
 native decoder (258–277 in its pure-Python decoder). lzallright and both
@@ -1779,6 +1779,50 @@ images and their log. Whatever does not hold is reported as a finding, not tuned
 bullet held on the first build; no recovery code had to change. What is left of M5's list is
 the btrfscue comparison, which waits for M7's baseline builds.
 
+**M5f: logical-range reuse, per-generation maps against a merged map** (EXP-010, issue #57;
+design fixed 2026-10-07, before implementation).
+
+*What it is.* C6 reads a state's file data through the chunk map of its own time (M5a).
+`mbkn-btrfs-rescue` reads every version through one map merged from all CHUNK_ITEMs it found,
+the newest record per chunk start winning (research.md §12). The two give the same answer
+everywhere except where one logical range belonged to two chunks with different physical
+placement at different times, and no corpus image has such a range (the answer on issue #48).
+M5f adds a scenario that makes one, and an experiment that reads it both ways.
+1. **The scenario** (`reuse`, image `m5_reuse`): six 64 MiB data chunks fill a 512 MiB image;
+   the three that hold only deleted files, the topmost among them, are removed with `balance
+   -dusage=0`; the next data chunk starts at the topmost one's logical address and, because a
+   data chunk takes the largest device hole when none is 1 GiB (volumes.c:5529, 1883-1946 at
+   v7.0), lands on the 128 MiB hole two lower chunks left. A pilot build of the layout proposed
+   on issue #48 put the new chunk back on the removed chunk's own bytes (that issue's answer
+   assumed first fit); that layout is kept as the control (`reuse_same`, image
+   `m5_reuse_same`): logical reuse on the same physical bytes, where both designs must agree.
+2. **The merged map is an emulation, in the experiment script, not a `recover` option.**
+   `experiments/exp010.py` builds one map from the chunks of every `historical` and the
+   `current` map in the evidence database, the record of the newest map winning per chunk start,
+   and reads every cataloged state through it with the engine's own `recover_roots`. It is
+   labelled as an emulation of the design research.md §12 describes, not mbkn's code. A
+   `--maps merged` option was not added: btrfska never merges maps (scan/chunkmaps.py), a
+   reading known to be wrong in the case under test does not belong among the tool's choices,
+   and the experiment needs nothing the engine does not already export.
+3. **Nothing in `src/` changes, and no schema change.** If the experiment shows a defect in the
+   per-generation reading, the fix is a separate pull request.
+
+*Definition of done.* Both rows in `corpus/manifest.tsv`, a fresh clone runs `./setup.sh`. On
+`m5_reuse`, tested relative to the image and its log: two accepted chunks of different maps
+cover one logical address with different stripes; the `dev_extents` map rejects that address;
+`recover --maps own` gives the full version of `b.bin` with the logged SHA-256 and notes that a
+newer map gives the address to another chunk. On `m5_reuse_same`: the address is missing from a
+map between two maps that place it identically. EXP-010 registered and committed before any
+file is read through any map, five builds per scenario, median and range, reported either way.
+
+**M5f status 2026-10-07: done** (catalog.md, M5f entry; EXP-010; `tests/test_reuse.py`). Every
+registered prediction held in 5 of 5 builds of each scenario, with no spread: on `m5_reuse` both
+full versions of `b.bin` read hash-exact through their own map and wrong, with every extent
+placed, through the merged map; outside `b.bin` the two readings agree on every artifact, and on
+`m5_reuse_same` on all of them. Two findings go on: a `duplicate` artifact does not repeat the
+reuse note of the artifact it points at, and an overwrite inside a chunk that survives (the
+control's `z.bin`) or under unchanged placement is invisible to every map, which leaves it to M6.
+
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.
@@ -1823,6 +1867,92 @@ the btrfscue comparison, which waits for M7's baseline builds.
   - the detector finds every planted technique on the planted images and
     reports the hide-and-seek images' techniques;
   - false-positive rate measured on clean corpus images (EXP record).
+
+**M6 is built as features, the first being M6a** (issue #49), because the confidence tiers of M6c
+need its verdicts: the risk table says content is Confirmed only by a data-checksum match.
+
+**M6a: verify recovered content against EXTENT_CSUM** (design fixed 2026-10-07, before
+implementation).
+
+*What it is.* Every data extent that `recover` or `cat` reads from disk is checked, sector by
+sector, against the data checksums of a csum tree, and the outcome is recorded per extent and per
+artifact.
+1. **What is checked, as the kernel checks it.** The csum tree (tree 7) holds EXTENT_CSUM items,
+   key (EXTENT_CSUM_OBJECTID -10, 128, logical address), each an array of one checksum per sector
+   (btrfs_tree.h:104, :192, :1130), of the type the superblock names (all four: `csum.py`). A read
+   looks up one checksum per sector of the logical range it reads (file-item.c:346-485
+   `btrfs_lookup_bio_sums`, :277-339 `search_csum_tree`) and compares each sector
+   (inode.c:3538-3578 `btrfs_data_csum_ok`). An uncompressed extent is checked over the sectors it
+   supplies, `[disk_bytenr + offset, + num_bytes)`; a compressed one over its whole on-disk extent
+   before decoding (compression.c:527, the read of `disk_num_bytes`). An inode with the NODATASUM
+   flag (btrfs_tree.h:422) is not looked up (file-item.c:360). Inline extents, prealloc extents
+   and holes have no data checksum (their bytes are in a checksummed tree block, or are zeros).
+2. **Which csum tree.** The one of the state the file is recovered from, where it survives: the
+   tree 7 that the state's root tree names (`state_trees`), walked in the database. Then the
+   current one. A csum tree walked without a gap is *complete*: when it has no checksum for a
+   sector, that absence is final and no later tree is asked (a later tree may hold a checksum of
+   other data written to the same address). One with a gap, or one that is not there, passes the
+   sector on. A log tree is asked first for its own EXTENT_CSUM items (tree-log.c:5023
+   `log_extent_csums`; never complete, since it logs only what changed), then its base state's
+   tree, then the current one. A leaf or fragment without a state asks the oldest cataloged state
+   not older than its generation (the first commit that could hold the extent's checksums), then
+   the current one. `cat` uses the same rule through the image: the csum tree of the root set
+   asked for (a backup slot's `csum_root`, the current ROOT_ITEM 7), then the current one; a
+   `bytenr:` root asks the current one only. Every verdict names the trees that decided it.
+3. **Verdicts.** Per extent: `match` (every sector has a checksum and matches), `mismatch` (some
+   sector does not; their addresses are listed), `partial_match` (no sector fails, some have no
+   checksum), `no_csum` (no sector has one, and a complete tree says so; or the extent has none by
+   nature, with a `reason`: `inline`, `prealloc`, `hole`, `implicit_hole`, `nodatasum`),
+   `unavailable` (no sector has one and no complete tree was there to say there is none; or the
+   extent is misaligned, which the tree checker rejects). An extent that could not be read gets
+   none. Per artifact: `mismatch` when any data extent mismatches, `match` when every data extent
+   matches, `partial_match` when some match and others do not decide, then `unavailable`, then
+   `no_csum` (inline-only files included). `partial_match` is not in the ticket's list: a file
+   half covered by checksums is not confirmed, and calling it `match` would overstate.
+4. **Mirrors.** DUP and RAID1 copies are judged by the checksum per sector, as the kernel's read
+   repair does (bio.c:302-341 and :176-230): when the copy used fails and another copy matches,
+   that copy's sector is used and listed under `repaired`. When none matches, the first copy's
+   bytes stay and the sector is a mismatch.
+5. **Hostile input.** The csum size comes from the superblock's csum type. An EXTENT_CSUM item
+   whose key offset is not sector-aligned, whose size is not a multiple of the csum size or is
+   zero, or whose range overflows u64 is skipped and reported (tree-checker.c:365-405). Items that
+   overlap are kept: a sector with two different checksums is a `conflict`, and data matching
+   either counts as a match with the conflict reported. The index is built once per tree and
+   looked up by bisection; nothing is allocated from an item's claims beyond its own bytes.
+6. **Records.** Schema version 8: `artifacts.csum_verdict` and `artifacts.csum_sources`,
+   `provenance.csum_verdict`, and the full check (`csum` with sectors, matched, mismatched
+   addresses, repaired copies, sources) inside `provenance.read_record` and the `cat` extent
+   record. `manifest.jsonl` carries `csum_verdict` and `csum_sources`; the run summary counts
+   artifacts per source kind and verdict.
+
+*Corpus.* `m6_datacsum`: data and metadata DUP, crc32c; a regular file, an inline file, a prealloc
+file, and, after `mount -o remount,nodatasum`, a file without data checksums, each with its
+SHA-256 in the log. `m6_datacsum_flipped` (`corpus/mutate.py flip-data`): one byte inverted in the
+first sector of one file on one mirror (repairable), and of another file on both mirrors (a
+mismatch). The corpus scripts change, so a fresh clone runs `./setup.sh`.
+
+*Definition of done.*
+- on every corpus image of every csum type (crc32c, xxhash, sha256, blake2b) and compression (zlib,
+  lzo), every file of the current state that reads completely is `match`;
+- on `m6_datacsum`: the nodatasum file is `no_csum` with reason `nodatasum`, the inline and the
+  prealloc files `no_csum`; on `m6_datacsum_flipped` the one-mirror file is `match`, complete and
+  hash-exact, with its repaired sector listed, and the two-mirror file is `mismatch` naming that
+  sector;
+- synthetic: a forged mismatch, a divergent mirror picked by the checksum, a csum tree with a gap
+  (`unavailable`, then the fallback), a complete tree without the checksum (`no_csum`, no
+  fallback), hostile EXTENT_CSUM items (misaligned, bad size, overlapping, conflicting) without a
+  crash;
+- README and evidence-db.md document every new key and column; EXP-013 counts the verdicts per
+  source kind on the corpus, with a committed script and the prediction registered first.
+
+**M6a status 2026-10-07: done** (catalog.md, M6a entry; `tests/test_datacsum.py`,
+`tests/test_datacsum_images.py`; EXP-013). Each bullet of the definition of done is a test. One
+thing the design did not foresee: a sector that holds the end of a file can be written again past
+the end by a later file at the same address, and then fails its checksum while the file's bytes
+are intact. The kernel zeroes the rest of that sector before it checksums it
+(extent_io.c:1857-1858), so the sector is also tried with those bytes zeroed and reported as
+`tail_rewritten` (ten sectors on `m4_deep`). Only the sectors that hold the file's bytes are
+checked; an extent that lies wholly past the inode's size is not checked at all.
 
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
 - Corpus generator = `corpus/vm/` scaled up (already in use since M1):
@@ -2214,6 +2344,35 @@ one run of 15 (365/353/18/828), the async and sync rows never.
   - E-fp: discovery false-positive rate on forged images;
   - E-raid: RAID1, RAID1C3, RAID10 and RAID5/6 profiles;
   - E-csum; E-tiers (if C4 is claimed); E-perf; E-robust.
+- **G13 records: four numbers without a record** (planned 2026-10-07, branch
+  `feature/g13-records`, issue #56; `paper-draft.md` gap G13). Four numbers the
+  paper uses were deterministic results of tests or of a harness, with no EXP
+  record and no script that regenerates them as a table. Each gets a committed
+  script under `experiments/` and a record in the §7 template. EXP-009 to
+  EXP-012 are reserved for paper experiments and EXP-013 is taken by another
+  branch, so these are EXP-014 to EXP-017:
+  - EXP-014, LZO bit flips: `experiments/exp014.py` draws the bit-flip corpus
+    of `tests/oracle/lzo_hostile.py` (seeds 1–5, 300 streams per seed) and
+    reports, per seed and decoder (btrfska, lzallright, dissect.util pure
+    Python and native), how many flipped streams decode to wrong bytes without
+    an error, and on how many streams the decoders return the same bytes;
+  - EXP-015, the two orphan definitions on `sandbox.img`:
+    `experiments/exp015.py` cross-tabulates the reachability classes against
+    the prototype's generation rule and lists every block where they disagree;
+  - EXP-016, oracle file reads: `experiments/exp016.py` compares every file
+    read of every root set with dissect.btrfs on every corpus image, and
+    reports per image and codec the reads compared, equal and failed;
+  - EXP-017, the foreign mirror: `experiments/exp017.py` applies btrfska's
+    selection, generation alone and the kernel's mirror-0 rule to every
+    image's superblock copies, and replays the chunk-root read of the copy
+    generation alone would pick.
+
+  *Definition of done.* Four scripts and four records; each record states that
+  its images are fixed files, so one run is deterministic for the image hash;
+  every number that differs from what `paper-draft.md` or this plan says is
+  reported as found and the documents are corrected, never the reverse; the
+  scripts have tests that assert claims relative to the image read; the G13 row
+  of `paper-draft.md` and its traceability rows point to the records.
 - **Corpus statement.** Every record and the paper state the corpus size
   (images per cell and in total, sizes, regenerations) and point to each
   image's operations log in the manifest.
@@ -2226,7 +2385,7 @@ one run of 15 (365/353/18/828), the async and sync rows never.
 | Beyond Carving team ships their future work first (code repo created, still empty) | M4/M5 prototyped; watch repo; publish corpus fast (C7: no comparable image corpus found, research.md §5.1) |
 | Our own parsing, extent-read or LZO/stream code has bugs a mature library would not | Differential tests vs `dump-tree`, dissect.btrfs streams, `lzallright` and guest SHA-256s; property tests on hostile input; csum-type and compression images from M1; §3.5 fallback ladder (lzallright at runtime, then dissect.btrfs at runtime with an AGPL relicence) |
 | dissect.btrfs (test oracle) drifts or is abandoned | Pinned `1.10.*` in the `dev` group; guest SHA-256s and `dump-tree` are independent oracles, so losing it costs one cross-check, not a runtime feature |
-| Decoding "succeeds" on corrupted compressed data (LZO has no integrity check: 218–231 of 300 bit-flipped 4 KiB streams per seed decoded to wrong bytes in btrfska, lzallright and dissect.util native, §3.5) | Decode success never raises confidence; content is Confirmed only by a data-checksum match (M6); decoder errors are recorded, not hidden |
+| Decoding "succeeds" on corrupted compressed data (LZO has no integrity check: 218–231 of 300 bit-flipped 4 KiB streams per seed decoded to wrong bytes in btrfska, lzallright and dissect.util native, §3.5; EXP-014) | Decode success never raises confidence; content is Confirmed only by a data-checksum match (M6); decoder errors are recorded, not hidden |
 | Licence ambiguity from test-only AGPL use | Oracle confined to the `dev` group and `tests/oracle/`; import-boundary test on `src/`; sdist contents checked before release (§3.3) |
 | New format features mis-read (remap tree, RST, fscrypt) | Incompat gate refuses unknown/unsupported bits (M1); later research items |
 | Discard destroys evidence on real media (sync: ~91 % stale metadata gone) | Discard axis in corpus + observed-discard input to overwrite-risk score and report caveat |

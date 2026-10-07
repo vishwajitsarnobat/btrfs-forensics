@@ -31,6 +31,12 @@ a refused run leaves no file behind. Unchanged all-zero regions stay sparse.
       ROOT_ITEM of tree TREE: afterwards no root tree of any generation names that tree, and
       only its own blocks can give it back (plan.md M5e-2). The source needs a deleted
       subvolume whose tree blocks survive (m5_delsubvol, tree 257).
+  uv run python corpus/mutate.py SRC DST flip-data NAME MIRROR [NAME MIRROR ...]
+      invert the first byte of the first data sector of the file NAME in the top directory of the
+      current fs tree (its first uncompressed regular extent), in mirror MIRROR (1-based) or in
+      `all` mirrors; the data checksum is left stale (plan.md M6a: one mirror is a sector the
+      checksum repairs from the other copy, all mirrors a mismatch). The source needs those files
+      in a data chunk with copies (m6_datacsum, data DUP).
 """
 
 import argparse
@@ -40,7 +46,7 @@ import sys
 from pathlib import Path
 
 from btrfska.scan.roots import discover_image
-from btrfska.substrate import csum, ondisk
+from btrfska.substrate import csum, items, ondisk
 from btrfska.substrate import superblock as sb
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
@@ -213,6 +219,40 @@ def lose_root_items(path: Path, tree_id: int) -> tuple[dict[int, bytes], str]:
     return patches, f"root-tree leaves that named tree {tree_id}: {', '.join(leaves)}"
 
 
+def flip_data(path: Path, targets: list[tuple[str, str]]) -> tuple[dict[int, bytes], str]:
+    """Patches that invert the first byte of each named file's first data sector, in the mirrors
+    asked for. The file must be in the top directory of the current fs tree."""
+    key = ondisk.ITEM_KEYS
+    with open_image(path) as img:
+        fs = open_filesystem(img)
+        root = resolve_tree(fs.reader, find_root_set(fs.fields, "current"), "fs")
+        names, extents = {}, {}
+        for visit in walk(fs.reader, root.bytenr, root.expect()):
+            for item in visit.node.items if visit.node.valid and visit.node.level == 0 else ():
+                if item.key.type == key["INODE_REF"] and item.key.offset == 256:
+                    for ref in items.inode_refs(item.data):
+                        names[ref["name"]] = item.key.objectid
+                elif item.key.type == key["EXTENT_DATA"] and item.key.objectid not in extents:
+                    extent = items.file_extent(item.data)
+                    if (extent["type"] == ondisk.FILE_EXTENT_REG and extent["disk_bytenr"]
+                            and not extent["compression"]):  # fmt: skip
+                        extents[item.key.objectid] = extent["disk_bytenr"] + extent["offset"]
+        patches, done = {}, []
+        for name, mirror in targets:
+            if name not in names or names[name] not in extents:
+                sys.exit(f"{path}: no file {name!r} with an uncompressed extent at the top")
+            logical = extents[names[name]]
+            copies = fs.chunk_map.copies(logical, 1)
+            chosen = copies if mirror == "all" else [c for c in copies if str(c.mirror) == mirror]
+            if not chosen:
+                sys.exit(f"{path}: {name!r} at logical {logical} has no mirror {mirror}")
+            for copy in chosen:
+                patches[copy.physical] = bytes([img.mmap[copy.physical] ^ 0xFF])
+            mirrors = ", ".join(str(c.mirror) for c in chosen)
+            done.append(f"{name} at logical {logical}, mirror {mirrors} of {len(copies)}")
+    return patches, "data bytes inverted: " + "; ".join(done)
+
+
 def check_patches(size: int, patches: dict[int, bytes]) -> None:
     for offset, block in patches.items():
         if offset < 0 or offset + len(block) > size:
@@ -245,7 +285,7 @@ def checked_output(src: Path, dst: Path) -> Path:
     if dst.name == "sandbox.img":
         sys.exit("refusing to write a file named sandbox.img")
     resolved = dst.parent.resolve() / dst.name
-    if not resolved.is_relative_to(IMAGES):
+    if not resolved.is_relative_to(IMAGES.resolve()):  # images/ may be a symlink
         sys.exit(f"output must be under images/ ({IMAGES})")
     if resolved == src.resolve():
         sys.exit("output must differ from the source")
@@ -269,6 +309,8 @@ def main(argv: list[str] | None = None) -> None:
     ops.add_parser("lose-root-node")
     items = ops.add_parser("lose-root-items")
     items.add_argument("tree", type=int, metavar="TREE")
+    data = ops.add_parser("flip-data")
+    data.add_argument("targets", nargs="+", metavar="NAME MIRROR")
     plant = ops.add_parser("plant-slack")
     plant.add_argument("--message", default=MESSAGE)
     args = parser.parse_args(argv)
@@ -288,6 +330,11 @@ def main(argv: list[str] | None = None) -> None:
             patches, note = lose_root_node(args.src)
         elif args.op == "lose-root-items":
             patches, note = lose_root_items(args.src, args.tree)
+        elif args.op == "flip-data":
+            if len(args.targets) % 2:
+                sys.exit("flip-data takes pairs of NAME MIRROR")
+            pairs = list(zip(args.targets[::2], args.targets[1::2], strict=True))
+            patches, note = flip_data(args.src, pairs)
         else:
             patches = flip_bytes(src, size, args.offsets)
         check_patches(size, patches)
@@ -295,7 +342,7 @@ def main(argv: list[str] | None = None) -> None:
         with open(dst, "xb") as out:
             write_patched(src, out, size, patches)
     print(f"{dst}: {args.op} {' '.join(str(o) for o in patches)}")
-    if args.op in ("lose-root-node", "lose-root-items"):
+    if args.op in ("lose-root-node", "lose-root-items", "flip-data"):
         print(note)
 
 

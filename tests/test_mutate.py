@@ -273,3 +273,27 @@ def test_lose_root_items_flips_one_byte_per_copy_and_never_touches_the_current_r
             fields = sb.read_superblock(new).selected.fields
             assert sb.read_superblock(old).selected.fields["root"] == fields["root"]
         assert "root-tree leaves that named tree 257" in result.stdout
+
+
+def test_flip_data_refuses_a_file_it_cannot_find_and_leaves_no_file():
+    with scratch_dir("test_mutate_") as d:
+        result = run(REPO_ROOT / "sandbox.img", d / "out.img", "flip-data", "nothing.txt", "1")
+        assert result.returncode != 0 and "no file 'nothing.txt'" in result.stderr
+        assert not (d / "out.img").exists()
+        result = run(REPO_ROOT / "sandbox.img", d / "out.img", "flip-data", "odd")
+        assert result.returncode != 0 and "pairs of NAME MIRROR" in result.stderr
+
+
+def test_flip_data_inverts_one_byte_per_mirror_asked_for():
+    src = REPO_ROOT / "images" / "scenarios" / "m6_datacsum.img"
+    if not src.exists():
+        pytest.skip("m6_datacsum.img absent: build it with corpus/build.py")
+    with scratch_dir("test_mutate_") as d:
+        result = run(src, d / "out.img", "flip-data", "repairable.txt", "2", "damaged.txt", "all")
+        assert result.returncode == 0, result.stderr
+        offsets = [int(word) for word in result.stdout.splitlines()[0].split()[2:]]
+        assert len(offsets) == 3  # one mirror of one file, both of the other
+        with open_image(src) as old, open_image(d / "out.img") as new:
+            for offset in offsets:
+                assert old.mmap[offset] ^ 0xFF == new.mmap[offset]
+        assert "repairable.txt at logical" in result.stdout and "mirror 2 of 2" in result.stdout

@@ -19,7 +19,15 @@ btrfs_get_extent):
 - implicit_hole: a range no item covers, zeros. Normal with the NO_HOLES feature; without it the
   gap is reported as a problem.
 Content is clipped to i_size; clipping is reported only when an extent reaches past the sector
-holding the end of the file. Data checksums are not verified here (M6).
+holding the end of the file.
+
+Data checksums (plan.md M6a): given `csums` (datacsum.Csums), every extent read from disk is
+checked sector by sector before any of it is used: an uncompressed extent over the sectors it
+supplies, a compressed one over its whole on-disk extent (compression.c:527 reads
+disk_num_bytes; the checksums cover those bytes). `ExtentRead.csum` holds the verdict. A sector
+whose first readable copy fails and another copy matches is taken from that copy, as the kernel's
+read repair does (bio.c:302-341, :176-230). Without `csums` nothing is checked and `csum` is None;
+an inode with NODATASUM is not looked up (file-item.c:360).
 
 Hostile lengths are bounded before any read or allocation:
 - compressed extents: ram_bytes and disk_num_bytes in (0, 128 KiB] (BTRFS_MAX_UNCOMPRESSED and
@@ -46,6 +54,14 @@ from dataclasses import asdict, dataclass, field, replace
 
 from btrfska.substrate import compress, items, ondisk
 from btrfska.substrate.chunks import MappingError
+from btrfska.substrate.datacsum import (
+    MAX_LISTED,
+    Csums,
+    DataCsum,
+    artifact_verdict,
+    verdict_of,
+    without_lookup,
+)
 from btrfska.substrate.node import Item, NodeReader
 from btrfska.substrate.roots import TreeRoot
 from btrfska.substrate.tree import walk
@@ -99,6 +115,7 @@ class ExtentRead:
     error_kind: str | None = None
     error_detail: str = ""
     problems: tuple[str, ...] = ()  # findings that do not make the content wrong
+    csum: DataCsum | None = None  # the data-checksum verdict; None when nothing was checked
 
 
 def _same(img, first: int, second: int, size: int) -> bool:
@@ -182,42 +199,159 @@ def _pieces(img, segments: list[tuple[int, int, int]]) -> Iterator[bytes]:
             yield bytes(img.mmap[physical + offset : physical + offset + step])
 
 
-def _read(reader: NodeReader, logical: int, length: int):
-    """(map source, bytes or None, ranges, problems, (error kind, detail) or None)."""
+@dataclass(frozen=True)
+class Verify:
+    """How data checksums are verified: against `csums`; `nodatasum` is the inode's NODATASUM
+    flag, `size` its i_size (for the sector that holds the end of the file)."""
+
+    csums: Csums
+    nodatasum: bool = False
+    size: int | None = None
+
+
+def _verify(reader: NodeReader, csums: Csums, logical: int, ranges, segments, within: int):
+    """(check, segments, problems): the data checksums of a mapped range, sector by sector.
+
+    Only the sectors that hold the first `within` bytes are checked: the rest lies past the end
+    of the file and is not read as the file's. The segments returned are the ones to read: every
+    sector whose first readable copy fails and another copy matches is taken from that copy
+    (bio.c:302-341, :176-230). When no copy matches, the first copy's bytes stay and the sector is
+    a mismatch. When the end of the file falls inside a sector, the kernel zeroes the rest of that
+    sector before it computes the checksum (extent_io.c:1857-1858): a sector that matches only
+    with those bytes zeroed matches for the file's bytes, and was written again past the end since
+    (`tail_rewritten`).
+    """
+    sector, img = csums.sectorsize, reader.img
+    if logical % sector or sum(piece.length for piece in ranges) % sector:
+        return without_lookup("misaligned"), segments, ()
+    eof = logical + within
+    count = {"matched": 0, "mismatched": 0, "uncovered": 0, "conflicts": 0, "tail": 0}
+    undecided, bad, repaired, repaired_count, sources, chosen = 0, [], [], 0, {}, []
+
+    def fits(address: int, data, sums) -> str | None:
+        if csums.compute(data) in sums:
+            return "whole"
+        if address < eof < address + sector:
+            kept = eof - address
+            if csums.compute(bytes(data[:kept]) + bytes(sector - kept)) in sums:
+                return "tail"
+        return None
+
+    for piece, (physical, size, devid) in zip(ranges, segments, strict=True):
+        others = [copy for copy in piece.copies if copy.readable and not copy.used]
+        for window in range(0, size, _WINDOW):
+            data = img.mmap[physical + window : physical + min(size, window + _WINDOW)]
+            for at in range(0, len(data), sector):
+                offset, use = window + at, (physical + window + at, devid)
+                address = piece.logical + offset
+                tree, sums = csums.lookup(address) if address < eof else (None, None)
+                if sums is None:
+                    pass  # past the end of the file: not checked
+                elif not sums:
+                    count["uncovered"] += 1
+                    undecided += tree is None
+                else:
+                    sources[tree.source] = None
+                    count["conflicts"] += len(sums) > 1
+                    found = fits(address, data[at : at + sector], sums)
+                    for copy in others if found is None else ():
+                        where = copy.physical + offset
+                        if found := fits(address, img.mmap[where : where + sector], sums):
+                            repaired_count += 1
+                            if len(repaired) < MAX_LISTED:
+                                repaired.append((address, copy.mirror))
+                            use = (where, copy.devid)
+                            break
+                    if found is None:
+                        count["mismatched"] += 1
+                        if len(bad) < MAX_LISTED:
+                            bad.append(address)
+                    else:
+                        count["matched"] += 1
+                        count["tail"] += found == "tail"
+                if chosen and chosen[-1][2] == use[1] and sum(chosen[-1][:2]) == use[0]:
+                    chosen[-1] = (chosen[-1][0], chosen[-1][1] + sector, use[1])
+                else:
+                    chosen.append((use[0], sector, use[1]))
+    matched, mismatched, uncovered = count["matched"], count["mismatched"], count["uncovered"]
+    sectors = matched + mismatched + uncovered
+    check = DataCsum(
+        verdict_of(matched, mismatched, sectors, undecided), sources=tuple(sources),
+        sectors=sectors, matched=matched, mismatched=mismatched, uncovered=uncovered,
+        bad_sectors=tuple(bad), repaired=tuple(repaired), repaired_count=repaired_count,
+        conflicts=count["conflicts"], tail_rewritten=count["tail"],
+    )  # fmt: skip
+    problems = []
+    if mismatched:
+        problems.append(
+            f"{mismatched} of {sectors} sectors do not match their data checksum, the first at "
+            f"logical {bad[0]}"
+        )
+    if repaired_count:
+        problems.append(
+            f"{repaired_count} sectors fail the data checksum on the first copy and were read "
+            f"from another copy that matches, the first at logical {repaired[0][0]} (mirror "
+            f"{repaired[0][1]})"
+        )
+    if count["tail"]:
+        problems.append(
+            "the sector holding the end of the file matches its data checksum only with the bytes "
+            "past the end zeroed: they were written again after the checksum was taken"
+        )
+    return check, chosen if repaired_count else segments, tuple(problems)
+
+
+def _checked(reader: NodeReader, logical: int, length: int, verify: Verify | None,
+             within: int | None = None):  # fmt: skip
+    """(map source, ranges, segments, problems, error or None, check) for a range of data;
+    `within` is how many of its bytes hold file content (None: all). Nothing of a range that
+    holds none is checked."""
     source, ranges, segments, problems, error = _map(reader, logical, length)
-    if error:
-        return source, None, ranges, problems, error
-    return source, b"".join(_pieces(reader.img, segments)), ranges, problems, None
+    within = length if within is None else min(within, length)
+    check = None
+    if error is None and verify is not None and within > 0:
+        if verify.nodatasum:
+            check = without_lookup("nodatasum")
+        else:
+            check, segments, found = _verify(
+                reader, verify.csums, logical, ranges, segments, within
+            )
+            problems += found
+    return source, ranges, segments, problems, error, check
 
 
 def _nonzero(data: bytes) -> int:
     return len(data) - data.count(0)
 
 
-def read_extent(reader: NodeReader, item: Item, leaf: int) -> tuple[ExtentRead, bytes | None]:
-    """One EXTENT_DATA item: its record and its bytes (None for zeros or on error)."""
-    record, data, segments = _extent(reader, item, leaf)
+def read_extent(
+    reader: NodeReader, item: Item, leaf: int, verify: Verify | None = None
+) -> tuple[ExtentRead, bytes | None]:
+    """One EXTENT_DATA item: its record and its bytes (None for zeros or on error). With `verify`
+    the data checksums are verified (module docstring)."""
+    record, data, segments = _extent(reader, item, leaf, verify)
     if segments is not None:
         data = b"".join(_pieces(reader.img, segments))
     return record, data
 
 
 def stream_extent(
-    reader: NodeReader, item: Item, leaf: int
+    reader: NodeReader, item: Item, leaf: int, verify: Verify | None = None
 ) -> tuple[ExtentRead, Iterator[bytes] | None]:
     """As `read_extent`, with the bytes as an iterator of pieces of at most 1 MiB.
 
     The record is complete before the first piece is read: an uncompressed extent is mapped in
     full first, so iterating cannot fail. A compressed or inline extent is one piece (at most
-    128 KiB and one sector). None for zeros and on error, as in `read_extent`.
+    128 KiB and one sector). None for zeros and on error, as in `read_extent`. The data checksums
+    are verified before the record is returned, so iterating reads the copies they chose.
     """
-    record, data, segments = _extent(reader, item, leaf)
+    record, data, segments = _extent(reader, item, leaf, verify)
     if segments is not None:
         return record, _pieces(reader.img, segments)
     return record, None if data is None else iter((data,))
 
 
-def _extent(reader: NodeReader, item: Item, leaf: int):
+def _extent(reader: NodeReader, item: Item, leaf: int, verify: Verify | None):
     """(record, bytes or None, segments or None): segments for an uncompressed regular extent."""
     sectorsize = reader.ctx.sectorsize
     where = {"file_offset": item.key.offset, "leaf": leaf, "slot": item.slot}
@@ -256,11 +390,14 @@ def _extent(reader: NodeReader, item: Item, leaf: int):
         return failed("unsupported_compression", f"compression type {code}")
 
     if kind == "inline":
-        return _inline(item, fe, info, length, sectorsize, failed)
-    if kind == "prealloc":
-        return ExtentRead("prealloc", length=length, **info), None, None
-    if fe["disk_bytenr"] == 0:
-        return ExtentRead("hole", length=length, **info), None, None
+        record, data, segments = _inline(item, fe, info, length, sectorsize, failed)
+        if verify is not None and record.error_kind is None:
+            record = replace(record, csum=without_lookup("inline"))
+        return record, data, segments
+    if kind == "prealloc" or fe["disk_bytenr"] == 0:
+        kind = "hole" if kind == "regular" else kind
+        check = None if verify is None else without_lookup(kind)
+        return ExtentRead(kind, length=length, csum=check, **info), None, None
 
     offset, ram, disk_bytes = fe["offset"], fe["ram_bytes"], fe["disk_num_bytes"]
     if code == compress.NONE:
@@ -272,12 +409,16 @@ def _extent(reader: NodeReader, item: Item, leaf: int):
         if offset + length > disk_bytes:
             return failed("invalid_extent", f"offset {offset} + num_bytes {length} > "
                           f"disk_num_bytes {disk_bytes}")  # fmt: skip
-        info["chunk_map"], ranges, segments, problems, error = _map(
-            reader, fe["disk_bytenr"] + offset, length
+        within = None  # bytes of the extent inside the file; None when i_size is not known
+        if verify is not None and verify.size is not None:
+            within = verify.size - item.key.offset
+        info["chunk_map"], ranges, segments, problems, error, check = _checked(
+            reader, fe["disk_bytenr"] + offset, length, verify, within
         )
         if error:
             return failed(*error, ranges=ranges, problems=problems)
-        record = ExtentRead("regular", length=length, ranges=ranges, problems=problems, **info)
+        record = ExtentRead("regular", length=length, ranges=ranges, problems=problems,
+                            csum=check, **info)  # fmt: skip
         return record, None, segments
 
     if not 0 < ram <= compress.BTRFS_MAX_UNCOMPRESSED:
@@ -288,9 +429,13 @@ def _extent(reader: NodeReader, item: Item, leaf: int):
         )
     if offset + length > ram:
         return failed("invalid_extent", f"offset {offset} + num_bytes {length} > ram_bytes {ram}")
-    info["chunk_map"], raw, ranges, problems, error = _read(reader, fe["disk_bytenr"], disk_bytes)
+    info["chunk_map"], ranges, segments, problems, error, check = _checked(
+        reader, fe["disk_bytenr"], disk_bytes, verify
+    )
     if error:
         return failed(*error, ranges=ranges, problems=problems)
+    info["csum"] = check
+    raw = b"".join(_pieces(reader.img, segments))
     try:
         decoded = compress.decompress(code, raw, min_out=ram, max_out=ram, sectorsize=sectorsize)
     except compress.DecodeError as exc:
@@ -368,6 +513,7 @@ class FileRead:
                 remaining -= step
 
     def record(self) -> dict:
+        verdict, sources = artifact_verdict(e.csum for e in self.extents)
         return {
             "root": asdict(self.root),
             "inode": self.inode,
@@ -376,11 +522,16 @@ class FileRead:
             "extents": len(self.extents),
             "errors": list(self.errors),
             "problems": list(self.problems),
+            "csum": verdict,
+            "csum_sources": sources,
         }
 
 
-def read_file(reader: NodeReader, root: TreeRoot, inode: int, *, no_holes: bool) -> FileRead:
-    """Read `inode` from the fs tree at `root`; `no_holes` is the superblock's NO_HOLES bit.
+def read_file(
+    reader: NodeReader, root: TreeRoot, inode: int, *, no_holes: bool, csums: Csums | None = None
+) -> FileRead:
+    """Read `inode` from the fs tree at `root`; `no_holes` is the superblock's NO_HOLES bit, and
+    `csums`, when given, the csum trees the data is verified against (module docstring).
 
     The content is held fully in memory: every non-zero extent's bytes are kept in the `FileRead`,
     and each is built from a read buffer first, so the peak is about twice the file size (zero
@@ -409,7 +560,9 @@ def read_file(reader: NodeReader, root: TreeRoot, inode: int, *, no_holes: bool)
     elif stat.S_ISDIR(inode_fields["mode"]):
         errors.append(f"inode {inode} is a directory")
 
-    assembly = FileAssembly(reader, found, size, no_holes=no_holes)
+    nodatasum = bool(inode_fields and inode_fields["flags"] & ondisk.INODE_NODATASUM)
+    assembly = FileAssembly(reader, found, size, no_holes=no_holes, csums=csums,
+                            nodatasum=nodatasum)  # fmt: skip
     extents, data = [], []
     for record, pieces in assembly:
         content = None if pieces is None else b"".join(pieces)
@@ -437,24 +590,28 @@ class FileAssembly:
     or None when the inode item is missing. Implicit holes are inserted, content is clipped to
     i_size, overlaps are errors. `errors` and `problems` are complete once iteration has ended.
     Only one extent's record is alive at a time, and an uncompressed extent's bytes arrive in
-    pieces, so a consumer that writes as it iterates never holds a file in memory.
+    pieces, so a consumer that writes as it iterates never holds a file in memory. With `csums`
+    every extent carries its data-checksum verdict; `nodatasum` is the inode's NODATASUM flag.
     """
 
-    def __init__(self, reader: NodeReader, found, size: int | None, *, no_holes: bool) -> None:
+    def __init__(self, reader: NodeReader, found, size: int | None, *, no_holes: bool,
+                 csums: Csums | None = None, nodatasum: bool = False) -> None:  # fmt: skip
         self.reader, self.found, self.size, self.no_holes = reader, found, size, no_holes
+        self.verify = None if csums is None else Verify(csums, nodatasum, size)
         self.errors: list[str] = []
         self.problems: list[str] = []
 
     def _hole(self, start: int, end: int) -> tuple[ExtentRead, None]:
         if not self.no_holes:
             self.problems.append(f"no extent item covers [{start}, {end}) and NO_HOLES is not set")
-        return ExtentRead("implicit_hole", file_offset=start, length=end - start), None
+        check = None if self.verify is None else without_lookup("implicit_hole")
+        return ExtentRead("implicit_hole", file_offset=start, length=end - start, csum=check), None
 
     def __iter__(self) -> Iterator[tuple[ExtentRead, Iterator[bytes] | None]]:
         size, pos = self.size, 0
         sectorsize = self.reader.ctx.sectorsize
         for item, leaf in self.found:
-            record, pieces = stream_extent(self.reader, item, leaf)
+            record, pieces = stream_extent(self.reader, item, leaf, self.verify)
             start, end = record.file_offset, record.file_offset + record.length
             if start < pos:
                 self.errors.append(
