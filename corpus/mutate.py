@@ -41,7 +41,8 @@ a refused run leaves no file behind. Unchanged all-zero regions stay sparse.
 Hiding techniques (plan.md M6d), each with the checksums recomputed in the source's csum type:
   uv run python corpus/mutate.py SRC DST plant-sb-reserved [--field FIELD] [--message TEXT]
       TEXT in the superblock's reserved[199] (0x264), or in a feature-gated FIELD
-      (metadata_uuid, nr_global_roots, remap_root) whose incompat flag is clear, every copy
+      (metadata_uuid, nr_global_roots, remap_root) whose incompat flag is clear, or in the
+      padding of a backup root slot (backupN_unused_64, backupN_unused_8), every copy
   uv run python corpus/mutate.py SRC DST plant-sb-padding [--message TEXT]
       TEXT in the superblock's padding (0xDCB), every copy
   uv run python corpus/mutate.py SRC DST plant-chunk-array-slack [--message TEXT]
@@ -49,7 +50,7 @@ Hiding techniques (plan.md M6d), each with the checksums recomputed in the sourc
   uv run python corpus/mutate.py SRC DST plant-backup-roots
       the oldest backup root slot copied over the slot of the superblock's generation
   uv run python corpus/mutate.py SRC DST plant-pre-sb [--message TEXT] [--offset N]
-      TEXT in the first 64 KiB (no checksum covers it)
+      TEXT at offset N of the first 64 KiB, or of the rest of the first MiB (no checksum)
   uv run python corpus/mutate.py SRC DST plant-inode-reserved [--message TEXT]
       TEXT (32 bytes) in the reserved bytes of the first regular file's INODE_ITEM
   uv run python corpus/mutate.py SRC DST plant-nsec
@@ -61,6 +62,10 @@ Hiding techniques (plan.md M6d), each with the checksums recomputed in the sourc
       its EXTENT_CSUM entry rewritten unless --keep-csum
   uv run python corpus/mutate.py SRC DST plant-device-slack [--message TEXT]
       TEXT past the last device extent, where no historical chunk was (Wani et al. 2020)
+
+The planting functions also take where to plant, and how much, as keyword arguments whose
+defaults are what the subcommands do (byte `at` of a field, the slack's `margin`, ...): EXP-021
+plants every technique at its first and last byte and at its full capacity through them.
 """
 
 import argparse
@@ -148,27 +153,40 @@ def flip_bytes(src, size: int, offsets: list[int]) -> dict[int, bytes]:
     return patches
 
 
-def plant_slack(path: Path, message: bytes) -> dict[int, bytes]:
-    """Patches that put `message` into the slack of the fs tree's root node and first leaf."""
+def slack_targets(fs, leaf_only: bool = False) -> dict:
+    """{"node": the current fs tree's root node, "leaf": its first leaf} (the leaf alone with
+    `leaf_only`), the blocks plant-slack writes into."""
+    root = resolve_tree(fs.reader, find_root_set(fs.fields, "current"), "fs")
+    targets = {}
+    for visit in walk(fs.reader, root.bytenr, root.expect()):
+        kind = "node" if visit.node.level else "leaf"
+        if visit.node.valid and kind not in targets and not (leaf_only and kind == "node"):
+            targets[kind] = visit.node
+    return targets
+
+
+def plant_slack(
+    path: Path, message: bytes, margin: int = MARGIN, from_end: bool = False,
+    leaf_only: bool = False,
+) -> dict[int, bytes]:  # fmt: skip
+    """Patches that put `message` into the slack of the fs tree's root node and first leaf (the
+    leaf alone with `leaf_only`), `margin` bytes after the slack's start, or before its end
+    with `from_end`."""
     patches = {}
     with open_image(path) as img:
         fs = open_filesystem(img)
         ctx = fs.reader.ctx
-        root = resolve_tree(fs.reader, find_root_set(fs.fields, "current"), "fs")
-        targets = {}
-        for visit in walk(fs.reader, root.bytenr, root.expect()):
-            kind = "node" if visit.node.level else "leaf"
-            if visit.node.valid and kind not in targets:
-                targets[kind] = visit.node
-        if set(targets) != {"node", "leaf"}:
+        targets = slack_targets(fs, leaf_only)
+        if set(targets) != ({"leaf"} if leaf_only else {"node", "leaf"}):
             sys.exit(f"{path}: the current fs tree has no internal node and leaf to plant in")
         for node in targets.values():
             for copy in node.copies:
                 block = bytearray(img.mmap[copy.physical : copy.physical + ctx.nodesize])
                 start, end = slack_range(block, ctx.nodesize)
-                if end - start < MARGIN + len(message):
+                if end - start < margin + len(message) or margin < 0:
                     sys.exit(f"block {node.logical}: {end - start} bytes of slack is too little")
-                block[start + MARGIN : start + MARGIN + len(message)] = message
+                first = end - margin - len(message) if from_end else start + margin
+                block[first : first + len(message)] = message
                 block[: ondisk.CSUM_SIZE] = bytes(ondisk.CSUM_SIZE)
                 digest = csum.compute(ctx.csum_type, block[ondisk.CSUM_SIZE :])
                 block[: len(digest)] = digest
@@ -290,6 +308,23 @@ SB_FIELDS = {  # superblock byte ranges a hider writes to; the gated ones need t
     "remap_root": (0x253, 0x264, "REMAP_TREE"),
     "padding": (0xDCB, 0x1000, None),
 }
+_ROOTS, _BACKUP = ondisk.SUPERBLOCK.offset("super_roots"), ondisk.ROOT_BACKUP
+for _slot in range(ondisk.NUM_BACKUP_ROOTS):  # unused_64[4] and unused_8[10] of each backup slot
+    _at = _ROOTS + _slot * _BACKUP.size
+    SB_FIELDS[f"backup{_slot}_unused_64"] = (
+        _at + _BACKUP.offset("num_devices") + 8,
+        _at + _BACKUP.offset("tree_root_level"),
+        None,
+    )
+    SB_FIELDS[f"backup{_slot}_unused_8"] = (
+        _at + _BACKUP.offset("csum_root_level") + 1,
+        _at + _BACKUP.size,
+        None,
+    )
+PRE_SB_AREAS = (  # where plant-pre-sb writes: below 1 MiB, but not sector 0 or the superblock
+    (512, ondisk.SUPER_INFO_OFFSET),
+    (ondisk.SUPER_INFO_OFFSET + ondisk.SUPER_INFO_SIZE, 1 << 20),
+)
 NOTED = ("plant-inode-reserved", "plant-nsec", "plant-string-item", "plant-file-slack",
          "plant-device-slack")  # fmt: skip
 NSEC_MESSAGE = b"\xa5hid\xa5den\xa5 in\xa5 ns"  # four distinct values, each >= 10^9
@@ -309,36 +344,57 @@ def each_superblock(src, size: int, edit) -> dict[int, bytes]:
     return patches
 
 
-def plant_sb_field(src, size: int, field: str, message: bytes) -> dict[int, bytes]:
+def plant_sb_field(src, size: int, field: str, message: bytes, at: int = 0) -> dict[int, bytes]:
+    """`message` from byte `at` of FIELD on, cut at the field's end, in every copy."""
     start, end, flag = SB_FIELDS[field]
+    if not 0 <= at < end - start:
+        sys.exit(f"byte {at} is outside {field} ({end - start} bytes)")
 
     def edit(block, fields):
         if flag and fields["incompat_flags"] & ondisk.INCOMPAT[flag]:
             sys.exit(f"incompat flag {flag} is set: {field} is in use, not spare")
-        piece = message[: end - start]
-        block[start : start + len(piece)] = piece
+        piece = message[: end - start - at]
+        block[start + at : start + at + len(piece)] = piece
 
     return each_superblock(src, size, edit)
 
 
-def plant_chunk_array_slack(src, size: int, message: bytes) -> dict[int, bytes]:
-    """`message` at the end of the 2048-byte array, behind whatever the array's tail holds."""
+def chunk_array_free(block) -> int:
+    """The first byte of the sys_chunk_array that neither the live array nor its stale tail
+    uses (relative to the array's start)."""
+    array = ondisk.SUPERBLOCK.offset("sys_chunk_array")
+    used = ondisk.SUPERBLOCK.unpack_from(block)["sys_chunk_array_size"]
+    tail = bytes(block[array + used : array + ondisk.SYSTEM_CHUNK_ARRAY_SIZE])
+    return used + len(tail.rstrip(b"\0"))
+
+
+def plant_chunk_array_slack(src, size: int, message: bytes, at: int | None = None):
+    """`message` at the end of the 2048-byte array, behind whatever the array's tail holds; or
+    from byte `at` of the array on, which must lie behind the tail."""
     array = ondisk.SUPERBLOCK.offset("sys_chunk_array")
 
     def edit(block, fields):
-        used = fields["sys_chunk_array_size"]
-        stop = array + ondisk.SYSTEM_CHUNK_ARRAY_SIZE - MARGIN
-        start = stop - len(message)
-        if start < array + 2 * used:  # leave the live array and its stale tail alone
-            sys.exit("the message does not fit behind the sys_chunk_array's tail")
+        if at is None:
+            used = fields["sys_chunk_array_size"]
+            stop = array + ondisk.SYSTEM_CHUNK_ARRAY_SIZE - MARGIN
+            start = stop - len(message)
+            if start < array + 2 * used:  # leave the live array and its stale tail alone
+                sys.exit("the message does not fit behind the sys_chunk_array's tail")
+        else:
+            free = chunk_array_free(block)
+            last = ondisk.SYSTEM_CHUNK_ARRAY_SIZE - 1
+            if at < free or at + len(message) > last + 1:
+                sys.exit(f"bytes {at}-{at + len(message) - 1} of the sys_chunk_array are not all "
+                         f"free (free from {free} to {last})")  # fmt: skip
+            start, stop = array + at, array + at + len(message)
         block[start:stop] = message
 
     return each_superblock(src, size, edit)
 
 
-def plant_backup_roots(src, size: int) -> dict[int, bytes]:
-    """Copy the oldest backup root slot over the one of the superblock's generation, as an edit
-    that rolls the array back would."""
+def plant_backup_roots(src, size: int, source: int | None = None) -> dict[int, bytes]:
+    """Copy the oldest backup root slot (or slot `source`) over the one of the superblock's
+    generation, as an edit that rolls the array back would."""
     base, length = ondisk.SUPERBLOCK.offset("super_roots"), ondisk.ROOT_BACKUP.size
 
     def edit(block, fields):
@@ -346,15 +402,19 @@ def plant_backup_roots(src, size: int) -> dict[int, bytes]:
         newest = [r for r in roots if r["tree_root_gen"] == fields["generation"]]
         if not newest or roots[0] is newest[0]:
             sys.exit("no older backup root slot to copy over the newest one")
-        old, new = base + roots[0]["slot"] * length, base + newest[0]["slot"] * length
+        slot = roots[0]["slot"] if source is None else source
+        if slot == newest[0]["slot"] or not 0 <= slot < ondisk.NUM_BACKUP_ROOTS:
+            sys.exit(f"slot {slot} is not an older backup root slot")
+        old, new = base + slot * length, base + newest[0]["slot"] * length
         block[new : new + length] = block[old : old + length]
 
     return each_superblock(src, size, edit)
 
 
 def plant_pre_sb(src, size: int, message: bytes, offset: int) -> dict[int, bytes]:
-    if not 512 <= offset <= ondisk.SUPER_INFO_OFFSET - len(message):
-        sys.exit(f"offset {offset} is not inside the first 64 KiB after sector 0")
+    if not any(lo <= offset and offset + len(message) <= hi for lo, hi in PRE_SB_AREAS):
+        sys.exit(f"offset {offset} is not inside the first 64 KiB after sector 0, nor in the "
+                 "rest of the first MiB after the primary superblock")  # fmt: skip
     return {offset: message}
 
 
@@ -392,23 +452,29 @@ def first_file_inode(fs):
     sys.exit("no subvolume of the current state has a regular file")
 
 
-def plant_inode_reserved(path: Path, message: bytes) -> tuple[dict[int, bytes], str]:
+def plant_inode_reserved(path: Path, message: bytes, at: int = 0) -> tuple[dict[int, bytes], str]:
+    """`message` from byte `at` of the 32 reserved bytes on, cut at their end."""
+    if not 0 <= at < 32:
+        sys.exit(f"byte {at} is outside the 32 reserved bytes")
     start = ondisk.INODE_ITEM.offset("sequence") + 8
+    piece = message[: 32 - at]
     with open_image(path) as img:
         fs = open_filesystem(img)
         node, item = first_file_inode(fs)
-        at = ondisk.HEADER.size + item.offset + start
+        first = ondisk.HEADER.size + item.offset + start + at
 
         def edit(block):
-            block[at : at + 32] = message[:32].ljust(32, b"\0")
+            block[first : first + len(piece)] = piece
 
         note = f"inode {item.key.objectid} in leaf {node.logical} slot {item.slot}"
         return rewrite_block(img, node, fs.reader.ctx, edit), note
 
 
-def plant_nsec(path: Path, message: bytes) -> tuple[dict[int, bytes], str]:
-    if len(message) != 16:
-        sys.exit("the nanosecond message must be 16 bytes, 4 per field")
+def plant_nsec(path: Path, message: bytes, at: int = 0) -> tuple[dict[int, bytes], str]:
+    """`message` into the four nanosecond fields, read as 16 bytes (4 per field, atime, ctime,
+    mtime, otime), from byte `at` on; the other bytes of the fields are kept."""
+    if not message or not 0 <= at <= 16 - len(message):
+        sys.exit("the nanosecond message must fit the 16 bytes of the four fields, 4 per field")
     names = ("atime_nsec", "ctime_nsec", "mtime_nsec", "otime_nsec")
     with open_image(path) as img:
         fs = open_filesystem(img)
@@ -416,9 +482,8 @@ def plant_nsec(path: Path, message: bytes) -> tuple[dict[int, bytes], str]:
         base = ondisk.HEADER.size + item.offset
 
         def edit(block):
-            for i, name in enumerate(names):
-                at = base + ondisk.INODE_ITEM.offset(name)
-                block[at : at + 4] = message[4 * i : 4 * i + 4]
+            for i, byte in enumerate(message, at):
+                block[base + ondisk.INODE_ITEM.offset(names[i // 4]) + i % 4] = byte
 
         note = f"inode {item.key.objectid} in leaf {node.logical} slot {item.slot}"
         return rewrite_block(img, node, fs.reader.ctx, edit), note
@@ -456,10 +521,10 @@ def plant_string_item(path: Path, message: bytes) -> tuple[dict[int, bytes], str
         return rewrite_block(img, node, fs.reader.ctx, edit), note
 
 
-def plant_file_slack(path: Path, name: str, message: bytes, keep_csum: bool):
+def plant_file_slack(path: Path, name: str, message: bytes, keep_csum: bool, at: int = 0):
     """`message` past the end of file NAME (top directory of the current fs tree) in its last
-    sector, in every copy; unless `keep_csum`, the sector's EXTENT_CSUM entry is recomputed and
-    the csum-tree leaf rewritten (Göbel et al. 2024 §3.2)."""
+    sector, `at` bytes after the end, in every copy; unless `keep_csum`, the sector's
+    EXTENT_CSUM entry is recomputed and the csum-tree leaf rewritten (Göbel et al. 2024 §3.2)."""
     key = ondisk.ITEM_KEYS
     with open_image(path) as img:
         fs = open_filesystem(img)
@@ -477,9 +542,9 @@ def plant_file_slack(path: Path, name: str, message: bytes, keep_csum: bool):
             sys.exit(f"{path}: no file {name!r} in the top directory")
         objectid = names[name]
         size = sizes[objectid]
-        if not size % ss or len(message) > ss - size % ss:
+        if not size % ss or at < 0 or at + len(message) > ss - size % ss:
             sys.exit(f"{name!r}: {ss - size % ss if size % ss else 0} bytes past the end; "
-                     f"the message needs {len(message)}")  # fmt: skip
+                     f"the message needs {at + len(message)}")  # fmt: skip
         sector = (size - 1) // ss * ss
         for node in fs_leaves(fs):
             for item in node.items:
@@ -496,7 +561,7 @@ def plant_file_slack(path: Path, name: str, message: bytes, keep_csum: bool):
         patches, data = {}, None
         for copy in fs.chunk_map.copies(logical, ss):
             data = bytearray(img.mmap[copy.physical : copy.physical + ss])
-            data[tail : tail + len(message)] = message
+            data[tail + at : tail + at + len(message)] = message
             patches[copy.physical] = bytes(data)
         note = f"{name} (inode {objectid}, size {size}): sector at logical {logical}"
         if keep_csum:
@@ -523,35 +588,48 @@ def plant_file_slack(path: Path, name: str, message: bytes, keep_csum: bool):
         sys.exit(f"{name!r}: no EXTENT_CSUM covers logical {logical}")
 
 
-def plant_device_slack(path: Path, message: bytes) -> tuple[dict[int, bytes], str]:
+def device_free(img, fs) -> tuple[list[tuple[int, int]], int, int]:
+    """([start, end) pieces past this device's last device extent that no historical chunk and
+    no superblock slot explains, the last extent's end, the device's end)."""
+    device = ondisk.DEV_ITEM.unpack_from(fs.fields["dev_item"])
+    root = resolve_tree(fs.reader, find_root_set(fs.fields, "current"), "dev")
+    last = 1 << 20
+    for visit in walk(fs.reader, root.bytenr, root.expect()):
+        for item in visit.node.items if visit.node.valid and not visit.node.level else ():
+            if (item.key.type, item.key.objectid) == (
+                ondisk.ITEM_KEYS["DEV_EXTENT"],
+                device["devid"],
+            ):
+                length = ondisk.DEV_EXTENT.unpack_from(item.data)["length"]
+                last = max(last, item.key.offset + length)
+    end = min(device["total_bytes"], img.size)
+    # Not where a removed chunk was, nor in a superblock slot: the bytes must be unexplained.
+    maps = [entry.chunk_map for entry in discover_image(img, fs).discovery.chunk_maps]
+    cut = removed_stripes(maps, device["devid"]) + [
+        (slot, slot + ondisk.SUPER_INFO_SIZE)
+        for slot in map(ondisk.sb_offset, range(ondisk.SUPER_MIRROR_MAX))
+    ]
+    free, _ = intervals_minus([(last, end)], cut)
+    return free, last, end
+
+
+def plant_device_slack(path: Path, message: bytes, at: int | None = None):
     """`message` halfway between this device's last device extent and its end (Wani et al. 2020,
-    volume slack)."""
+    volume slack), or at image offset `at`, which must lie wholly in what device_free gives."""
     with open_image(path) as img:
         fs = open_filesystem(img)
-        device = ondisk.DEV_ITEM.unpack_from(fs.fields["dev_item"])
-        root = resolve_tree(fs.reader, find_root_set(fs.fields, "current"), "dev")
-        last = 1 << 20
-        for visit in walk(fs.reader, root.bytenr, root.expect()):
-            for item in visit.node.items if visit.node.valid and not visit.node.level else ():
-                if (item.key.type, item.key.objectid) == (
-                    ondisk.ITEM_KEYS["DEV_EXTENT"],
-                    device["devid"],
-                ):
-                    length = ondisk.DEV_EXTENT.unpack_from(item.data)["length"]
-                    last = max(last, item.key.offset + length)
-        end = min(device["total_bytes"], img.size)
-        # Not where a removed chunk was, nor in a superblock slot: the bytes must be unexplained.
-        maps = [entry.chunk_map for entry in discover_image(img, fs).discovery.chunk_maps]
-        cut = removed_stripes(maps, device["devid"]) + [
-            (slot, slot + ondisk.SUPER_INFO_SIZE)
-            for slot in map(ondisk.sb_offset, range(ondisk.SUPER_MIRROR_MAX))
-        ]
-        free, _ = intervals_minus([(last, end)], cut)
+        devid = ondisk.DEV_ITEM.unpack_from(fs.fields["dev_item"])["devid"]
+        free, last, end = device_free(img, fs)
+        note = f"devid {devid}: last device extent ends at {last}, device at {end}"
+        if at is not None:
+            if not any(lo <= at and at + len(message) <= hi for lo, hi in free):
+                sys.exit(f"bytes {at}-{at + len(message) - 1} are not all past the last device "
+                         "extent, outside superblock slots and historical chunks")  # fmt: skip
+            return {at: message}, note
         lo, hi = max(free, key=lambda piece: piece[1] - piece[0], default=(0, 0))
         offset = (lo + (hi - lo) // 2) // 4096 * 4096
         if hi - lo < 2 * 4096 + len(message):
             sys.exit(f"no room past the last device extent (ends at {last}, device {end})")
-        note = f"devid {device['devid']}: last device extent ends at {last}, device at {end}"
         return {offset: message}, note
 
 

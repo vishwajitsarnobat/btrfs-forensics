@@ -7,9 +7,12 @@ import sys
 
 import pytest
 
+from btrfska.hiding.areas import _BACKUP_PADDING as BACKUP_PADDING
 from btrfska.substrate import csum, ondisk
 from btrfska.substrate import superblock as sb
+from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
+from btrfska.substrate.slack import slack_range
 from tests.helpers import REPO_ROOT, make_block, scratch_dir, write_sparse_image
 
 MUTATE = REPO_ROOT / "corpus" / "mutate.py"
@@ -317,3 +320,142 @@ def test_a_feature_gated_field_in_use_is_not_planted_in():
         result = run(src, d / "out.img", "plant-sb-reserved", "--field", "metadata_uuid")
         assert result.returncode != 0 and "METADATA_UUID is set" in result.stderr
         assert not (d / "out.img").exists()
+
+
+# ---------------------------------------------------------------------------
+# Where the hiding planters write (plan.md M6e): keyword arguments for EXP-021, whose defaults
+# are what the subcommands do, so the corpus rows they build are unchanged.
+# ---------------------------------------------------------------------------
+M = load_mutate()
+
+
+def corpus_image(name):
+    path = REPO_ROOT / "images" / "scenarios" / f"{name}.img"
+    if not path.exists():
+        pytest.skip(f"{name}.img absent: build it with corpus/build.py")
+    return path
+
+
+def superblock_patches(name, planter, *args, **kwargs):
+    path = corpus_image(name)
+    with open(path, "rb") as src:
+        return planter(src, path.stat().st_size, *args, **kwargs)
+
+
+def test_backup_slot_padding_fields_are_the_bytes_the_detector_examines():
+    roots, size = ondisk.SUPERBLOCK.offset("super_roots"), ondisk.ROOT_BACKUP.size
+    for slot in range(ondisk.NUM_BACKUP_ROOTS):
+        fields = (M.SB_FIELDS[f"backup{slot}_unused_64"], M.SB_FIELDS[f"backup{slot}_unused_8"])
+        assert [(a, b) for a, b, _ in fields] == [
+            (roots + slot * size + a, roots + slot * size + b) for a, b in BACKUP_PADDING
+        ]
+
+
+def test_plant_sb_field_writes_from_byte_at_and_stops_at_the_field_end():
+    patches = superblock_patches("m1_xxhash", M.plant_sb_field, "reserved", b"\xaa" * 300, at=190)
+    assert len(patches) == 2
+    for offset, block in patches.items():
+        assert block[0x264 + 190 : 0x32B] == b"\xaa" * 9 and not any(block[0x264 : 0x264 + 190])
+        assert block[0x32B] != 0xAA
+        assert sb.parse_copy(block, [ondisk.sb_offset(m) for m in range(3)].index(offset)).valid
+    with pytest.raises(SystemExit, match="outside reserved"):
+        superblock_patches("m1_xxhash", M.plant_sb_field, "reserved", b"x", at=199)
+
+
+def test_plant_chunk_array_slack_at_must_lie_behind_the_stale_tail():
+    path = corpus_image("m1_xxhash")
+    with open_image(path) as img:
+        start = ondisk.SUPER_INFO_OFFSET
+        primary = bytes(img.mmap[start : start + ondisk.SUPER_INFO_SIZE])
+    free = M.chunk_array_free(primary)
+    used = ondisk.SUPERBLOCK.unpack_from(primary)["sys_chunk_array_size"]
+    assert used < free < ondisk.SYSTEM_CHUNK_ARRAY_SIZE  # behind the stale tail mkfs leaves
+    array = ondisk.SUPERBLOCK.offset("sys_chunk_array")
+    patches = superblock_patches("m1_xxhash", M.plant_chunk_array_slack, b"\x01\x02", at=free)
+    assert all(block[array + free : array + free + 2] == b"\x01\x02" for block in patches.values())
+    for at, message in ((free - 1, b"x"), (2047, b"xy")):
+        with pytest.raises(SystemExit, match="not all free"):
+            superblock_patches("m1_xxhash", M.plant_chunk_array_slack, message, at=at)
+
+
+def test_plant_pre_sb_reaches_the_rest_of_the_first_mib_but_never_the_superblock():
+    end = 1 << 20
+    assert M.plant_pre_sb(None, end, b"x", 0x11000) == {0x11000: b"x"}
+    assert M.plant_pre_sb(None, end, b"x", end - 1) == {end - 1: b"x"}
+    for offset, message in ((0xFFFF, b"xy"), (0x10000, b"x"), (0x10FFF, b"x"), (end - 1, b"xy")):
+        with pytest.raises(SystemExit, match="not inside the first 64 KiB"):
+            M.plant_pre_sb(None, end, message, offset)
+
+
+def test_plant_backup_roots_copies_the_slot_asked_for_and_never_the_newest():
+    path = corpus_image("m1_blake2b")
+    roots = sb.backup_roots(selection(path).selected.fields)
+    newest, source = roots[-1]["slot"], roots[1]["slot"]
+    patches = superblock_patches("m1_blake2b", M.plant_backup_roots, source)
+    size, base = ondisk.ROOT_BACKUP.size, ondisk.SUPERBLOCK.offset("super_roots")
+    for block in patches.values():
+        new = block[base + newest * size : base + (newest + 1) * size]
+        assert new == block[base + source * size : base + (source + 1) * size]
+    with pytest.raises(SystemExit, match="not an older backup root slot"):
+        superblock_patches("m1_blake2b", M.plant_backup_roots, newest)
+
+
+def test_plant_inode_reserved_and_nsec_write_from_byte_at_and_keep_the_rest():
+    path = corpus_image("m1_xxhash")
+    with open_image(path) as img:
+        node, item = M.first_file_inode(open_filesystem(img))
+    at, old = ondisk.HEADER.size + item.offset, ondisk.INODE_ITEM.unpack_from(item.data)
+    reserved = ondisk.INODE_ITEM.offset("sequence") + 8
+    patches, _ = M.plant_inode_reserved(path, b"\xaa" * 40, at=30)
+    assert len(patches) == len(node.copies)
+    for block in patches.values():
+        assert block[at + reserved : at + reserved + 32] == bytes(30) + b"\xaa\xaa"
+        assert block[at + reserved + 32 :][:8] == item.data[reserved + 32 :][:8]
+    patches, _ = M.plant_nsec(path, b"\x01\x02", at=3)
+    for block in patches.values():
+        new = ondisk.INODE_ITEM.unpack_from(block, at)
+        assert new["atime_nsec"] == old["atime_nsec"] & 0xFFFFFF | 0x01 << 24
+        assert new["ctime_nsec"] == old["ctime_nsec"] & ~0xFF | 0x02
+        assert (new["mtime_nsec"], new["otime_nsec"]) == (old["mtime_nsec"], old["otime_nsec"])
+        assert csum.block_csum_ok(csum.XXHASH, block)
+    with pytest.raises(SystemExit, match="must fit the 16 bytes"):
+        M.plant_nsec(path, b"xy", at=15)
+
+
+def test_plant_slack_margin_from_end_and_leaf_only():
+    path = corpus_image("m1_xxhash")  # an fs tree of one leaf
+    with pytest.raises(SystemExit, match="no internal node"):
+        M.plant_slack(path, b"x")
+    patches = M.plant_slack(path, b"\x01\x02\x03", 0, True, True)
+    assert len(patches) == 2  # metadata DUP
+    with open_image(path) as img:
+        for offset, block in patches.items():
+            start, end = slack_range(img.mmap[offset : offset + len(block)], len(block))
+            assert block[end - 3 : end] == b"\x01\x02\x03" and not any(block[start : end - 3])
+            assert csum.block_csum_ok(csum.XXHASH, block)
+
+
+def test_plant_file_slack_writes_at_bytes_after_the_end_of_file():
+    path = corpus_image("m6_datacsum")
+    patches, _ = M.plant_file_slack(path, "plain.txt", b"\x07", False, at=5)
+    sectors = [(offset, data) for offset, data in patches.items() if len(data) == 4096]
+    assert len(sectors) == 2  # data DUP
+    with open_image(path) as img:
+        for offset, data in sectors:
+            old = bytes(img.mmap[offset : offset + 4096])
+            end_of_file = len(old.rstrip(b"\0"))  # plain.txt is text: no zero byte in it
+            assert [i for i in range(4096) if old[i] != data[i]] == [end_of_file + 5]
+    with pytest.raises(SystemExit, match="bytes past the end"):
+        M.plant_file_slack(path, "plain.txt", b"\x07", False, at=4096)
+
+
+def test_plant_device_slack_at_refuses_bytes_outside_what_device_free_gives():
+    path = corpus_image("m1_sha256_bgt")
+    with open_image(path) as img:
+        free, last, end = M.device_free(img, open_filesystem(img))
+    assert free[0][0] == last and free[-1][1] == end
+    assert M.plant_device_slack(path, b"x", last)[0] == {last: b"x"}
+    assert M.plant_device_slack(path, b"x", end - 1)[0] == {end - 1: b"x"}
+    for at, message in ((last - 1, b"x"), (end - 1, b"xy")):
+        with pytest.raises(SystemExit, match="not all past the last device extent"):
+            M.plant_device_slack(path, message, at)
