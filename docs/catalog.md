@@ -61,7 +61,8 @@ Maintenance rules:
 - **Verified.** 41 unit tests (every hostile item, the bitmap run carry, each verdict and risk
   rule, the reverse mapping per profile against `copies()`, a fuzz of random items) and 22 image
   tests (cross-check on 14 images, the trio's modes, `freed_in` against the log, stated modes,
-  the fallback giving the same placements). 1141 tests passed, none skipped; ruff clean;
+  the fallback giving the same placements). 1141 tests passed, none skipped (1177 after merging
+  `main` with M6f and the INODE_REF rule); ruff clean;
   `sha256sum -c` OK.
 
 ## 2026-10-07 — Renames within one directory proved through INODE_REF, and EXP-009 addendum B
