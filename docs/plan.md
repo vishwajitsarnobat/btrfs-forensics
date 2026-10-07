@@ -2048,6 +2048,16 @@ commits the space was freed.
   `--discard`; EXP-019 measures the classification across the corpus with a committed script, the
   prediction registered first.
 
+**M6b status 2026-10-07: done** (catalog.md, M6b entry; `tests/test_freespace.py`,
+`tests/test_freespace_images.py`; EXP-019). Each bullet of the definition of done is a test. Two
+things the design did not foresee. A block group the kernel creates enters the free space tree
+free from end to end, superblock stripes included (free-space-tree.c:1433-1434); the kernel
+leaves them out only when it loads free space (block-group.c:530-570), so the view does the same
+and the cross-check compares both sources without them. And "the same allocation" cannot rest on
+generations: relocation gives a data extent a newer generation and leaves the file extent's, so
+`in_use` for data is decided by the extent's back-references (same address, length and inode
+number, directly or through a shared leaf).
+
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
 - Corpus generator = `corpus/vm/` scaled up (already in use since M1):
   scenario scripts × matrix below, per-image manifest (per-file SHA-256,
