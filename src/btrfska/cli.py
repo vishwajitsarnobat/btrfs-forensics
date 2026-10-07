@@ -8,6 +8,7 @@ from dataclasses import asdict
 
 from btrfska import __version__
 from btrfska.catalog import cli as catalog_cli
+from btrfska.hiding import cli as hiding_cli
 from btrfska.recover import cli as recover_cli
 from btrfska.scan.classify import Classified, failure_counts, scan_image
 from btrfska.scan.foreign import ForeignRecord, foreign_scan, report_lines
@@ -794,6 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_cli.add_parser(sub)
     recover_cli.add_parser(sub)
     timeline_cli.add_parser(sub)
+    hiding_cli.add_parser(sub)
     return parser
 
 
