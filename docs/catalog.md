@@ -20,6 +20,39 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — The two wrong timeline events of EXP-009 fixed, and EXP-009 re-run
+
+- **Branch:** `fix/timeline-absence-verdicts` (from `main` at `bef52dd`; issue #78). Changed
+  `src/btrfska/timeline/build.py`, `tests/test_timeline.py`, `README.md` (`btrfska timeline`),
+  `docs/plan.md` (M5d fix; E-timeline status), `experiments/exp009.py` (`--first`, `--keep`, a
+  count of `not_seen` endings), `experiments/EXP-009.md` (addendum A).
+- **Why.** EXP-009 found two events drawn from absence alone: a `never_committed` for a file
+  committed in generation 10 whose commit survives only as a walk with gaps (or not at all), and a
+  `link` for `pad/p2` in every build, from versions seen through walks with gaps that do not reach
+  its INODE_REF.
+- **What changed.** `never_committed` now needs proof: every sighting is of the transaction that
+  created the file, and the tree as that transaction's commit left it (a root block of that
+  generation, named by a committed root tree) is walked without a gap and does not hold it. A
+  root tree written in the middle of the transaction does not count, because the fs-tree
+  ROOT_ITEMs are rewritten only during the commit (transaction.c:1471-1541 at v7.0). Otherwise
+  the ending is `not_seen` with a reason, and with `between` and `generations` null. Names are
+  compared only between versions seen in a whole walk: a version seen only through walks with
+  gaps, fragments, lone leaves or a log tree replayed without its base gives no `rename`, `move`,
+  `link` or `unlink`.
+- **Numbers** (EXP-009 addendum A; five new builds, i5-1335U host, each measured by the code
+  before and after the fix): delete precision 1.0 in every build (0.98 in one build before, the
+  same `m_1` event); `link` or `move` 0 per build (1 before); creates, `order_assumed` (0) and
+  `log_only` (16) unchanged; all 8 flash files still `never_committed`. **Rename recall 0.870 →
+  0.783**: the renames of `m_4` and `m_5` were right but rested on versions seen only through
+  walks with gaps, so the rule drops them. A refinement that would keep them (one INODE_REF item
+  holds every name of an inode in one directory) is described in the addendum and left to the
+  maintainer. The registered prediction that renames would not change was wrong and is reported so.
+- **Verified.** Three new tests failed before the fix and pass now: forged catalogs for each
+  `not_seen` reason and for the proof of `never_committed`; a forged walk with a gap and a lone
+  leaf that miss a name; on `m4_deep`, no `link`, `unlink` or `move` that the log does not hold.
+  The EXP-009 test now checks `never_committed` against the log too. 1002 tests passed, none
+  skipped (with `m4_deep` rebuilt by the current recipe); ruff clean; `sha256sum -c` OK.
+
 ## 2026-10-07 — M6a: recovered content verified against the data checksums (EXTENT_CSUM)
 
 - **Branch:** `feature/m6-extent-csum` (from `main` at `b918555`, rebased on `bef52dd`; issue
