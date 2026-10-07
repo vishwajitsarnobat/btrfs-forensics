@@ -4,11 +4,18 @@
     uv run python corpus/build.py --force      # rebuild every image
     uv run python corpus/build.py m1_lzo ...   # only these images (and nothing they depend on)
     uv run python corpus/build.py --check      # only check the host, build nothing
+    uv run python corpus/build.py --tier matrix   # the M7 corpus matrix (corpus/matrix.tsv)
+    uv run python corpus/build.py --tier large    # the 100 GiB matrix image (local only)
 
 Steps: check the host, fetch the pinned guest bundle (corpus/vm/fetch_vm.sh, about 190 MB, once),
 build the guest initramfs, then run the `command` of every manifest row in file order, so an image
 derived from another comes after it. Everything is written under the gitignored images/ folder.
 No root is needed and nothing is installed.
+
+Tiers: `default` is corpus/manifest.tsv, which ./setup.sh and CI build. `matrix`
+(corpus/matrix.tsv) and `large` (corpus/large.tsv) are the M7 corpus matrix, written by
+corpus/matrix.py. They take much longer to build (the matrix tier about half an hour; the large
+tier needs a 100 GiB sparse file), so they are built only on request.
 
 The manifest is the recipe and holds no image hash: every mkfs draws a new filesystem UUID, so two
 builds of one row never have the same bytes. What was built here is recorded in
@@ -28,6 +35,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MANIFEST = REPO / "corpus" / "manifest.tsv"
+TIERS = {
+    "default": MANIFEST,
+    "matrix": REPO / "corpus" / "matrix.tsv",
+    "large": REPO / "corpus" / "large.tsv",
+}
 SCENARIOS = REPO / "images" / "scenarios"
 RECORD = SCENARIOS / "SHA256SUMS"
 VM = REPO / "corpus" / "vm"
@@ -63,8 +75,8 @@ def host_problems() -> list[str]:
     return problems
 
 
-def manifest_rows() -> list[dict]:
-    with MANIFEST.open(newline="") as f:
+def manifest_rows(tier: str = "default") -> list[dict]:
+    with TIERS[tier].open(newline="") as f:
         return list(csv.DictReader(f, delimiter="\t"))
 
 
@@ -87,6 +99,11 @@ def write_record(record: dict[str, str]) -> None:
     RECORD.write_text("".join(f"{digest}  {name}\n" for name, digest in sorted(record.items())))
 
 
+def row_images(path: Path) -> list[Path]:
+    """The files of one row: its image, and the further devices of a multi-device filesystem."""
+    return [path, *sorted(path.parent.glob(f"{path.stem}.dev*.img"))]
+
+
 def run(command: str | list[str]) -> None:
     subprocess.run(command, shell=isinstance(command, str), cwd=REPO, check=True)
 
@@ -96,6 +113,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("names", nargs="*", help="manifest rows to build (default: all)")
     parser.add_argument("--force", action="store_true", help="rebuild images that already exist")
     parser.add_argument("--check", action="store_true", help="check the host and stop")
+    parser.add_argument("--tier", choices=TIERS, default="default",
+                        help="which manifest to build (default: corpus/manifest.tsv)")  # fmt: skip
     args = parser.parse_args(argv)
 
     if problems := host_problems():
@@ -107,10 +126,11 @@ def main(argv: list[str] | None = None) -> int:
         print("host ok: every tool is present and /dev/kvm is usable")
         return 0
 
-    rows = manifest_rows()
+    rows = manifest_rows(args.tier)
     known = {row["name"] for row in rows}
     if unknown := [name for name in args.names if name not in known]:
-        print(f"not in {MANIFEST.relative_to(REPO)}: {', '.join(unknown)}", file=sys.stderr)
+        manifest = TIERS[args.tier].relative_to(REPO)
+        print(f"not in {manifest}: {', '.join(unknown)}", file=sys.stderr)
         return 2
     wanted = [row for row in rows if not args.names or row["name"] in args.names]
 
@@ -133,9 +153,11 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             built += 1
             print(f"built  {row['name']} ({time.monotonic() - started:.1f} s)", flush=True)
-            record.pop(path.name, None)
-        if path.name not in record:
-            record[path.name] = sha256(path)
+            for image in row_images(path):
+                record.pop(image.name, None)
+        for image in row_images(path):
+            if image.name not in record:
+                record[image.name] = sha256(image)
         write_record(record)
 
     print(f"{built} built, {len(wanted) - built} already present; hashes in {RECORD}")

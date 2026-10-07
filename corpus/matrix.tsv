@@ -1,0 +1,47 @@
+name	command	mkfs	guest_kernel	note
+mx_delete_none	corpus/vm/scenarios/matrix.sh mx_delete_none	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: delete, discard none; the base configuration of every one-factor row
+mx_delete_async	DISCARD_MODE=async corpus/vm/scenarios/matrix.sh mx_delete_async	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: delete, discard async
+mx_delete_idle	DISCARD_MODE=idle corpus/vm/scenarios/matrix.sh mx_delete_idle	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: delete, discard idle
+mx_delete_sync	DISCARD_MODE=sync corpus/vm/scenarios/matrix.sh mx_delete_sync	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: delete, discard sync
+mx_delete_nodiscard	DISCARD_MODE=nodiscard corpus/vm/scenarios/matrix.sh mx_delete_nodiscard	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: delete, discard nodiscard
+mx_overwrite_none	OP=overwrite corpus/vm/scenarios/matrix.sh mx_overwrite_none	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: overwrite, discard none
+mx_overwrite_async	OP=overwrite DISCARD_MODE=async corpus/vm/scenarios/matrix.sh mx_overwrite_async	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: overwrite, discard async
+mx_overwrite_idle	OP=overwrite DISCARD_MODE=idle corpus/vm/scenarios/matrix.sh mx_overwrite_idle	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: overwrite, discard idle
+mx_overwrite_sync	OP=overwrite DISCARD_MODE=sync corpus/vm/scenarios/matrix.sh mx_overwrite_sync	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: overwrite, discard sync
+mx_overwrite_nodiscard	OP=overwrite DISCARD_MODE=nodiscard corpus/vm/scenarios/matrix.sh mx_overwrite_nodiscard	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: overwrite, discard nodiscard
+mx_stress_none	OP=stress corpus/vm/scenarios/matrix.sh mx_stress_none	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: stress, discard none
+mx_stress_async	OP=stress DISCARD_MODE=async corpus/vm/scenarios/matrix.sh mx_stress_async	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: stress, discard async
+mx_stress_idle	OP=stress DISCARD_MODE=idle corpus/vm/scenarios/matrix.sh mx_stress_idle	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: stress, discard idle
+mx_stress_sync	OP=stress DISCARD_MODE=sync corpus/vm/scenarios/matrix.sh mx_stress_sync	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: stress, discard sync
+mx_stress_nodiscard	OP=stress DISCARD_MODE=nodiscard corpus/vm/scenarios/matrix.sh mx_stress_nodiscard	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: stress, discard nodiscard
+mx_snapshot_none	OP=snapshot corpus/vm/scenarios/matrix.sh mx_snapshot_none	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: snapshot, discard none
+mx_snapshot_async	OP=snapshot DISCARD_MODE=async corpus/vm/scenarios/matrix.sh mx_snapshot_async	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: snapshot, discard async
+mx_snapshot_idle	OP=snapshot DISCARD_MODE=idle corpus/vm/scenarios/matrix.sh mx_snapshot_idle	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: snapshot, discard idle
+mx_snapshot_sync	OP=snapshot DISCARD_MODE=sync corpus/vm/scenarios/matrix.sh mx_snapshot_sync	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: snapshot, discard sync
+mx_snapshot_nodiscard	OP=snapshot DISCARD_MODE=nodiscard corpus/vm/scenarios/matrix.sh mx_snapshot_nodiscard	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: snapshot, discard nodiscard
+mx_balance_none	OP=balance corpus/vm/scenarios/matrix.sh mx_balance_none	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: balance, discard none
+mx_balance_async	OP=balance DISCARD_MODE=async corpus/vm/scenarios/matrix.sh mx_balance_async	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: balance, discard async
+mx_balance_idle	OP=balance DISCARD_MODE=idle corpus/vm/scenarios/matrix.sh mx_balance_idle	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: balance, discard idle
+mx_balance_sync	OP=balance DISCARD_MODE=sync corpus/vm/scenarios/matrix.sh mx_balance_sync	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: balance, discard sync
+mx_balance_nodiscard	OP=balance DISCARD_MODE=nodiscard corpus/vm/scenarios/matrix.sh mx_balance_nodiscard	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: balance, discard nodiscard
+mx_defrag_none	OP=defrag corpus/vm/scenarios/matrix.sh mx_defrag_none	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: defrag, discard none
+mx_defrag_async	OP=defrag DISCARD_MODE=async corpus/vm/scenarios/matrix.sh mx_defrag_async	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: defrag, discard async
+mx_defrag_idle	OP=defrag DISCARD_MODE=idle corpus/vm/scenarios/matrix.sh mx_defrag_idle	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: defrag, discard idle
+mx_defrag_sync	OP=defrag DISCARD_MODE=sync corpus/vm/scenarios/matrix.sh mx_defrag_sync	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: defrag, discard sync
+mx_defrag_nodiscard	OP=defrag DISCARD_MODE=nodiscard corpus/vm/scenarios/matrix.sh mx_defrag_nodiscard	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	discard x operation: defrag, discard nodiscard
+mx_bgt_delete	BGT=on corpus/vm/scenarios/matrix.sh mx_bgt_delete	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	block-group tree x balance: tree on, delete
+mx_bgt_balance	BGT=on OP=balance corpus/vm/scenarios/matrix.sh mx_bgt_balance	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	block-group tree x balance: tree on, balance
+mx_reclaim_none	RECLAIM=on corpus/vm/scenarios/matrix.sh mx_reclaim_none	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	reclaim x discard: reclaim on, discard none
+mx_reclaim_async	RECLAIM=on DISCARD_MODE=async corpus/vm/scenarios/matrix.sh mx_reclaim_async	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	reclaim x discard: reclaim on, discard async
+mx_reclaim_idle	RECLAIM=on DISCARD_MODE=idle corpus/vm/scenarios/matrix.sh mx_reclaim_idle	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	reclaim x discard: reclaim on, discard idle
+mx_reclaim_sync	RECLAIM=on DISCARD_MODE=sync corpus/vm/scenarios/matrix.sh mx_reclaim_sync	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	reclaim x discard: reclaim on, discard sync
+mx_reclaim_nodiscard	RECLAIM=on DISCARD_MODE=nodiscard corpus/vm/scenarios/matrix.sh mx_reclaim_nodiscard	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	reclaim x discard: reclaim on, discard nodiscard
+mx_zstd	COMPRESS=zstd corpus/vm/scenarios/matrix.sh mx_zstd	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	one factor: compress-force=zstd
+mx_lzo	COMPRESS=lzo corpus/vm/scenarios/matrix.sh mx_lzo	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	one factor: compress-force=lzo
+mx_zlib	COMPRESS=zlib corpus/vm/scenarios/matrix.sh mx_zlib	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	one factor: compress-force=zlib
+mx_xxhash	CSUM=xxhash corpus/vm/scenarios/matrix.sh mx_xxhash	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	one factor: checksum xxhash
+mx_sha256	CSUM=sha256 corpus/vm/scenarios/matrix.sh mx_sha256	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	one factor: checksum sha256
+mx_blake2b	CSUM=blake2b corpus/vm/scenarios/matrix.sh mx_blake2b	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	one factor: checksum blake2b
+mx_8g	SIZE=8G corpus/vm/scenarios/matrix.sh mx_8g	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	one factor: an 8 GiB filesystem (sparse image)
+mx_mixed	LAYOUT=mixed SIZE=256M corpus/vm/scenarios/matrix.sh mx_mixed	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	one factor: MIXED_GROUPS, a 256 MiB filesystem
+mx_raid1	LAYOUT=raid1 corpus/vm/scenarios/matrix.sh mx_raid1	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	one factor: two devices, data and metadata RAID1; the second device is mx_raid1.dev2.img
