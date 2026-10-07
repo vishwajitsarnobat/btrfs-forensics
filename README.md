@@ -17,8 +17,11 @@ timelines): the catalog keeps the chunk maps of superseded chunk-tree roots and 
 a state from before a balance through the map of its own time; `recover --graph` joins orphan
 blocks where a join can be justified; `btrfska timeline` follows every inode through every
 cataloged state. M6a: every recovered data extent is checked against the data checksums of
-the csum tree of its own state, with a verdict per extent and per file. The prototype that came
-first is the git tag `legacy-final`.
+the csum tree of its own state, with a verdict per extent and per file. M6b: every recovered
+extent and tree block is placed in the current allocation (free space tree, or the extent
+tree) as in use, free or reallocated, with an overwrite-risk score and, where older free space
+trees survive, the two commits between which it was freed. The prototype that came first is
+the git tag `legacy-final`.
 - `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID|all]... [--tree ID|all] [--orphans|--graph]`
   extracts the files of a tree as the current, a backup or a discovered root saw them, and with
   `--orphans` also from leaves that no root tree leads to, one extent at a time, with a
@@ -720,7 +723,7 @@ gaps go to stderr.
 
 ### `btrfska recover`
 
-`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--graph] [--logs] [--maps own|current] [--no-dedup] [--no-rehash]`
+`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--graph] [--logs] [--maps own|current] [--discard none|async|sync] [--no-dedup] [--no-rehash]`
 extracts files. `DB` is the evidence database built from `IMAGE` (`catalog build`, best with
 `--full-sweep`); the image's size and SHA-256 must match the ones recorded there (`--no-rehash`
 skips the hash, and the run is recorded as not checked).
@@ -809,6 +812,36 @@ skips the hash, and the run is recorded as not checked).
   byte was read**: a `complete` file with `csum_verdict` `mismatch` holds bytes that are not the
   ones the filesystem checksummed (overwritten, trimmed, or damaged). stdout ends with a
   `data checksums:` line that counts the files per verdict.
+- **Free space and overwrite risk** (plan.md M6b). Every extent read from disk, and every tree
+  block an artifact's items came from, is placed in the current state's allocation. That is its
+  free space tree (tree 10: FREE_SPACE_INFO, FREE_SPACE_EXTENT and FREE_SPACE_BITMAP items) when
+  the superblock marks it valid and it is read without a gap; otherwise free space is derived from
+  the extent tree and the block groups (a filesystem with a space cache v1, or none). Both are
+  read when both exist and every disagreement is reported. The bytes are placed by the physical
+  copy that was read, mapped back to a current logical address, so data read through a
+  historical chunk map is placed too. `space_verdict`: `in_use` (the current extent tree has the
+  same allocation: the same address and length, given to the same inode number by its
+  back-references; for a tree block, the same generation), `free`, `allocated` (to another
+  extent), `partial`, `no_block_group` (the chunk was removed). `overwrite_risk` is an ordinal
+  score, each step a kernel behaviour (v7.0): 0 `none` for `in_use` (space is freed only with
+  the last reference, extent-tree.c:3187); 1 `low` for `no_block_group` (a new chunk is allocated
+  only after the free space of the existing block groups has been searched,
+  extent-tree.c:3733-3755); 2 `medium` for `free`; 3 `high` for `free` when a discard mode trims
+  the block group (`sync` every kind, extent-tree.c:2997-3005; `async` data-only block groups,
+  discard.c:116, :696), when the block group is unused (deleted at the next mount,
+  block-group.c:2533-2538, and trimmed whole under `sync`, extent-tree.c:3058-3063), or when it
+  is reclaim-eligible under the kernel's default (zoned filesystems only, below 75 % used,
+  zoned.h:29); 4 `reallocated` for `allocated` and `partial`. `risk_reasons` lists the rules
+  that fired. The discard mode is the one given with `--discard` (mount options are not on
+  disk), else the one observed: `trimmed_metadata` when blocks a committed state points to read
+  as zeros (only `sync` or a FITRIM discards metadata), `trimmed_data` when freed data sectors
+  read as zeros against a non-zero checksum, `not_trimmed` when freed blocks or data still hold
+  their bytes, `unknown` otherwise; only a trim raises a score. `async` with a quick unmount
+  leaves the image exactly as no discard does, so it is seen only when stated. The free space
+  trees of older states give, per extent, `freed_in`: the newest state that held some of its
+  bytes allocated (`after`) and the first that held them all free (`by`). The per-extent record
+  is `space` in `provenance.read_record`; stdout ends with a `free space:` line (source, discard
+  mode, artifacts per verdict and per risk level).
 - **A file is not `complete` when one of its extents is newer than its INODE_ITEM** (`missing`
   reason `inode_item_older_than_extent`). A commit always updates the inode item, so no committed
   tree holds such a file; a leaf written in the middle of a transaction can, and then the data is
@@ -842,8 +875,9 @@ skips the hash, and the run is recorded as not checked).
   `inode_transid`, `kind`, `path`, `attached`, `names`, `size`, `mode`, `xattrs`,
   `symlink_target`, `status`, `bytes_written`, `sha256`, `extent_signature`, `duplicate_of`,
   `output_path`, `chunk_maps`, `joined`, `missing`, `problems`, `csum_verdict` (`null` when
-  nothing was checked: no content, a duplicate, a refusal), `csum_sources` (a list), and `inode`
-  (the whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
+  nothing was checked: no content, a duplicate, a refusal), `csum_sources` (a list), `space_verdict`, `overwrite_risk`,
+  `risk_reasons` (a list), `space_source` (`null` when there is no allocation to place the
+  artifact in), and `inode` (the whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
 - Exit status 0 when every file is complete; 1 when any is `partial`, `refused_encrypted` or
   `failed`, or on an error (unknown root, wrong image, `DIR` exists); 2 for a refused format.
 

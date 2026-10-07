@@ -1069,7 +1069,8 @@ def test_readme_documents_the_command_its_statuses_and_every_manifest_key():
         keys = set(json.loads((out / "manifest.jsonl").read_text().splitlines()[0]))
     from btrfska.recover.cli import STATUSES
 
-    options = {"--db", "--out", "--root", "--tree", "--orphans", "--no-dedup", "--no-rehash"}
+    options = {"--db", "--out", "--root", "--tree", "--orphans", "--discard", "--no-dedup",
+               "--no-rehash"}  # fmt: skip
     wanted_words = {"`orphan_node`", "`orphan_item`", "`continues_elsewhere`", "`all`"}
     assert {word for word in wanted_words if word not in section} == set()
     wanted = {f"`{name}`" for name in keys | set(STATUSES)} | options

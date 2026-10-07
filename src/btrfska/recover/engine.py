@@ -51,9 +51,11 @@ from btrfska.recover.inodes import (
 from btrfska.recover.logs import base_inodes, base_root, log_roots, replay
 from btrfska.recover.maps import Readers
 from btrfska.recover.output import PARTIAL, FileSink, OutputError, OutputTree
+from btrfska.recover.space import SpaceViews
 from btrfska.substrate import items, ondisk
 from btrfska.substrate.datacsum import Csums, artifact_verdict
 from btrfska.substrate.extents import FileAssembly, stream_extent
+from btrfska.substrate.freespace import LEVELS, fold
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
 from btrfska.substrate.node import NodeReader
@@ -83,6 +85,9 @@ class Recovered:
     fragments: int = 0  # fragments read (`graph`), and how many there are
     fragments_found: int = 0
     by_csum: dict[tuple[str, str], int] | None = None  # (source kind, csum verdict) -> artifacts
+    by_space: dict[str, int] | None = None  # space verdict -> artifacts
+    by_risk: dict[str, int] | None = None  # overwrite-risk level -> artifacts
+    free_space: dict | None = None  # recovery_runs.summary["free_space"]
 
 
 def _now() -> str:
@@ -131,6 +136,9 @@ class _Run:
         self.by_csum: Counter[tuple[str, str]] = Counter()  # (source kind, csum verdict)
         self.csums: Csums | None = None  # the csum trees the root being read is verified against
         self.csum_trees: CsumTrees | None = None  # every csum tree of the run (recover/csums.py)
+        self.space: SpaceViews | None = None  # the current allocation (recover/space.py)
+        self.by_space: Counter[str] = Counter()  # space verdict
+        self.by_risk: Counter[str] = Counter()  # overwrite-risk level
         self.bytes_written = 0
         self.last_objectid: int | None = None  # of the orphan leaf being read, else None
         self.uncommitted = False  # the root being read is no committed tree (orphan sources)
@@ -314,6 +322,10 @@ class _Run:
             "joined": json.dumps(record.joins),
             "csum_verdict": None,
             "csum_sources": "[]",
+            "space_verdict": None,
+            "overwrite_risk": None,
+            "risk_reasons": "[]",
+            "space_source": None,
         }
         reads, missing, same = [], [], None
         mode = None if inode is None else inode["mode"]
@@ -373,6 +385,15 @@ class _Run:
                     if row["status"] != "complete":
                         parts = (*parts[:-1], parts[-1] + PARTIAL)
                     row["output_path"] = _text(b"/".join(parts))
+        placements = self._placements(root, record, reads)
+        data = [placements[key] for key in placements if key[0] == "extent"]
+        blocks = [placements[key] for key in placements if key[0] == "block"]
+        verdict, risk, reasons = fold(data if any(data) else blocks)
+        if verdict is not None:
+            row["space_verdict"], row["overwrite_risk"] = verdict, risk
+            row["risk_reasons"], row["space_source"] = json.dumps(reasons), self.space.view.source
+            self.by_space[verdict] += 1
+            self.by_risk[LEVELS[risk]] += 1
         tree_path = parts[len(base) :] if row["output_path"] else where[0]
         if record.orphan_item and not row["output_path"]:
             tree_path = parts
@@ -391,7 +412,7 @@ class _Run:
         self.by_source[row["source_kind"], row["status"]] += 1
         if row["csum_verdict"] is not None:
             self.by_csum[row["source_kind"], row["csum_verdict"]] += 1
-        self._provenance(artifact_id, record, reads)
+        self._provenance(artifact_id, record, reads, placements)
         self.out.record(
             {k: v for k, v in row.items() if k != "path_raw"}
             | {
@@ -403,6 +424,7 @@ class _Run:
                 "names": json.loads(row["names"]),
                 "xattrs": json.loads(row["xattrs"]),
                 "csum_sources": json.loads(row["csum_sources"]),
+                "risk_reasons": json.loads(row["risk_reasons"]),
                 "missing": missing,
                 "problems": problems,
                 "inode": inode,
@@ -432,7 +454,22 @@ class _Run:
                     label += b"_" + safe_component(name, record.objectid)[0]
         return (ORPHAN_ITEMS, label), names
 
-    def _provenance(self, artifact_id: int, record: InodeRecord, reads: list) -> None:
+    def _placements(self, root: Root, record: InodeRecord, reads: list) -> dict:
+        """("extent", leaf, slot) -> the placement of an extent read from disk, and ("block",
+        content_id) -> the placement of every tree block the record's items came from (plan.md
+        M6b); empty when there is no allocation to place them in."""
+        found = {}
+        if self.space is None or self.space.view is None or self.space.view.source is None:
+            return found
+        for extent, _ in reads:
+            placement = self.space.extent(extent, root.generation, record.objectid)
+            if placement is not None:
+                found["extent", extent.leaf, extent.slot] = placement
+        for origin in record.origins:
+            found.setdefault(("block", origin.leaf.content_id), self.space.block(origin.leaf))
+        return found
+
+    def _provenance(self, artifact_id: int, record: InodeRecord, reads: list, placements) -> None:
         by_item = {(extent.leaf, extent.slot): (extent, digest) for extent, digest in reads}
         rows = []
         for seq, origin in enumerate(record.origins):
@@ -440,6 +477,13 @@ class _Run:
             extent, digest = by_item.get((leaf.bytenr, origin.slot), (None, None))
             if origin.role != "extent_data":
                 extent = None
+            space = None if extent is None else placements.get(("extent", leaf.bytenr, origin.slot))
+            block = placements.get(("block", leaf.content_id))
+            read = (
+                None
+                if extent is None
+                else asdict(extent) | {"space": None if space is None else asdict(space)}
+            )
             rows.append(
                 (
                     artifact_id, seq, origin.role, leaf.content_id, origin.slot, s64(leaf.bytenr),
@@ -448,14 +492,17 @@ class _Run:
                     None if extent is None else extent.length,
                     digest,
                     None if extent is None else extent.error_kind,
-                    None if extent is None else json.dumps(asdict(extent)),
+                    None if read is None else json.dumps(read),
                     None if extent is None or extent.csum is None else extent.csum.verdict,
+                    None if space is None else space.verdict,
+                    None if block is None else block.verdict,
                 )
             )  # fmt: skip
         self.conn.executemany(
             "INSERT INTO provenance (artifact_id, seq, role, content_id, slot, bytenr, generation,"
             " physical, block_status, file_offset, length, extent_sha256, error_kind, read_record,"
-            " csum_verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " csum_verdict, space_verdict, block_space)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
 
@@ -507,6 +554,7 @@ def recover_roots(
     fragments: tuple[Root, ...] = (),
     graph: bool = False,
     logs: tuple[Root, ...] = (),
+    discard: str | None = None,
     note: Callable[[str], None] = lambda line: None,
 ):
     """Recover every root, then every orphan leaf, into `out`: the run (counts, bytes) and the
@@ -519,6 +567,7 @@ def recover_roots(
     gaps = {}
     sectorsize = readers.current.ctx.sectorsize
     run.csum_trees = trees = CsumTrees(conn, readers.current.ctx.csum_type, sectorsize)
+    run.space = SpaceViews(conn, readers.current, discard=discard)
     covered: set[int] = set()  # leaves read under a fragment are not read again on their own
     for root, leaf in (*((root, None) for root in (*roots, *fragments, *logs)), *orphans):
         if leaf is not None and leaf.content_id in covered:
@@ -596,6 +645,7 @@ def recover(
     graph: bool = False,
     logs: bool = False,
     maps: str = "own",
+    discard: str | None = None,
     rehash: bool = True,
     note: Callable[[str], None] = lambda line: None,
 ) -> Recovered:
@@ -642,7 +692,7 @@ def recover(
             with OutputTree(output_dir) as out:
                 options = {"roots": list(dict.fromkeys(roots)), "tree_id": tree_id or "all",
                            "dedup": dedup, "orphans": orphans, "graph": graph, "logs": logs,
-                           "maps": maps}  # fmt: skip
+                           "maps": maps, "discard": discard}  # fmt: skip
                 recovery_id = conn.execute(
                     "INSERT INTO recovery_runs (tool_version, started_utc, image_path,"
                     " image_checked, output_dir, options) VALUES (?, ?, ?, ?, ?, ?)",
@@ -652,7 +702,7 @@ def recover(
                 run, gaps = recover_roots(
                     conn, Readers(conn, fs.reader, own=maps == "own"), out, recovery_id, resolved,
                     no_holes=no_holes, dedup=dedup, orphans=lone, fragments=tops, graph=graph,
-                    logs=log_trees, note=note,
+                    logs=log_trees, discard=discard, note=note,
                 )  # fmt: skip
                 if total_fragments > MAX_FRAGMENTS:
                     note(f"{total_fragments} fragments, only the newest {MAX_FRAGMENTS} read")
@@ -665,6 +715,8 @@ def recover(
                         f"{kind} {verdict}": n for (kind, verdict), n in run.by_csum.items()
                     },
                     "csum_trees": run.csum_trees.summary(),
+                    "free_space": run.space.summary()
+                    | {"by_space": dict(run.by_space), "by_risk": dict(run.by_risk)},
                     "orphan_leaves": len(lone),
                     "fragments": len(tops),
                     "fragments_found": total_fragments,
@@ -680,6 +732,7 @@ def recover(
         return Recovered(recovery_id, os.fspath(output_dir), rehash, resolved, gaps,
                          dict(run.counts), run.bytes_written, len(lone),
                          dict(run.by_source), len(tops), total_fragments,
-                         dict(run.by_csum))  # fmt: skip
+                         dict(run.by_csum), dict(run.by_space), dict(run.by_risk),
+                         summary["free_space"])  # fmt: skip
     finally:
         conn.close()

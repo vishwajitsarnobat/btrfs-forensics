@@ -16,7 +16,7 @@ exactly as btrfs_comp_cpu_keys does; range and ordering queries use it.
 
 import struct
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # The tables a recovery appends to after the build (plan.md M4b). Every other table is written
 # by the one pass of `catalog build` and never again; catalog/db.py enforces that.
@@ -525,11 +525,16 @@ CREATE TABLE artifacts (
     missing           TEXT    NOT NULL,
     problems          TEXT    NOT NULL,
     csum_verdict      TEXT,
-    csum_sources      TEXT    NOT NULL
+    csum_sources      TEXT    NOT NULL,
+    space_verdict     TEXT,
+    overwrite_risk    INTEGER,
+    risk_reasons      TEXT    NOT NULL,
+    space_source      TEXT
 );
 CREATE INDEX artifacts_by_inode ON artifacts (tree_id, objectid);
 CREATE INDEX artifacts_by_sha256 ON artifacts (sha256);
 CREATE INDEX artifacts_by_csum ON artifacts (csum_verdict);
+CREATE INDEX artifacts_by_risk ON artifacts (overwrite_risk);
 
 CREATE TABLE provenance (
     provenance_id  INTEGER PRIMARY KEY,
@@ -548,6 +553,8 @@ CREATE TABLE provenance (
     error_kind     TEXT,
     read_record    TEXT,
     csum_verdict   TEXT,
+    space_verdict  TEXT,
+    block_space    TEXT,
     FOREIGN KEY (content_id, slot) REFERENCES items(content_id, slot)
 );
 CREATE INDEX provenance_by_artifact ON provenance (artifact_id, seq);
