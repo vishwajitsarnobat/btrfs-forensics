@@ -10,11 +10,18 @@
 # pinned.sh; set MKFS=mkfs.btrfs to format with the host's btrfs-progs), and
 # DONE_MARKER (default "=== SCENARIO-DONE"): the serial-log line that proves
 # the scenario finished, for scenarios that power off without unmounting.
+# OUT_DIR (default <repo>/images/scenarios, and always under <repo>/images/)
+# puts the image and its log elsewhere, for experiments that build their own.
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
-OUT=$REPO/images/scenarios
+OUT=${OUT_DIR:-$REPO/images/scenarios}
+case $OUT in
+    *..*|"$REPO"/images/) echo "OUT_DIR must lie under $REPO/images/" >&2; exit 1;;
+    "$REPO"/images/*) ;;
+    *) echo "OUT_DIR must lie under $REPO/images/" >&2; exit 1;;
+esac
 NAME=$1
 # NAME is a plain file stem: never let it escape images/scenarios/
 case $NAME in ''|*/*|.*) echo "invalid scenario name: $NAME" >&2; exit 1;; esac
