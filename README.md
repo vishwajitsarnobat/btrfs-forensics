@@ -556,9 +556,12 @@ root, the backup roots and the roots only the scan found.
   `touch` (the inode item changed and nothing else above: times, link count, a directory's
   entries), and `delete` when a later state of the same tree, walked without a gap, no longer
   holds the identity. When every later walk has gaps the event is `not_seen`: absence from an
-  incomplete walk proves nothing. `subvolume_deleted` is one event for a tree that a later
-  state, whose whole root tree was found, no longer names. Several changes between two surviving
-  states show as their net effect.
+  incomplete walk proves nothing. Names are compared only between versions seen in a whole walk:
+  a version seen only through walks with gaps, fragments or lone leaves (any of them can miss the
+  leaf that holds a name), or only in a log tree replayed without its base, gives no `rename`,
+  `move`, `link` or `unlink`, and no `touch` when its names differ. `subvolume_deleted` is one
+  event for a tree that a later state, whose whole root tree was found, no longer names. Several
+  changes between two surviving states show as their net effect.
 - **`modify` lists the byte ranges whose extent differs** between the two versions (`delta`:
   `offset`, `length`, `change` `added`, `removed` or `replaced`), comparing what the extent items
   point at (address and offset into it, compression, inline bytes), not how they are cut, and
@@ -573,8 +576,12 @@ root, the backup roots and the roots only the scan found.
   logged in exists-only mode is left out). Such observations sort before the committed state of
   their generation, are marked `uncommitted_only`, and never prove a `delete`. A version whose
   inode item is older than an extent (see `recover`) is marked `inconsistent`. An identity seen
-  only there ends with `never_committed`: a file written, fsynced and deleted within one
-  transaction, for instance.
+  only there ends with `never_committed` (a file written, fsynced and deleted within one
+  transaction, for instance) only when it is proved: every sighting is of the transaction that
+  created it, and the tree as that transaction's commit left it (a root block of that generation,
+  named by a committed root tree) was walked without a gap and does not hold it. A file that
+  outlives the transaction that created it is in that commit. Otherwise it ends with `not_seen`,
+  whose `reason` says which proof is missing.
 - When the database holds a recovery, an event carries the `sha256` of the complete artifact with
   the same tree, inode, creation generation and extent signature.
 
@@ -582,7 +589,9 @@ With `--json`, one object per event. Keys of every event: `event`, `tree_id`, `o
 `created` (the creation generation), `transaction` (the generation the event happened in, when the
 items say so exactly: the creation generation for `create`, the version's `transid` for a change;
 `null` otherwise), `between` (the two sources that bound the event, older first; `null` for
-`create`) and `generations` (theirs), `path`, `attached`, `kind`, `size`, `transid`,
+`create`, `never_committed` and a `not_seen` of an identity no committed state holds) and
+`generations` (theirs; for `never_committed`, the transaction that created the file and the one
+before), `path`, `attached`, `kind`, `size`, `transid`,
 `extent_signature`, `inconsistent`, `times`, `first_seen` and `last_seen` (`source` and
 `generation` of the version the event leads to; for `delete` and `not_seen`, of the last version),
 `seen_in` (how many sources showed that version), `uncommitted_only`, `log_only`, `sha256`, and `order_assumed`:

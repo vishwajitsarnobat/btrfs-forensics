@@ -1612,7 +1612,8 @@ between one backup slot and the current tree (SecurityRonin) or over discovered 
    state of their generation, marked `uncommitted`, and never produce a `delete`: absence from a
    fragment proves nothing. A version with an inode item older than its extent (EXP-008) is
    marked `inconsistent`. An identity seen only there gets `never_committed` (a file written,
-   fsynced and deleted within one transaction).
+   fsynced and deleted within one transaction); since 2026-10-07 only with proof, otherwise
+   `not_seen` (see the M5d fix below).
 7. **`artifacts.in_current` goes** (schema version 7), as M4b announced: "deleted since" is a
    `delete` event now, with its bounds, instead of a flag computed against one tree.
 8. **EXTENT_OWNER_REF (172) is not used.** Simple quotas need `btrfs quota enable --simple` or
