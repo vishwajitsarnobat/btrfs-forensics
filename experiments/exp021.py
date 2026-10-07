@@ -838,8 +838,13 @@ def read(path: Path) -> list[dict]:
 
 
 def scrub_errors(record: dict) -> bool:
-    return any(line.startswith("Error summary") and "no errors" not in line
-               for line in record["guest"]["scrub"])  # fmt: skip
+    """Whether the read-only scrub found an error: from the kernel's own scrub messages, since
+    the guest's btrfs-progs cannot print its summary (it aborts: libgcc_s is not in the
+    initramfs), and from that summary where it is printed."""
+    guest = record["guest"]
+    return any("scrub" in line for line in guest["dmesg_problems"]) or any(
+        line.startswith("Error summary") and "no errors" not in line for line in guest["scrub"]
+    )
 
 
 def table(args) -> None:
@@ -904,7 +909,7 @@ def table(args) -> None:
     print("\n## Stability\n")
     stab = read(args.out / "stability.jsonl")
     print("| subject | base | planted: reported, check ro, check csum | workload | N | "
-          "mounted | scrub or read errors | kernel errors or warnings | reported | "
+          "mounted | scrub errors, unreadable files | kernel errors or warnings | reported | "
           "payload on image | check ro / csum clean |")  # fmt: skip
     print("|---|---|---|---|---|---|---|---|---|---|---|")
     for subject in dict.fromkeys(r["subject"] for r in stab):
@@ -915,7 +920,8 @@ def table(args) -> None:
             runs = [r for r in stab if r["subject"] == subject and r.get("workload") == workload]
             if not runs:
                 continue
-            errors = sum(scrub_errors(r) or bool(r["guest"]["read_errors"]) for r in runs)
+            errors = (f"{sum(scrub_errors(r) for r in runs)}, "
+                      f"{sum(bool(r['guest']['read_errors']) for r in runs)}")  # fmt: skip
             balanced = sum(any(x.startswith("Done") for x in r["guest"]["balance"]) for r in runs)
             print(
                 f"| {subject} | `{zero['base']}` | {head} | {workload} | {len(runs)} | "
