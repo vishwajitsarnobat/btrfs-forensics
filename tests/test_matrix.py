@@ -205,7 +205,10 @@ def test_history_is_consistent_and_its_last_states_are_the_image(name):
                 assert origin.after < inode_items[inode]["generation"] <= origin.generation, path
                 if origin.exact:
                     assert inode_items[inode]["generation"] == origin.generation, path
-            assert inode_items[inode]["transid"] >= state.generation, path
+            # the last change to the inode is no older than the window of its last logged state
+            assert state.after is not None and inode_items[inode]["transid"] > state.after, path
+            if state.exact:
+                assert inode_items[inode]["transid"] >= state.generation, path
             content = read_file(fs.reader, tree, inode, no_holes=no_holes)
             assert content.complete, (path, content.failures)
             assert hashlib.sha256(b"".join(content.chunks())).hexdigest() == state.sha256, path
