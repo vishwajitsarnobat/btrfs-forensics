@@ -802,6 +802,8 @@ def stability_part(args) -> None:
                     record = {"subject": subject, "technique": technique, "base": base,
                               "workload": workload, "run": n, "guest": guest,
                               "reported": sum(x.technique == technique for x in found),
+                              "found": [finding_record(x) for x in found
+                                        if x.technique == technique][:4],
                               "others": dict(Counter(x.technique for x in found
                                                      if x.technique != technique)),
                               "on_image": on_image(image, data),
