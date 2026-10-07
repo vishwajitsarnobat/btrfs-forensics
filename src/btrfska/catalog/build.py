@@ -8,6 +8,10 @@ from the same stream. `scan` and `roots` each scan the image on their own; this 
 The database is created by `catalog/db.py`, which refuses an existing path. The image's SHA-256 is
 taken before the pass and, unless `rehash` is off, again after it; both are recorded in `scan_runs`
 as the chain of custody. A pass that fails leaves no database behind.
+
+With `foreign`, a second pass over the same regions looks for tree blocks of other filesystems
+(scan/foreign.py). Its summary goes into `scan_summary` under `foreign` and each of its findings
+into `problems` with source `foreign`; foreign blocks are not `nodes` rows.
 """
 
 import json
@@ -22,6 +26,7 @@ from btrfska.catalog import db
 from btrfska.catalog.content import ContentWriter
 from btrfska.catalog.schema import SCHEMA_VERSION, s64, u64
 from btrfska.scan.classify import Classified, scan_image
+from btrfska.scan.foreign import foreign_scan, report_lines
 from btrfska.scan.kernel_numpy import NodeRecord
 from btrfska.scan.regions import Region
 from btrfska.scan.roots import MAX_MAPS, Discovery, discover, index_records, known_roots
@@ -401,6 +406,7 @@ def build_catalog(
     rehash: bool = True,
     max_states: int = MAX_STATES,
     max_maps: int = MAX_MAPS,
+    foreign: bool = False,
 ) -> Built:
     """Scan `image_path` once and write its evidence database to `db_path` (which must not exist).
 
@@ -459,11 +465,16 @@ def build_catalog(
                          f"{len(found.states)} evaluated as states (--max-states): older root "
                          "trees are in `nodes` and `root_items` but not in `states`",),
                     )  # fmt: skip
+                summary = scan.summary
+                if foreign:
+                    others = foreign_scan(img, fs, scan.plan.regions)
+                    summary = summary | {"foreign": others}
+                    _insert_problems(conn, "foreign", report_lines(others))
                 after = img.sha256() if rehash else None
                 conn.execute(
                     "UPDATE scan_runs"
                     " SET finished_utc = ?, image_sha256_after = ?, scan_summary = ?",
-                    (_now(), after, json.dumps(scan.summary, sort_keys=True, default=_jsonable)),
+                    (_now(), after, json.dumps(summary, sort_keys=True, default=_jsonable)),
                 )
             rows = row_counts(conn)
         except BaseException:
@@ -475,7 +486,7 @@ def build_catalog(
         path=os.fspath(db_path),
         image_sha256=before,
         image_unchanged=None if after is None else after == before,
-        scan_summary=scan.summary,
+        scan_summary=summary,
         states=len(found.states),
         root_tree_candidates=found.root_tree_candidates,
         rows=rows,
