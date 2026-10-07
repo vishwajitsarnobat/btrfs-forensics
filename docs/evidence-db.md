@@ -581,15 +581,15 @@ are never guessed, so a striped chunk known only from DEV_EXTENTs stays rejected
   `provenance.read_record`; `free_space` in `recovery_runs.summary`; `discard` in
   `recovery_runs.options`. Nothing the scan writes changed. A version-8 database is refused;
   rebuild it from the image.
+  Added without a change of the DDL (2026-10-07, `catalog build --hiding`, plan.md M6d):
+  `hiding` in `scan_runs.scan_summary` and the `problems` source `hiding`. A database built
+  without `--hiding` has neither.
 - **8** (2026-10-07): data checksums (plan.md M6a). `artifacts.csum_verdict`, `artifacts.csum_sources`,
   `provenance.csum_verdict`, index `artifacts_by_csum`; `csum` in `provenance.read_record`; `by_csum`
   and `csum_trees` in `recovery_runs.summary`. When the first copy of a sector fails its checksum and
   another copy matches, `recover` now writes that copy's bytes, so such a file's content can differ
   from what version 7 wrote. Nothing the scan writes changed. A version-7 database is refused;
   rebuild it from the image.
-  Added without a change of the DDL (2026-10-07, `catalog build --hiding`, plan.md M6d):
-  `hiding` in `scan_runs.scan_summary` and the `problems` source `hiding`. A database built
-  without `--hiding` has neither.
 - **7** (2026-09-21): `artifacts.in_current` is gone, as M4b announced. "Deleted since" is a
   `delete` event of `btrfska timeline` now, bounded by two states, for an identity of tree, inode
   number and creation generation; the flag compared one artifact with one tree. A timeline is a
