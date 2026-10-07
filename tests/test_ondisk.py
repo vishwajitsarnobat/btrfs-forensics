@@ -168,10 +168,15 @@ def test_objectids():
     assert od.TREE_LOG_OBJECTID == 2**64 - 6
     assert od.TREE_RELOC_OBJECTID == 2**64 - 8
     assert od.DATA_RELOC_TREE_OBJECTID == 2**64 - 9
+    assert od.EXTENT_CSUM_OBJECTID == 2**64 - 10  # btrfs_tree.h:104
     assert od.FIRST_FREE_OBJECTID == 256
     assert od.LAST_FREE_OBJECTID == 2**64 - 256
     assert od.FIRST_CHUNK_TREE_OBJECTID == 256
     assert od.DEV_ITEMS_OBJECTID == 1
+
+
+def test_inode_flags():
+    assert od.INODE_NODATASUM == 1  # btrfs_tree.h:422
 
 
 def test_item_keys():
