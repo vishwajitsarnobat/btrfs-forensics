@@ -276,7 +276,7 @@ lzallright==0.2.6`, scratch only):
 - a truncated stream (all three raise a catchable error);
 - 300 single-bit flips of one compressed 4 KiB sector.
 
-**Also observed** (`tests/oracle/lzo_hostile.py`, seeds 1–5, M1c): per seed,
+**Also observed** (`tests/oracle/lzo_hostile.py`, seeds 1–5, M1c; recorded as EXP-014): per seed,
 218–231 (median 227) of the 300 bit-flipped streams decoded "successfully" to
 wrong bytes within the 4 KiB bound in btrfska, lzallright and dissect.util's
 native decoder (258–277 in its pure-Python decoder). lzallright and both
@@ -2175,7 +2175,7 @@ one run of 15 (365/353/18/828), the async and sync rows never.
 | Beyond Carving team ships their future work first (code repo created, still empty) | M4/M5 prototyped; watch repo; publish corpus fast (C7: no comparable image corpus found, research.md §5.1) |
 | Our own parsing, extent-read or LZO/stream code has bugs a mature library would not | Differential tests vs `dump-tree`, dissect.btrfs streams, `lzallright` and guest SHA-256s; property tests on hostile input; csum-type and compression images from M1; §3.5 fallback ladder (lzallright at runtime, then dissect.btrfs at runtime with an AGPL relicence) |
 | dissect.btrfs (test oracle) drifts or is abandoned | Pinned `1.10.*` in the `dev` group; guest SHA-256s and `dump-tree` are independent oracles, so losing it costs one cross-check, not a runtime feature |
-| Decoding "succeeds" on corrupted compressed data (LZO has no integrity check: 218–231 of 300 bit-flipped 4 KiB streams per seed decoded to wrong bytes in btrfska, lzallright and dissect.util native, §3.5) | Decode success never raises confidence; content is Confirmed only by a data-checksum match (M6); decoder errors are recorded, not hidden |
+| Decoding "succeeds" on corrupted compressed data (LZO has no integrity check: 218–231 of 300 bit-flipped 4 KiB streams per seed decoded to wrong bytes in btrfska, lzallright and dissect.util native, §3.5; EXP-014) | Decode success never raises confidence; content is Confirmed only by a data-checksum match (M6); decoder errors are recorded, not hidden |
 | Licence ambiguity from test-only AGPL use | Oracle confined to the `dev` group and `tests/oracle/`; import-boundary test on `src/`; sdist contents checked before release (§3.3) |
 | New format features mis-read (remap tree, RST, fscrypt) | Incompat gate refuses unknown/unsupported bits (M1); later research items |
 | Discard destroys evidence on real media (sync: ~91 % stale metadata gone) | Discard axis in corpus + observed-discard input to overwrite-risk score and report caveat |
