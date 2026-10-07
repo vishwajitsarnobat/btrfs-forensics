@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 
 from btrfska import __version__
 from btrfska.catalog import db
-from btrfska.catalog.schema import s64
+from btrfska.catalog.schema import s64, u64
 from btrfska.recover.csums import CsumTrees
 from btrfska.recover.dbtree import (
     Leaf,
@@ -52,13 +52,14 @@ from btrfska.recover.logs import base_inodes, base_root, log_roots, replay
 from btrfska.recover.maps import Readers
 from btrfska.recover.output import PARTIAL, FileSink, OutputError, OutputTree
 from btrfska.recover.space import SpaceViews
+from btrfska.recover.tiers import Backrefs, Evidence, ExtentEvidence, decide
 from btrfska.substrate import items, ondisk
 from btrfska.substrate.datacsum import Csums, artifact_verdict
 from btrfska.substrate.extents import FileAssembly, stream_extent
 from btrfska.substrate.freespace import LEVELS, fold
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
-from btrfska.substrate.node import NodeReader
+from btrfska.substrate.node import NodeReader, owner_ok
 
 MAX_FRAGMENTS = 4096  # fragments read per recovery, newest first; more is reported
 MAX_NOTED = 16  # findings of the extent reader copied into one artifact's problems
@@ -88,6 +89,7 @@ class Recovered:
     by_space: dict[str, int] | None = None  # space verdict -> artifacts
     by_risk: dict[str, int] | None = None  # overwrite-risk level -> artifacts
     free_space: dict | None = None  # recovery_runs.summary["free_space"]
+    by_tier: dict[tuple[str, str], int] | None = None  # (source kind, tier) -> artifacts
 
 
 def _now() -> str:
@@ -139,6 +141,10 @@ class _Run:
         self.space: SpaceViews | None = None  # the current allocation (recover/space.py)
         self.by_space: Counter[str] = Counter()  # space verdict
         self.by_risk: Counter[str] = Counter()  # overwrite-risk level
+        self.backrefs: Backrefs | None = None  # extent-tree back-references (recover/tiers.py)
+        self.by_tier: Counter[tuple[str, str]] = Counter()  # (source kind, tier)
+        self.tier_rules: Counter[str] = Counter()  # artifacts per rule that fired
+        self.leaves: dict[int, int | None] = {}  # content id -> owner of its valid copies, or None
         self.bytes_written = 0
         self.last_objectid: int | None = None  # of the orphan leaf being read, else None
         self.uncommitted = False  # the root being read is no committed tree (orphan sources)
@@ -326,6 +332,9 @@ class _Run:
             "overwrite_risk": None,
             "risk_reasons": "[]",
             "space_source": None,
+            "tier": None,
+            "tier_rules": "[]",
+            "provenance_chain": "{}",
         }
         reads, missing, same = [], [], None
         mode = None if inode is None else inode["mode"]
@@ -392,8 +401,17 @@ class _Run:
         if verdict is not None:
             row["space_verdict"], row["overwrite_risk"] = verdict, risk
             row["risk_reasons"], row["space_source"] = json.dumps(reasons), self.space.view.source
-            self.by_space[verdict] += 1
-            self.by_risk[LEVELS[risk]] += 1
+        backrefs, asked = {}, {}
+        if row["status"] == "duplicate":
+            self._inherit(row, problems)
+        else:
+            found = self._tier(root, record, row, reads, missing, problems)
+            row["tier"], rules, backrefs, asked = found
+            row["tier_rules"] = json.dumps(rules)
+        row["provenance_chain"] = json.dumps(self._chain(root, record, row, asked))
+        if row["space_verdict"] is not None:
+            self.by_space[row["space_verdict"]] += 1
+            self.by_risk[LEVELS[row["overwrite_risk"]]] += 1
         tree_path = parts[len(base) :] if row["output_path"] else where[0]
         if record.orphan_item and not row["output_path"]:
             tree_path = parts
@@ -412,7 +430,9 @@ class _Run:
         self.by_source[row["source_kind"], row["status"]] += 1
         if row["csum_verdict"] is not None:
             self.by_csum[row["source_kind"], row["csum_verdict"]] += 1
-        self._provenance(artifact_id, record, reads, placements)
+        self.by_tier[row["source_kind"], row["tier"]] += 1
+        self.tier_rules.update(json.loads(row["tier_rules"]))
+        self._provenance(artifact_id, record, reads, placements, backrefs)
         self.out.record(
             {k: v for k, v in row.items() if k != "path_raw"}
             | {
@@ -425,11 +445,176 @@ class _Run:
                 "xattrs": json.loads(row["xattrs"]),
                 "csum_sources": json.loads(row["csum_sources"]),
                 "risk_reasons": json.loads(row["risk_reasons"]),
+                "tier_rules": json.loads(row["tier_rules"]),
+                "provenance_chain": json.loads(row["provenance_chain"]),
                 "missing": missing,
                 "problems": problems,
                 "inode": inode,
             }
         )
+
+    # ---- confidence (plan.md M6c) --------------------------------------------------------
+    def _inherit(self, row: dict, problems: list) -> None:
+        """A duplicate repeats its original's notes and verdicts (issue #81)."""
+        original = self.conn.execute(
+            "SELECT problems, csum_verdict, csum_sources, space_verdict, overwrite_risk,"
+            " risk_reasons, space_source, tier, tier_rules FROM artifacts"
+            " WHERE artifact_id = ?",
+            (row["duplicate_of"],),
+        ).fetchone()
+        notes, *verdicts, tier, rules = tuple(original)
+        problems.append(f"the same file as artifact {row['duplicate_of']}, whose notes follow")
+        problems += json.loads(notes)
+        names = ("csum_verdict", "csum_sources", "space_verdict", "overwrite_risk", "risk_reasons",
+                 "space_source")  # fmt: skip
+        row.update(zip(names, verdicts, strict=True))
+        row["tier"] = tier
+        row["tier_rules"] = json.dumps([*json.loads(rules), "duplicate"])
+
+    def _owner(self, content_id: int) -> int | None:
+        """The header owner of a leaf's valid copies; None when it has none."""
+        if content_id not in self.leaves:
+            found = self.conn.execute(
+                "SELECT owner FROM content_blocks WHERE content_id = ? LIMIT 1", (content_id,)
+            ).fetchone()
+            self.leaves[content_id] = None if found is None else u64(found[0])
+        return self.leaves[content_id]
+
+    def _consistency(self, root: Root, record: InodeRecord, reads: list):
+        """(every leaf has a valid copy, generation problems, owner problems): no item newer than
+        its leaf, no inode created after its last change, no leaf newer than the root block that
+        reached it, every leaf's owner as the M1 owner check wants it for the tree read."""
+        generation, owner = [], []
+        inode, leaves = record.inode, {}
+        if inode is not None and inode["generation"] > inode["transid"]:
+            generation.append(
+                f"the inode was created in generation {inode['generation']}, after its last "
+                f"change in {inode['transid']}"
+            )
+        for origin in record.origins:
+            leaf = leaves.setdefault(origin.leaf.content_id, origin.leaf)
+            if origin.role == "inode_item" and inode and inode["transid"] > leaf.generation:
+                generation.append(
+                    f"the INODE_ITEM (transid {inode['transid']}) is newer than its leaf "
+                    f"{leaf.bytenr} (generation {leaf.generation})"
+                )
+        held = {(leaf.bytenr, item.slot): leaf for item, leaf in record.extents}
+        for extent, _ in reads:
+            leaf = held.get((extent.leaf, extent.slot))
+            if leaf is not None and (extent.generation or 0) > leaf.generation:
+                generation.append(
+                    f"the extent at file offset {extent.file_offset} (generation "
+                    f"{extent.generation}) is newer than its leaf {leaf.bytenr} (generation "
+                    f"{leaf.generation})"
+                )
+        # a walk from a root block reaches no newer block; a lone leaf and its joins have none
+        bounded = root.kind in ("anchored_root", "log_tree") or (
+            root.kind == "orphan_graph" and root.level > 0
+        )
+        trees = [root.tree_id] + ([root.subvolume] if root.subvolume is not None else [])
+        validated = True
+        for leaf in leaves.values():
+            if bounded and leaf.generation > root.generation:
+                generation.append(
+                    f"leaf {leaf.bytenr} (generation {leaf.generation}) is newer than the root "
+                    f"{root.bytenr} (generation {root.generation})"
+                )
+            found = self._owner(leaf.content_id)
+            if found is None:
+                validated = False
+            elif all(owner_ok(tree, found) is False for tree in trees):
+                owner.append(f"leaf {leaf.bytenr} is owned by tree {found}, not {root.tree_id}")
+        return validated, generation, owner
+
+    def _tier(self, root: Root, record: InodeRecord, row: dict, reads: list, missing: list,
+              problems: list):  # fmt: skip
+        """(tier, rules, per extent read the back-references asked, extent trees asked); what the
+        consistency checks found goes into `problems`."""
+        labels = self.csum_trees.labels
+        states = {label: state_id for state_id, label in labels.items()}
+        anchored = row["source_kind"] in ("anchored_root", "orphan_item")
+        own_state = root.state_id if anchored else None
+        found, backrefs, asked = [], {}, {}
+        for extent, _ in reads:
+            if extent.kind != "regular" or extent.error_kind or not extent.length:
+                continue
+            sources = () if extent.csum is None else tuple(extent.csum.sources)
+            ask = [own_state] if own_state is not None else []
+            ask += [states[source] for source in sources if source in states]
+            refs = {}
+            for state_id in dict.fromkeys(ask):
+                label = labels.get(state_id, f"state:{state_id}")
+                refs[label] = self.backrefs.check(
+                    state_id, extent.disk_bytenr, extent.disk_num_bytes, record.objectid
+                )
+                tree = self.backrefs.tree(state_id)
+                asked[label] = None if tree is None else tree[1]
+            verdict = None if extent.csum is None else extent.csum.verdict
+            found.append(ExtentEvidence(verdict, sources, refs))
+            backrefs[extent.leaf, extent.slot] = [
+                {"state": label, "verdict": value} for label, value in refs.items()
+            ]
+        kind, status = record.kind, row["status"]
+        if kind == "dir":
+            read = status != "failed"
+        elif kind == "symlink":
+            read = row["symlink_target"] is not None
+        elif record.exists_only:
+            read = False
+        elif kind == "file" or record.extents:
+            read = status == "complete"
+        else:
+            read = True  # a special file, or an inode without content: nothing to read
+        validated, generation, owner = self._consistency(root, record, reads)
+        problems += generation + owner
+        own = labels.get(root.state_id) if anchored else None
+        evidence = Evidence(
+            anchored=anchored,
+            validated=validated,
+            own=root.source if root.kind == "log_tree" else own,
+            own_state=own,
+            has_inode=record.inode is not None,
+            content_read=read,
+            csum_verdict=row["csum_verdict"],
+            extents=tuple(found),
+            generation_problems=tuple(generation),
+            owner_problems=tuple(owner),
+            inode_older=any(m[2] == "inode_item_older_than_extent" for m in missing),
+        )
+        tier, rules = decide(evidence)
+        return tier, rules, backrefs, asked
+
+    def _chain(self, root: Root, record: InodeRecord, row: dict, asked: dict) -> dict:
+        """Every source the artifact rests on, for its row and its manifest line."""
+        leaves = {}
+        for origin in record.origins:
+            leaf = origin.leaf
+            leaves.setdefault(leaf.content_id, {
+                "bytenr": leaf.bytenr, "generation": leaf.generation,
+                "owner": self._owner(leaf.content_id), "reach": leaf.status,
+            })  # fmt: skip
+        return {
+            "root": {
+                "source": root.source,
+                "kind": root.kind,
+                "state_id": root.state_id,
+                "tree_id": root.tree_id,
+                "subvolume": root.subvolume,
+                "bytenr": root.bytenr,
+                "generation": root.generation,
+                "level": root.level,
+                "named_by": root.named_by,
+            },
+            "leaves": list(leaves.values()),
+            "joins": [join.get("kind") for join in record.joins],
+            "csum_trees": json.loads(row["csum_sources"]),
+            "extent_trees": [
+                {"state": label, "complete": complete} for label, complete in asked.items()
+            ],
+            "chunk_maps": json.loads(row["chunk_maps"]),
+            "space_source": row["space_source"],
+            "duplicate_of": row["duplicate_of"],
+        }
 
     def _orphan_item(self, root: Root, record: InodeRecord, names: list, problems: list):
         """Where an ORPHAN_ITEM inode is written, and its names with the former ones added."""
@@ -469,7 +654,8 @@ class _Run:
             found.setdefault(("block", origin.leaf.content_id), self.space.block(origin.leaf))
         return found
 
-    def _provenance(self, artifact_id: int, record: InodeRecord, reads: list, placements) -> None:
+    def _provenance(self, artifact_id: int, record: InodeRecord, reads: list, placements,
+                    backrefs: dict) -> None:  # fmt: skip
         by_item = {(extent.leaf, extent.slot): (extent, digest) for extent, digest in reads}
         rows = []
         for seq, origin in enumerate(record.origins):
@@ -479,10 +665,12 @@ class _Run:
                 extent = None
             space = None if extent is None else placements.get(("extent", leaf.bytenr, origin.slot))
             block = placements.get(("block", leaf.content_id))
+            asked = None if extent is None else backrefs.get((extent.leaf, extent.slot))
             read = (
                 None
                 if extent is None
-                else asdict(extent) | {"space": None if space is None else asdict(space)}
+                else asdict(extent)
+                | {"space": None if space is None else asdict(space), "backref": asked}
             )
             rows.append(
                 (
@@ -496,15 +684,27 @@ class _Run:
                     None if extent is None or extent.csum is None else extent.csum.verdict,
                     None if space is None else space.verdict,
                     None if block is None else block.verdict,
+                    _backref_verdict(asked),
                 )
             )  # fmt: skip
         self.conn.executemany(
             "INSERT INTO provenance (artifact_id, seq, role, content_id, slot, bytenr, generation,"
             " physical, block_status, file_offset, length, extent_sha256, error_kind, read_record,"
-            " csum_verdict, space_verdict, block_space)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " csum_verdict, space_verdict, block_space, backref)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
+
+
+def _backref_verdict(asked: list | None) -> str | None:
+    """`provenance.backref`: `disagrees` when an extent tree asked does, `agrees` when every one
+    asked does, else `unknown`; None when none was asked."""
+    if not asked:
+        return None
+    verdicts = {entry["verdict"] for entry in asked}
+    if "disagrees" in verdicts:
+        return "disagrees"
+    return "agrees" if verdicts == {"agrees"} else "unknown"
 
 
 def _join_lone_leaf(conn, run: _Run, root: Root, leaf: Leaf, inodes: dict, sectorsize: int):
@@ -568,6 +768,7 @@ def recover_roots(
     sectorsize = readers.current.ctx.sectorsize
     run.csum_trees = trees = CsumTrees(conn, readers.current.ctx.csum_type, sectorsize)
     run.space = SpaceViews(conn, readers.current, discard=discard)
+    run.backrefs = Backrefs(conn)
     covered: set[int] = set()  # leaves read under a fragment are not read again on their own
     for root, leaf in (*((root, None) for root in (*roots, *fragments, *logs)), *orphans):
         if leaf is not None and leaf.content_id in covered:
@@ -715,6 +916,8 @@ def recover(
                         f"{kind} {verdict}": n for (kind, verdict), n in run.by_csum.items()
                     },
                     "csum_trees": run.csum_trees.summary(),
+                    "by_tier": {f"{kind} {tier}": n for (kind, tier), n in run.by_tier.items()},
+                    "tier_rules": dict(sorted(run.tier_rules.items())),
                     "free_space": run.space.summary()
                     | {"by_space": dict(run.by_space), "by_risk": dict(run.by_risk)},
                     "orphan_leaves": len(lone),
@@ -733,6 +936,6 @@ def recover(
                          dict(run.counts), run.bytes_written, len(lone),
                          dict(run.by_source), len(tops), total_fragments,
                          dict(run.by_csum), dict(run.by_space), dict(run.by_risk),
-                         summary["free_space"])  # fmt: skip
+                         summary["free_space"], dict(run.by_tier))  # fmt: skip
     finally:
         conn.close()

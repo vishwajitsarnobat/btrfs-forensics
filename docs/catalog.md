@@ -22,7 +22,7 @@ Maintenance rules:
 
 ## 2026-10-07 — M7a: the corpus matrix, with every file state in its ground truth
 
-- **Branch:** `feature/m7-corpus-matrix` (from `main` at `503e3d9`, `main` merged in twice; issue
+- **Branch:** `feature/m7-corpus-matrix` (from `main` at `503e3d9`, `main` merged in as it moved; issue
   #58). New: `corpus/matrix.py`, `corpus/matrix.tsv`, `corpus/large.tsv`, `corpus/groundtruth.py`,
   `corpus/vm/scenarios/matrix.sh`, `corpus/vm/scenarios/matrix.guest.sh`, `tests/test_matrix.py`,
   `tests/test_corpus_groundtruth.py`. Changed: `corpus/build.py` (`--tier`), `corpus/vm/init`
@@ -82,6 +82,50 @@ Maintenance rules:
   `m4_deep_lost_parent` from before the main checkout rebuilt them, and pass with the record
   refreshed. `uv run ruff check .`, `uv run ruff format --check .` and
   `sha256sum -c tests/fixtures/SHA256SUMS` pass.
+
+## 2026-10-07 — M6c: confidence tiers for every recovered artifact
+
+- **Branch:** `feature/m6-confidence-tiers` (from `main` at `f1b211c`; issues #51 and #81). New
+  `src/btrfska/recover/tiers.py`, `tests/test_tiers.py`, `tests/test_exp020.py`,
+  `experiments/EXP-020.md`, `experiments/exp020.py`. Changed `recover/engine.py`, `recover/cli.py`
+  (a `confidence:` line), `catalog/schema.py` (version 10), `README.md`, `docs/evidence-db.md`,
+  `docs/plan.md` (M6c).
+- **Why.** Claim C4: every artifact carries a confidence tier derived from explicit evidence
+  rules, and the risk table says content is Confirmed only by a checksum. Issue #81: a duplicate
+  did not repeat its original's notes, so a filter on its own row missed them.
+- **What changed.** Every artifact gets `confirmed`, `probable` or `unattached` and the list of
+  rules that fired (23 rules, one table in README, evidence-db.md and plan.md, each with its
+  reason). Two questions decide: tied to a committed state (an anchored walk, or for a lone
+  leaf, fragment or log tree, a data-checksum match in a state whose extent tree back-references
+  the extent to the inode), and content proven (a data-checksum match decided by the artifact's
+  own state, or by a state whose extent tree agrees; or no data on disk, so the content lies in a
+  checksummed leaf). Contradictions (`csum_mismatch`, `backref_disagrees`,
+  `inode_item_older_than_extent`, generation or owner inconsistencies, an unvalidated block) give
+  `unattached`. Decoding never raises a tier. A new back-reference check reads each state's
+  extent tree from the database (EXTENT_DATA_REF by inode number, SHARED_DATA_REF through the
+  parent leaf). Schema 10: `artifacts.tier`, `tier_rules`, `provenance_chain` (root, leaves with
+  owner and reach, joins, csum and extent trees asked, maps, allocation view, original of a
+  duplicate), `provenance.backref`, `backref` in `read_record`, `by_tier` and `tier_rules` in the
+  run summary, the same in `manifest.jsonl`. A duplicate now repeats its original's notes,
+  verdicts, tier and rules (#81).
+- **Numbers** (EXP-020; 26 fixed images, one run each, i5-1335U host; 13 888 files): anchored
+  files 11 105 `confirmed`, 2 `probable`, 8 `unattached`; lone-leaf files 8 / 87 / 152; fragment
+  files 0 / 550 / 1 826; log-tree files 0 / 105 / 43. No artifact fires `backref_disagrees`;
+  every current file with checksummed data is `confirmed` except the registered `damaged.txt`
+  (`unattached`). Registered H1 refuted as stated: 37 of 240 `confirmed` files with a logged name
+  have no logged hash, all versions the log never hashed (28 empty, 6 prefixes of a logged
+  version, 2 regenerated from the scenario) but one, which cannot be checked; none shown wrong.
+  Tiers are ordered: right in 85 % of `confirmed`, 11 % of `probable`, 2 % of `unattached`. 98 % of
+  `confirmed` files rest on the leaf checksum (inline files). `m5_reuse*` give 53 `csum_mismatch`
+  files, all `unattached`: the overwritten-in-place case EXP-013 lacked.
+- **Verified.** Unit tests per rule on forged records, the back-reference check on forged extent
+  trees (agrees, disagrees, snapshot, shared ref, gap, hostile refs), synthetic engine tests
+  (tiers, chain, manifest, a forged inode newer than its leaf, a duplicate's inheritance), and
+  image tests (current files `confirmed` on six csum/codec images with no disagreement, the
+  nodatasum file `probable`, the flipped mismatch `unattached`, `m4_deep` orphans confirmed only
+  with `csum_match` and `backref_attributed`, every `b.bin` version of `m5_reuse` carrying the
+  reuse note in its own row). 1217 tests passed, none skipped; 1318 after merging `main` with M6d (1314 in the full run, and the 4 hide-and-seek image tests once those images were linked in); ruff clean; `sha256sum -c`
+  OK.
 
 ## 2026-10-07 — M6d: hiding detection, reserved ranges from the feature flags
 
