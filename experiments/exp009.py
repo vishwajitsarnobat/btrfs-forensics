@@ -13,10 +13,12 @@ Builds go to OUT/builds with their own guest initramfs under OUT/vm, so neither
 images/scenarios nor images/vm is touched.
 
 Usage, from the repo root:
-  uv run python experiments/exp009.py run [--builds 5] [--out DIR]
+  uv run python experiments/exp009.py run [--builds 5] [--first 1] [--keep] [--out DIR]
   uv run python experiments/exp009.py run --image images/scenarios/m4_deep.img
   uv run python experiments/exp009.py table
 All take `--results PATH` (default OUT/results.jsonl; OUT is images/scratch/exp/EXP-009).
+`--first` numbers the builds from N (one build per call, under a lock, is `--builds 1 --first N`);
+`--keep` leaves the builds in OUT/builds, to be measured again (`--image`) by another version.
 """
 
 import argparse
@@ -138,6 +140,10 @@ def score(truths: list[dict], events: list[dict]) -> dict:
         "delete_width_max": max(widths) if widths else None,
         "delete_widths": sorted(widths),
         "link_or_move": sum(e["event"] in ("link", "move") for e in events),
+        # the endings of identities no committed state holds that are not proved never committed
+        "not_seen_uncommitted": sorted(
+            e["path"] for e in events if e["event"] == "not_seen" and e["between"] is None
+        ),
         "unlink_within_its_generation": unlink is not None and any(
             e["event"] == "unlink" and (e["objectid"], e["created"]) == unlink["identity"]
             and e["generations"][0] <= unlink["generation"] <= e["generations"][1]
@@ -192,20 +198,22 @@ def private_vm(out: Path) -> None:
                    env=os.environ | {"VM_DIR": str(vm)}, stdout=subprocess.DEVNULL)  # fmt: skip
 
 
-def run(results: Path, out: Path, builds: int, image: Path | None) -> None:
+def run(results: Path, out: Path, builds: int, image: Path | None, first: int = 1,
+        keep: bool = False) -> None:  # fmt: skip
     results.parent.mkdir(parents=True, exist_ok=True)
     with results.open("a") as sink:
         if image is not None:
             sink.write(json.dumps(measure(image, out / "work")) + "\n")
             return
         private_vm(out)
-        for number in range(1, builds + 1):
+        for number in range(first, first + builds):
             path = build(f"exp009_r{number}", out)
             try:
                 record = measure(path, out / "work")
             finally:
-                path.unlink(missing_ok=True)
-                path.with_suffix(".log").unlink(missing_ok=True)
+                if not keep:
+                    path.unlink(missing_ok=True)
+                    path.with_suffix(".log").unlink(missing_ok=True)
             sink.write(json.dumps(record) + "\n")
             sink.flush()
             print(
@@ -252,6 +260,10 @@ def table(results: Path) -> None:
         row("share order assumed", [r["order_assumed"] / r["events_measured"] for r in group])
         row("share log only", [r["log_only"] / r["events_measured"] for r in group])
         print(
+            f"\nnot_seen of identities no committed state holds: "
+            f"{[r.get('not_seen_uncommitted') for r in group]}"
+        )
+        print(
             f"\nunlink within its generation: "
             f"{sum(r['unlink_within_its_generation'] for r in group)} of {len(group)}"
         )
@@ -269,6 +281,8 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     run_cmd = commands.add_parser("run", help="build, measure and append to the results")
     run_cmd.add_argument("--builds", type=int, default=5)
+    run_cmd.add_argument("--first", type=int, default=1, help="the number of the first build")
+    run_cmd.add_argument("--keep", action="store_true", help="keep the builds in OUT/builds")
     run_cmd.add_argument("--image", type=Path, help="measure this built image instead")
     run_cmd.add_argument("--out", type=Path, default=OUT, help="a directory under images/")
     table_cmd = commands.add_parser("table", help="print the tables of EXP-009.md §6")
@@ -278,7 +292,7 @@ def main() -> None:
     out = args.out.absolute() if args.command == "run" else OUT
     results = args.results or out / "results.jsonl"
     if args.command == "run":
-        run(results, out, args.builds, args.image)
+        run(results, out, args.builds, args.image, args.first, args.keep)
     else:
         table(results)
 
