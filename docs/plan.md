@@ -38,7 +38,7 @@ re-checked against new prior art in research.md §10.1–§10.2):
 | C2. Free-space-tree forensics: prove blocks were freed; overwrite-risk scoring | G2 | Zero tools, zero papers (re-swept 2026-09-15) |
 | C3. **Full-state, multi-source, per-inode lifecycle timelines**: diffs across backup roots *and* scan-discovered old roots *and* reconstructed orphan fragments → create/modify/rename/move/delete with content deltas | G3 | Beyond Carving diffs objectid *sets* over the historical root trees it discovers by scanning the chunk-mapped tree regions, so it is **not** bounded by the backup roots (research.md §10.12, corrected 2026-09-15); SecurityRonin `recover_deleted()` is backup-root-bounded (all four backup slots, FS tree 5 only). Both are existence-only; neither "diffing generations" nor discovering roots beyond the backups is claimed per se. `mbkn-btrfs-rescue` (2026-09-27) lists per-inode versions and flags renames, the nearest prior art: C3 rests on ordered events between reconstructed states, not on per-inode history alone (research.md §12) |
 | C4. **Evidence-rule-derived confidence tiers** (Confirmed/Probable/Unattached) with a per-artifact provenance chain spanning anchored *and* unanchored artifacts, csum-tree-verified content | G4 | SecurityRonin has severity grades (no provenance, no evidence rules); Beyond Carving has an extent-resolvability taxonomy for anchored recoveries only; `forefst` has ReFS recoverability verdicts; X-Ways has a binary flag. None scores unanchored orphan/slack artifacts or records cross-mode provenance |
-| C5. Hiding detection targeting the Toolan & Humphries (FSI:DI 58:302198, 2026) + Schwietert & Hilgert technique lists, evaluated against fishy-generated images | G5 | Papers propose hiding; nobody ships a detector for those techniques. SecurityRonin's `BACKUP-ROOT-DIVERGENCE` and CRC-mismatch findings are a tamper-detection slice → cited |
+| C5. Hiding detection targeting the Toolan & Humphries (FSI:DI 58:302198, 2026) + Schwietert & Hilgert technique lists, evaluated on images where every technique is planted by our own `corpus/mutate.py` and guest scenarios, with the `fkie-cad/hide-and-seek-dataset` btrfs images as an independent check (fishy has no public btrfs module; docs/research/fishy-btrfs.md, decided 2026-10-07) | G5 | Papers propose hiding; nobody ships a detector for those techniques. SecurityRonin's `BACKUP-ROOT-DIVERGENCE` and CRC-mismatch findings are a tamper-detection slice → cited |
 | C6. **Btrfs** orphaned/relocated-chunk forensics + historical chunk-map reconstruction; on remap-tree images, the stale remap tree as an explicit relocation log (experimental) | G6 | Our sandbox discovery (21/71 orphans outside chunk map); Beyond Carving future work. F2FS address-table rebuild (Oh & Hwang 2025) is the cited analog. `mbkn-btrfs-rescue` (2026-09-27) keeps every CHUNK_ITEM per generation but reads through one merged newest-wins map; C6 is worded as per-generation maps selected by the state being read, which differ from a merged map only where a logical range was reused (research.md §12; EXP-010) |
 | C7. First public btrfs *image* corpus with per-file ground truth spanning checksum, compression, discard and block-group-tree axes + systematic tool benchmark | G8 | No such image corpus found (no btrfs at digitalcorpora/CFReDS). Prior datasets are cited, not claimed away: Wani & Bhat 2018 (*Data in Brief*; in-article tables, no images) and Schwietert & Hilgert 2025 (hiding corpus with ground truth; repository offline) (research.md §5.1) |
 
@@ -276,7 +276,7 @@ lzallright==0.2.6`, scratch only):
 - a truncated stream (all three raise a catchable error);
 - 300 single-bit flips of one compressed 4 KiB sector.
 
-**Also observed** (`tests/oracle/lzo_hostile.py`, seeds 1–5, M1c): per seed,
+**Also observed** (`tests/oracle/lzo_hostile.py`, seeds 1–5, M1c; recorded as EXP-014): per seed,
 218–231 (median 227) of the 300 bit-flipped streams decoded "successfully" to
 wrong bytes within the 4 KiB bound in btrfska, lzallright and dissect.util's
 native decoder (258–277 in its pure-Python decoder). lzallright and both
@@ -1813,8 +1813,12 @@ control's `z.bin`) or under unchanged placement is invisible to every map, which
   reserved, and `metadata_uuid`, `nr_global_roots` and the `remap_root` fields
   are anomalies only when non-zero without their feature flag. Also detect
   backup-root divergence (cite SecurityRonin). Target list per Toolan &
-  Humphries FSI:DI 58:302198. Validate against images generated with
-  **fishy**'s btrfs module.
+  Humphries FSI:DI 58:302198. Validate on images planted by our own
+  `corpus/mutate.py` subcommands and guest scenarios, one per technique and
+  csum type, and on the four btrfs images of `fkie-cad/hide-and-seek-dataset`
+  fetched by URL and pinned by SHA-256 (no licence, so never committed).
+  fishy has no public btrfs module (docs/research/fishy-btrfs.md; decided
+  2026-10-07).
 - Foreign-FSID discovery (optional scan mode, from the M2a review). The M2
   prefilter matches only the current fsid or metadata_uuid, so tree blocks of
   a previous filesystem on the device, or written before `btrfstune -m`/`-u`,
@@ -1825,7 +1829,8 @@ control's `z.bin`) or under unchanged placement is invisible to every map, which
   with its surviving metadata.
 - **DoD:**
   - every artifact in the report has tier + provenance;
-  - the detector finds ≥ the fishy-plantable techniques on generated images;
+  - the detector finds every planted technique on the planted images and
+    reports the hide-and-seek images' techniques;
   - false-positive rate measured on clean corpus images (EXP record).
 
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
@@ -1888,18 +1893,22 @@ control's `z.bin`) or under unchanged placement is invisible to every map, which
     recovery, reaches it. This is the differentiator.
 - **Baseline harness** (scripted; each tool run read-only on a copy under
   `images/`, pinned version recorded):
-  - `btrfs restore` (+find-root) from btrfs-progs ≥ 7.1, built rootless
-    into `images/tools/`;
+  - `btrfs restore` (+find-root) from btrfs-progs 7.1, built in the guest;
   - undelete-btrfs v1.0;
   - `mbkn-btrfs-rescue` (pinned commit; research.md §12);
-  - PhotoRec;
+  - PhotoRec (TestDisk 7.2 static binary, pinned by SHA-256);
   - btrfscue v0.7 `recover`;
   - **`SecurityRonin/btrfs-forensic` `recover_deleted`** (pinned crate
-    version);
+    version, run through a small Rust harness under `corpus/baselines/`);
   - **TSK `develop` build** (experimental btrfs, pinned commit);
-  - FKIE-TSK `tsk_recover -e`;
+  - FKIE-TSK through its pool tools (`fls`/`icat -P`; its `tsk_recover`
+    cannot open btrfs), dropped with a note if it does not build;
   - btrForensics;
-  - commercial (UFS Explorer/R-Studio) if licensed.
+  - commercial tools (UFS Explorer, R-Studio) are out: they cost money.
+
+  Every baseline is pinned by SHA-256 and built and run inside the pinned
+  guest, on a read-only copy of the image (docs/research/baselines.md;
+  decided 2026-10-07).
 - Metrics: recovery rate, SHA-256 exact-match accuracy, metadata recovery
   rate (name/times/mode), runtime; per scenario, with repetition count and
   spread (§7). Per tool, report three counts, as ExtSFR does: files produced,
@@ -2137,7 +2146,7 @@ one run of 15 (365/353/18/828), the async and sync rows never.
     2025) cited as the same idea on other filesystems.
   - Remap-tree support presented as forward-looking/experimental.
 - **Possible paper 2 (spin-off):** hiding detection + FST forensics
-  (C2, C5) evaluated against fishy/ForTrace-generated anti-forensic images
+  (C2, C5) evaluated against planted and third-party anti-forensic images
   — cite Toolan & Humphries **FSI:DI 58:302198 (2026)** (not the SSRN
   preprint) and `fkie-cad/mind-the-slack`.
 - **Artifact:** `uvx` installable tool + Zenodo corpus + EXP scripts that
@@ -2166,6 +2175,36 @@ one run of 15 (365/353/18/828), the async and sync rows never.
   is new for any generation or only outside the current chunk map. Read
   find-root's scan range in the btrfs-progs source and register the
   prediction first (`paper-draft.md` §10).
+- **E-timeline: EXP-009, how right `btrfska timeline` is on `m4_deep`** (issue #55; design fixed
+  with the maintainer on 2026-10-07, before any measurement). C3 has tests (M5d) but no measured
+  number. The timeline is compared with what the guest did, event by event:
+  - *Ground truth.* Scenario `deep` logged hashes only, and did no rename. It now also logs every
+    create, rename and delete in tree 5 as `=== EVENT KIND INODE GENERATION PATH [NEW PATH]`,
+    printed after the `sync` that committed it, with the superblock's generation read in the
+    guest by `btrfs inspect-internal dump-super` (which only reads). Every round also renames a
+    small file once (`moves/m_R.txt`: created in round R, renamed in R + 1, deleted in R + 2,
+    each in the padding commit the round makes anyway, so the number of commits does not
+    change). The file unlinked while open is logged as `unlink`, not as a delete.
+  - *Matching.* An event the timeline reports matches a logged event of the same type when the
+    file identity agrees (inode number and creation generation; for a rename also the new name)
+    and the logged generation lies within the event's bounding interval (`create`: its exact
+    transaction; `rename`, `delete`: `generations`, both ends included). `never_committed` is the
+    delete of a file that no commit held. Precision and recall per type (create, rename,
+    delete), over every reported event of tree 5 except the top directory, which mkfs made.
+  - *Also reported.* The share of the reported events flagged `order_assumed` or `log_only`;
+    the width of the delete intervals; events of kinds the scenario never does (`move`, `link`).
+  - *Definition of done.* EXP-009.md with hypothesis and predictions committed before the first
+    build of the extended scenario; N = 5 fresh builds by a committed `experiments/exp009.py`,
+    median and range, host named; the corpus change proved from a fresh clone (`./setup.sh`,
+    every test passing, nothing skipped); a test that the extended log agrees with the image's
+    creation generations; the result written up whichever way it goes.
+  - **Status 2026-10-07: done, partly refuted** (EXP-009; catalog.md). Over five builds, create
+    and rename precision 1.0, recall 0.987 to 0.989 and 0.870; delete recall 0.889, precision 1.0
+    in three builds and 0.98 in two, from one `never_committed` for a file that was committed in
+    a generation whose state survives only with gaps. No measured event rests on an assumed
+    order; about 3 % rest on a log tree alone (the flash files). Follow-up: `never_committed`,
+    and name changes seen through walks with gaps, should need evidence rather than absence
+    (EXP-009 §8).
 - **Minimum experiment set for paper 1** (EXP records, ≥ 5 regenerations
   where a guest runs; details in `paper-draft.md` §10):
   - E-rec: file-level recovery per source, on no-balance, aged and ≥ 8 GiB
@@ -2178,6 +2217,35 @@ one run of 15 (365/353/18/828), the async and sync rows never.
   - E-fp: discovery false-positive rate on forged images;
   - E-raid: RAID1, RAID1C3, RAID10 and RAID5/6 profiles;
   - E-csum; E-tiers (if C4 is claimed); E-perf; E-robust.
+- **G13 records: four numbers without a record** (planned 2026-10-07, branch
+  `feature/g13-records`, issue #56; `paper-draft.md` gap G13). Four numbers the
+  paper uses were deterministic results of tests or of a harness, with no EXP
+  record and no script that regenerates them as a table. Each gets a committed
+  script under `experiments/` and a record in the §7 template. EXP-009 to
+  EXP-012 are reserved for paper experiments and EXP-013 is taken by another
+  branch, so these are EXP-014 to EXP-017:
+  - EXP-014, LZO bit flips: `experiments/exp014.py` draws the bit-flip corpus
+    of `tests/oracle/lzo_hostile.py` (seeds 1–5, 300 streams per seed) and
+    reports, per seed and decoder (btrfska, lzallright, dissect.util pure
+    Python and native), how many flipped streams decode to wrong bytes without
+    an error, and on how many streams the decoders return the same bytes;
+  - EXP-015, the two orphan definitions on `sandbox.img`:
+    `experiments/exp015.py` cross-tabulates the reachability classes against
+    the prototype's generation rule and lists every block where they disagree;
+  - EXP-016, oracle file reads: `experiments/exp016.py` compares every file
+    read of every root set with dissect.btrfs on every corpus image, and
+    reports per image and codec the reads compared, equal and failed;
+  - EXP-017, the foreign mirror: `experiments/exp017.py` applies btrfska's
+    selection, generation alone and the kernel's mirror-0 rule to every
+    image's superblock copies, and replays the chunk-root read of the copy
+    generation alone would pick.
+
+  *Definition of done.* Four scripts and four records; each record states that
+  its images are fixed files, so one run is deterministic for the image hash;
+  every number that differs from what `paper-draft.md` or this plan says is
+  reported as found and the documents are corrected, never the reverse; the
+  scripts have tests that assert claims relative to the image read; the G13 row
+  of `paper-draft.md` and its traceability rows point to the records.
 - **Corpus statement.** Every record and the paper state the corpus size
   (images per cell and in total, sizes, regenerations) and point to each
   image's operations log in the manifest.
@@ -2190,7 +2258,7 @@ one run of 15 (365/353/18/828), the async and sync rows never.
 | Beyond Carving team ships their future work first (code repo created, still empty) | M4/M5 prototyped; watch repo; publish corpus fast (C7: no comparable image corpus found, research.md §5.1) |
 | Our own parsing, extent-read or LZO/stream code has bugs a mature library would not | Differential tests vs `dump-tree`, dissect.btrfs streams, `lzallright` and guest SHA-256s; property tests on hostile input; csum-type and compression images from M1; §3.5 fallback ladder (lzallright at runtime, then dissect.btrfs at runtime with an AGPL relicence) |
 | dissect.btrfs (test oracle) drifts or is abandoned | Pinned `1.10.*` in the `dev` group; guest SHA-256s and `dump-tree` are independent oracles, so losing it costs one cross-check, not a runtime feature |
-| Decoding "succeeds" on corrupted compressed data (LZO has no integrity check: 218–231 of 300 bit-flipped 4 KiB streams per seed decoded to wrong bytes in btrfska, lzallright and dissect.util native, §3.5) | Decode success never raises confidence; content is Confirmed only by a data-checksum match (M6); decoder errors are recorded, not hidden |
+| Decoding "succeeds" on corrupted compressed data (LZO has no integrity check: 218–231 of 300 bit-flipped 4 KiB streams per seed decoded to wrong bytes in btrfska, lzallright and dissect.util native, §3.5; EXP-014) | Decode success never raises confidence; content is Confirmed only by a data-checksum match (M6); decoder errors are recorded, not hidden |
 | Licence ambiguity from test-only AGPL use | Oracle confined to the `dev` group and `tests/oracle/`; import-boundary test on `src/`; sdist contents checked before release (§3.3) |
 | New format features mis-read (remap tree, RST, fscrypt) | Incompat gate refuses unknown/unsupported bits (M1); later research items |
 | Discard destroys evidence on real media (sync: ~91 % stale metadata gone) | Discard axis in corpus + observed-discard input to overwrite-risk score and report caveat |

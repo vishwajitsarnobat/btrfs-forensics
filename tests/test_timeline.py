@@ -325,3 +325,30 @@ def test_flash_files_are_never_committed_and_belong_to_the_tree_their_log_root_n
     for name in flash:
         assert [e["event"] for e in events if e["path"] == name] == ["create", "never_committed"]
     assert all(e["first_seen"]["source"].startswith("log:") for e in events)
+
+
+def test_events_agree_with_the_generations_the_log_holds(deep):
+    """The scenario logs every create, rename and delete with its inode and the transaction it
+    happened in (EXP-009). A create carries that transaction exactly; a rename and a delete lie
+    between their bounding states. `never_committed` is left out: it rests on absence from the
+    committed states that survive, and EXP-009 found it wrong for a file that was committed in
+    a generation whose state did not survive whole."""
+    log = DEEP.with_suffix(".log").read_text()
+    logged = re.findall(r"=== EVENT (create|rename|delete) (\d+) (\d+) (\S+)(?: (\S+))?", log)
+    if not logged:
+        pytest.skip("m4_deep was built before its scenario logged events: rebuild it")
+    created = {int(n): int(g) for kind, n, g, _, _ in logged if kind == "create"}
+    when = {(kind, int(n)): int(g) for kind, n, g, _, _ in logged}
+    renamed = {int(n): new.rsplit("/", 1)[-1] for _, n, _, _, new in logged if new}
+    events = [e for e in Timeline(deep, tree_id=5, uncommitted=True).events(5)
+              if e["objectid"] in created]  # fmt: skip
+    assert {"create", "rename", "delete"} <= {e["event"] for e in events}
+    for event in events:
+        assert event["created"] == created[event["objectid"]]
+        if event["event"] in ("rename", "delete"):
+            low, high = event["generations"]
+            assert low <= when[event["event"], event["objectid"]] <= high
+        if event["event"] == "rename":
+            assert event["to"]["name"] == renamed[event["objectid"]]
+    found = {e["objectid"] for e in events if e["event"] == "create"}
+    assert len(found) >= len(created) // 2

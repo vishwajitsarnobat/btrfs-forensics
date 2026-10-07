@@ -75,7 +75,7 @@ python3 corpus/vm/probe_stale_metadata.py images/scenarios/x.img
 | `build_initramfs.sh` | Packs busybox, `btrfs` + its libraries, `xor raid6_pq libblake2b btrfs` modules (all from the bundle), `init`, `scenarios/*.guest.sh` |
 | `init` | Guest `/init` template. Reads `scenario=` and `mountopts=` from the kernel command line |
 | `run_scenario.sh` | Boots the guest on one image. Env: `SCENARIO` (s01), `MOUNT_OPTS` (compress=zstd,commit=5), `DISCARD` (non-empty → virtio `discard=unmap`), `TIMEOUT` (600), `QEMU` (qemu-system-x86_64) |
-| `make_image.sh NAME` | truncate + pinned mkfs (`SIZE`, `CSUM`, `MKFS_ARGS`; `MKFS=mkfs.btrfs` for the host's) + guest run → `images/scenarios/NAME.{img,log}` |
+| `make_image.sh NAME` | truncate + pinned mkfs (`SIZE`, `CSUM`, `MKFS_ARGS`; `MKFS=mkfs.btrfs` for the host's) + guest run → `images/scenarios/NAME.{img,log}` (`OUT_DIR`: another directory under `images/`) |
 | `scenarios/s01.guest.sh` | Subvolume, 3 files, snapshot, delete 2 (one inline), 6 commits, full balance |
 | `scenarios/wide.guest.sh` | Trees with internal nodes: 48 subvolumes, 1500 files, deletions between commits, a snapshot, no balance |
 | `scenarios/reuse.guest.sh` | Six data chunks, three removed (`balance -dusage=0`): the next chunk reuses the topmost one's logical range on other physical bytes (EXP-010) |
