@@ -1641,6 +1641,36 @@ generation can survive (one written in the middle of the transaction, which no s
 named), and generations cannot order them. They are taken by address, the superblock-named one
 last, and every event that rests on that order says `order_assumed`.
 
+*M5d fix, 2026-10-07: the two wrong events of EXP-009* (issue #78, branch
+`fix/timeline-absence-verdicts`). EXP-009 found two conclusions drawn from absence alone:
+a `never_committed` for `moves/m_1.txt`, committed in generation 10 (its only view left is an
+uncommitted leaf of 10, and the committed state of 10 survives only as a walk with gaps), and a
+`link` for `pad/p2` in every build (its versions in states 21 to 23 have no name because those
+walks have gaps and do not reach its INODE_REF). Decision 6 is narrowed and decision 3 gains one
+rule:
+- **`never_committed` needs proof.** An identity created in transaction G that outlives G is in
+  G's commit. So `never_committed` needs the tree as G's commit left it (a root block of
+  generation G that a committed root tree names) walked without a gap, and every sighting of the
+  identity in generation G. The ROOT_ITEM of an fs tree changed in G is rewritten only during G's
+  commit, once no task can change a tree any more (`commit_fs_roots`, fs/btrfs/transaction.c:1471
+  to 1541, state asserted at 1482), and carries the generation of its root block
+  (`btrfs_set_root_node`, fs/btrfs/root-tree.c:117-123). So a root tree written in the middle
+  of G still names the tree as an earlier commit left it, with a root block older than G, and is
+  not that proof. Otherwise the ending is `not_seen`
+  with a reason (the walk had gaps; no such walk survives; the identity was seen after G, so a
+  commit held it), and `between` and `generations` are `null`: when it ended is not known.
+- **Names are compared only between versions seen in a whole walk.** A version seen only through
+  walks with gaps, fragments or lone leaves (each can miss the leaf that holds an INODE_REF), or
+  only in a log tree replayed without its base, gives no `rename`, `move`, `link` or `unlink`,
+  and no `touch` (which says that the names did not change). Its other changes are still
+  reported.
+
+*Definition of done.* Tests that fail before the fix: a forged catalog for each `not_seen` reason
+and for the proof; a forged walk with a gap that misses a name, and a lone leaf that does; on
+`m4_deep`, no `link`, `unlink` or `move` that the scenario's log does not hold; the EXP-009 test
+no longer leaves `never_committed` out. README and this section describe the rule. EXP-009 is
+re-run (N = 5) and the results added to EXP-009.md as an addendum, the original results kept.
+
 **M5 status 2026-09-21: the definition of done holds; three items of its scope are open.**
 Parts M5a (historical chunk maps, EXP-007), M5b (integrity and linkage), M5c-1 (the orphan graph,
 EXP-008) and M5d (timelines), after the prior-art re-run (research.md §11). Bullet by bullet:
