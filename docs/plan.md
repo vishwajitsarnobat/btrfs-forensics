@@ -2177,6 +2177,83 @@ so `m6_reformat` is identified by its generations, not by a device uuid; and on 
 with discard, mkfs trims the whole device by default, so these file-backed images are the
 favourable case (EXP-018 §7).
 
+**M6d: hiding detection** (issue #52; design fixed 2026-10-07, before implementation).
+
+*What it is.* `btrfska hiding IMAGE [--json]`, and `catalog build --hiding`, report every place on
+the image where bytes are hidden by a known technique, with its offset, the bytes, and the
+evidence. A rule reports only what mkfs.btrfs and the kernel never produce, so a clean filesystem
+is quiet; each rule says why, citing the kernel at v7.0 by file and line (`hiding/detect.py`).
+1. **Techniques** (research.md §8.3, Toolan & Humphries 2026; Göbel et al. 2024; Wani et al.
+   2020; Schwietert & Hilgert 2025), each a `technique` name:
+   - `superblock_reserved`: non-zero bytes in `reserved[199]` (0x264-0x32A), in a feature-gated
+     field whose incompat flag is clear (`metadata_uuid` without METADATA_UUID, `nr_global_roots`
+     without EXTENT_TREE_V2, `remap_root*` without REMAP_TREE), or in a backup root slot's padding.
+     The ranges come from the copy's own feature flags (research.md §10.13). Every copy in the
+     device, valid or not, because a hider may not recompute the checksum.
+   - `superblock_padding` (0xDCB-0xFFF) and `sys_chunk_array_slack`: bytes beyond
+     `sys_chunk_array_size` other than the two shapes the kernel's and mkfs's removal of a system
+     chunk leaves (volumes.c:3204 memmoves without clearing): the removed entry itself, or a copy
+     of the array's last bytes.
+   - `superblock_slot`: a mirror slot inside the device with non-zero bytes but no superblock.
+   - `pre_superblock`: non-zero bytes in the first 64 KiB, or in the rest of the first MiB (the
+     kernel allocates from 1 MiB). A boot signature is named, since GRUB 2 embeds there.
+   - `backup_root_divergence` (after SecurityRonin's `BTRFS-BACKUP-ROOT-DIVERGENCE`): a slot newer
+     than the superblock, no slot of its generation, that slot disagreeing with the superblock,
+     repeated or non-consecutive slot generations, a same-generation mirror with other slots.
+   - `node_slack`: a valid block of the current state whose slack is non-zero and does not read
+     as stale items (`substrate/slack.py`; EXP-005: the kernel zeroes slack, mkfs leaves stale
+     items, which are counted, not reported). `copy_divergence`: two copies of one block that both
+     pass every check and differ.
+   - `inode_reserved`, `timestamp_nsec` (a field of 10^9 or more, or four different values all
+     printable ASCII), `string_item` (any item of type 253).
+   - `file_slack`: non-zero bytes past EOF in a regular file's last sector, with the data-checksum
+     verdict on that sector (M6a's tail logic: the checksum covers the hidden bytes, or matches
+     only with them zeroed, or neither).
+   - `device_slack`: non-zero bytes past this device's last device extent, or past its
+     total_bytes. Bytes in a stripe of a chunk a historical chunk map holds (M5a) are a removed
+     chunk's and are counted, not reported; the maps are discovered only when such bytes exist.
+   - `hidden_name`: a directory entry, subvolume or snapshot included, whose name has invisible or
+     control characters, bytes that are not UTF-8, or only whitespace (U+FEFF).
+2. **Scope.** The trees of the current state (root, chunk and log trees included), every valid
+   copy of every block. Superseded blocks are not examined here; the catalog's `contents` table
+   already describes their slack.
+3. **Records, no schema change.** `hiding --json` writes one `finding` record per finding and one
+   `hiding_summary`. `catalog build --hiding` stores the summary in `scan_runs.scan_summary` under
+   `hiding` (findings included) and one `problems` row per report line with source `hiding`, as
+   M6f stores `foreign`.
+
+*Corpus.* One `corpus/mutate.py` subcommand per technique, each a manifest row derived from a
+pinned image, the four csum types spread over the rows: `plant-sb-reserved` (with `--field` for
+a feature-gated field), `plant-sb-padding`, `plant-chunk-array-slack`, `plant-pre-sb`,
+`plant-inode-reserved`, `plant-nsec`, `plant-string-item` (Toolan & Humphries §3.6),
+`plant-file-slack` (EXTENT_CSUM and csum-tree leaf rewritten), `plant-device-slack`,
+`plant-backup-roots`; `plant-slack` (M4) already covers node slack. A guest scenario `hidden`
+makes a U+FEFF snapshot in `.lib32` beside a normally named one. `corpus/hide_and_seek.py` fetches
+the btrfs images of `fkie-cad/hide-and-seek-dataset` at `decd14b` into `images/hide-and-seek/`,
+pinned by SHA-256, never committed (no licence); setup.sh fetches them when it can.
+
+*Definition of done.*
+- every planted row is detected with the right technique at the planted offset, and the mutate
+  subcommands recompute checksums correctly for all four csum types;
+- the guest row reports the U+FEFF snapshot and not the normal one;
+- the hide-and-seek images: the overwritten mirror 1 of `btrfs_superblock`, the five inode
+  items (and the diverging DUP copy) of `btrfs_inode_reserved`, the U+FEFF directory of
+  `btrfs_hidden_snapshot`, the 50 MiB past the last device extent of `btrfs_raid1_slack` dev2;
+  tests skip when the images are absent;
+- every clean corpus image and `sandbox.img` is quiet, or its findings are explained here;
+  hostile input (forged superblock fields, truncated items, cyclic directory refs) does not crash;
+- README documents `hiding` and every key, evidence-db.md the `hiding` summary and problems
+  source. The false-positive measurement is issue #53.
+
+**M6d status 2026-10-07: done** (catalog.md, M6d entry; `tests/test_hiding.py`,
+`tests/test_hiding_images.py`). Each bullet of the definition of done is a test. Three things the
+design did not foresee: every corpus image carries a stale sys_chunk_array tail (mkfs drops its
+temporary system chunk the way the kernel does, without clearing), so that rule had to know the
+two shapes removal leaves; log-tree inode items keep stale bytes in their reserved field, so log
+trees are exempt from that rule; and the hide-and-seek "hidden snapshot" is a plain directory
+named U+FEFF, not a subvolume, so the name rule covers every directory entry (`hidden_name`).
+`m6_reformat_geometry` keeps two `device_slack` findings: the replaced, larger filesystem.
+
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
 - Corpus generator = `corpus/vm/` scaled up (already in use since M1):
   scenario scripts × matrix below, per-image manifest (per-file SHA-256,

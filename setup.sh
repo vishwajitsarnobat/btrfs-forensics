@@ -7,7 +7,9 @@
 # 1. uv sync --locked          the Python environment, exactly as uv.lock pins it
 # 2. sandbox.img               the primary regression image, restored from the tracked fixture
 #                              and checked against tests/fixtures/SHA256SUMS
-# 3. corpus/build.py           the generated test images (downloads about 190 MB once)
+# 3. corpus/build.py           the generated test images (downloads about 190 MB once), and
+#    corpus/hide_and_seek.py   the third-party hide-and-seek btrfs images (about 9 MB, optional:
+#                              no licence, so never committed; their tests skip without them)
 # 4. ruff + pytest             lint and every test
 #
 # Needs uv (https://docs.astral.sh/uv/) and zstd; step 3 also needs KVM, QEMU and a few common
@@ -39,6 +41,8 @@ fi
 if [ "$CORPUS" = yes ]; then
     echo "== 3/4 test-image corpus"
     uv run python corpus/build.py
+    uv run python corpus/hide_and_seek.py ||
+        echo "hide-and-seek images not fetched (optional: their tests are skipped)" >&2
 else
     echo "== 3/4 test-image corpus: skipped (--no-corpus)"
 fi
