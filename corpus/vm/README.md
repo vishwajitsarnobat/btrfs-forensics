@@ -73,14 +73,16 @@ python3 corpus/vm/probe_stale_metadata.py images/scenarios/x.img
 | `fetch_vm.sh` | Downloads every `guest.lock` entry, verifies its SHA-256 and unpacks it into `images/vm/kernel` and `images/vm/tools`. Env: `UBUNTU_MIRROR` |
 | `pinned.sh TOOL ARGS…` | Runs a bundle tool (`mkfs.btrfs`, `btrfs`, `btrfs-find-root`, …) on the host through the bundle's loader and libraries |
 | `build_initramfs.sh` | Packs busybox, `btrfs` + its libraries, `xor raid6_pq libblake2b btrfs` modules (all from the bundle), `init`, `scenarios/*.guest.sh` |
-| `init` | Guest `/init` template. Reads `scenario=` and `mountopts=` from the kernel command line |
-| `run_scenario.sh` | Boots the guest on one image. Env: `SCENARIO` (s01), `MOUNT_OPTS` (compress=zstd,commit=5), `DISCARD` (non-empty → virtio `discard=unmap`), `TIMEOUT` (600), `QEMU` (qemu-system-x86_64) |
-| `make_image.sh NAME` | truncate + pinned mkfs (`SIZE`, `CSUM`, `MKFS_ARGS`; `MKFS=mkfs.btrfs` for the host's) + guest run → `images/scenarios/NAME.{img,log}` (`OUT_DIR`: another directory under `images/`) |
+| `init` | Guest `/init` template. Reads `scenario=`, `mountopts=` and scenario parameters `sc_KEY=VALUE` from the kernel command line |
+| `run_scenario.sh` | Boots the guest on one image. Env: `SCENARIO` (s01), `MOUNT_OPTS` (compress=zstd,commit=5), `DISCARD` (non-empty → virtio `discard=unmap`), `IMAGE2` (a second disk, `/dev/vdb`), `SCENARIO_ARGS` (`KEY=VALUE ...`, read in the guest as `$sc_KEY`), `TIMEOUT` (600), `QEMU` (qemu-system-x86_64) |
+| `make_image.sh NAME` | truncate + pinned mkfs (`SIZE`, `CSUM`, `MKFS_ARGS`, `DEVICES` 1 or 2; `MKFS=mkfs.btrfs` for the host's) + guest run → `images/scenarios/NAME.{img,log}`, and `NAME.dev2.img` with two devices (`OUT_DIR`: another directory under `images/`). The log starts with `=== HOST-MKFS`, `-MKFS-ARGS`, `-SIZE`, `-DEVICES` and `-DISCARD` lines |
 | `scenarios/s01.guest.sh` | Subvolume, 3 files, snapshot, delete 2 (one inline), 6 commits, full balance |
 | `scenarios/wide.guest.sh` | Trees with internal nodes: 48 subvolumes, 1500 files, deletions between commits, a snapshot, no balance |
 | `scenarios/reuse.guest.sh` | Six data chunks, three removed (`balance -dusage=0`): the next chunk reuses the topmost one's logical range on other physical bytes (EXP-010) |
 | `scenarios/reuse_same.guest.sh` | The control: the next chunk reuses the topmost one's logical range on the same physical bytes |
 | `scenarios/discard_{none,async,sync}.sh` | The three §10.4 discard rows |
+| `scenarios/matrix.sh NAME` | One image of the M7 corpus matrix (plan.md M7a): the axes `OP`, `SIZE`, `COMPRESS`, `CSUM`, `BGT`, `DISCARD_MODE`, `RECLAIM`, `LAYOUT` (values and base in its header) become mkfs arguments, mount options, the virtio discard setting and guest parameters |
+| `scenarios/matrix.guest.sh` | The matrix workload: a population of subvolume `data`, one operation (delete, overwrite, stress, snapshot, balance, defrag), two settle phases for the cleaner, three churn commits; every file state logged as `=== EVENT` with its SHA-256 |
 | `probe_stale_metadata.py` | Prints `fsid_blocks stale_blocks needle_copies nonzero_blocks` (definitions in its docstring) |
 
 Derived images and the manifest (one level up, in `corpus/`):
@@ -96,6 +98,19 @@ Derived images and the manifest (one level up, in `corpus/`):
   row's command and records the SHA-256 of every image it built in
   `images/scenarios/SHA256SUMS`. The `vm` tests compare the local images with
   that record, which catches an image modified after it was built.
+- `corpus/matrix.py` writes the M7 corpus matrix as two more manifests of the
+  same format: `corpus/matrix.tsv` (46 images, 512 MiB to 8 GiB, sparse) and
+  `corpus/large.tsv` (the 100 GiB image). They are tiers that `./setup.sh` and
+  CI do not build: `uv run python corpus/build.py --tier matrix` (about half an
+  hour) and, locally only, `--tier large`. A two-device row records both of its
+  files in `SHA256SUMS`.
+- `corpus/groundtruth.py LOG` parses a scenario log into its ground truth (host,
+  guest kernel, mount options asked for and in effect, axes, reclaim counters,
+  every file state) and checks the history for consistency. The event format is
+  scenario `deep`'s, `=== EVENT KIND INODE GENERATION PATH [NEW PATH]`, with
+  `sha256=HEX` after every create, modify and overwrite of a regular file in the
+  matrix scenario. GENERATION is the superblock's, read with dump-super after
+  the sync that committed the change.
 - `corpus/mutate.py SRC DST OP` writes a damaged copy of a generated image
   (`set-incompat-bit BIT`, `zero-primary-sb`, `transplant-sb DONOR MIRROR
   GENERATION`, `flip-byte OFFSET...`). It only reads `SRC` (and `DONOR`) and

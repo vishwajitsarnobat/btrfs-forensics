@@ -10,6 +10,9 @@
 # 3. corpus/build.py           the generated test images (downloads about 190 MB once)
 # 4. ruff + pytest             lint and every test
 #
+# The M7 corpus matrix is a further tier that this script does not build (about half an hour):
+# `uv run python corpus/build.py --tier matrix`; its tests skip until it is built.
+#
 # Needs uv (https://docs.astral.sh/uv/) and zstd; step 3 also needs KVM, QEMU and a few common
 # tools, and says exactly what is missing. No root; nothing is written outside this folder.
 set -eu
