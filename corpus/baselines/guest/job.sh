@@ -78,7 +78,8 @@ fi
         printf '%s\t%s\t%s\t%s\n' "$(esc "$f")" "$(esc "$name")" "$(stat -c %s "$f")" "${sha%% *}"
     done
 } > /work/out/files.tsv
-IFS=$'\t' read -r wall rss < <(tail -n 1 /work/out/time.tsv)
+timing=$(tail -n 1 /work/out/time.tsv)
+wall=${timing%%$'\t'*} rss=${timing##*$'\t'}
 {
     printf 'tool\t%s\n' "$TOOL"
     printf 'version\t%s\n' "$(head -n 1 "$PREFIX/VERSION")"

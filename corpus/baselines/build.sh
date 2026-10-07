@@ -58,6 +58,7 @@ job() {
 }
 
 failed=
+mkdir -p "$WORK/built" "$WORK/jobs"
 for tool in $TOOLS; do
     echo "== build $tool"
     out=$WORK/built/$tool

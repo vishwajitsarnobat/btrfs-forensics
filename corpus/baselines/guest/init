@@ -15,6 +15,11 @@ export PATH=/bin
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
+# what udev would add: bash's process substitution and `/dev/stdin` need them
+ln -sf /proc/self/fd /dev/fd
+ln -sf /proc/self/fd/0 /dev/stdin
+ln -sf /proc/self/fd/1 /dev/stdout
+ln -sf /proc/self/fd/2 /dev/stderr
 
 for m in xor raid6_pq libblake2b btrfs; do
     insmod /lib/modules/$m.ko || echo "insmod $m failed"
