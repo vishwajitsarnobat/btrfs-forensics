@@ -218,7 +218,7 @@ def table(args) -> int:
           "| Equal to dissect.btrfs | Differ | dissect failed | With expected SHA-256 "
           "| Equal to expected |")  # fmt: skip
     print("|---|---|---|---|---|---|---|---|---|---|")
-    totals = defaultdict(Counter)
+    totals, notes = defaultdict(Counter), []
     for line in lines:
         if "refused" in line:
             print(f"| `{line['image']}` | refused: {line['refused']} | | | | | | | | |")
@@ -242,12 +242,21 @@ def table(args) -> int:
             totals[group]["reads"] += len(rows)
             totals[group]["truth"] += len(with_truth)
             totals[group]["truth_equal"] += truth_equal
-        mismatched = [x for x in line["listing"] if x["btrfska_only"] or x["dissect_only"]]
+        mismatched = [
+            x
+            for x in line["listing"]
+            if x["dissect_listed"] and (x["btrfska_only"] or x["dissect_only"])
+        ]
         unlisted = [x for x in line["listing"] if not x["dissect_listed"]]
         if mismatched or unlisted or line["problems"]:
-            print(f"|  ↳ `{line['image']}` | listing differs in {len(mismatched)} subvolume(s), "
-                  f"dissect could not list {len(unlisted)}, {len(line['problems'])} problem(s) "
-                  "| | | | | | | | |")  # fmt: skip
+            notes.append(
+                f"{line['image']}: dissect's directory walk differs in {len(mismatched)} "
+                f"subvolume(s) and could not list {len(unlisted)}; {len(line['problems'])} "
+                f"problem(s), first: {str(line['problems'][:1])[:300]}"
+            )
+    print()
+    for note in notes:
+        print(note)
     print()
     for group, n in totals.items():
         print(
