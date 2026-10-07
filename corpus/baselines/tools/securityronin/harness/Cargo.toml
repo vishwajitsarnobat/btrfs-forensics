@@ -1,0 +1,16 @@
+# A command-line harness around SecurityRonin's btrfs-forensic `recover_deleted`, which is a
+# library call with no program of its own (docs/research/baselines.md §3.5). Built offline in the
+# baseline guest against the vendored crates of the lock (corpus/baselines/tools/securityronin).
+[package]
+name = "recover-deleted-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "recover_deleted"
+path = "src/main.rs"
+
+[dependencies]
+btrfs-forensic = "=0.1.3"
+btrfs-core = "=0.1.5"
