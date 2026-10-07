@@ -56,6 +56,55 @@ Maintenance rules:
   record in each EXP file, commit `0eedb0e`, clean tree); the new tests assert the claims relative
   to the image read (14 tests); `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run pytest` and `sha256sum -c tests/fixtures/SHA256SUMS` as in the pull request.
+## 2026-10-07 — EXP-009: how right the timeline is, per event type, on `m4_deep`
+
+- **Branch:** `feature/exp009-timelines` (from `main` at `b918555`; issue #55). Changed
+  `corpus/vm/scenarios/deep.guest.sh`, `corpus/vm/make_image.sh`, `corpus/vm/README.md`,
+  `corpus/manifest.tsv` (the `m4_deep` note), `tests/test_timeline.py`, `docs/plan.md` (§8,
+  "E-timeline"); new `experiments/EXP-009.md`, `experiments/exp009.py`.
+- **Why.** C3 (`btrfska timeline`) had tests but no measured number. The paper needs precision
+  and recall per event type against a ground truth, with the share of events that rest on an
+  assumed order or on a log tree alone.
+- **What changed.** Scenario `deep` logged hashes only and renamed nothing. It now logs every
+  create, rename and delete of tree 5 as `=== EVENT KIND INODE GENERATION PATH [NEW PATH]`, the
+  generation read in the guest from the superblock after the committing `sync` (dump-super only
+  reads), and renames one small inline file per round on a commit the round makes anyway (the
+  number of commits is unchanged). `make_image.sh` takes `OUT_DIR` (always under `images/`), so
+  the experiment builds into its own directory with its own initramfs and touches neither
+  `images/scenarios` nor `images/vm`. The prediction was registered and pushed (`52547ea`) before
+  the first build of the extended scenario.
+- **Numbers** (EXP-009 §6; N = 5 builds, i5-1335U host, median and range): create precision 1.0,
+  recall 0.987 (0.987–0.989); rename precision 1.0, recall 0.870 (20 of 23, every build); delete
+  recall 0.889, **precision 1.0 in three builds and 0.98 in two**: one `never_committed` for a
+  file committed in generation 10, whose state survives only as a walk with gaps, and no state
+  of 11 to 20 at all. No create, rename or delete event carries `order_assumed`; 16 of 538 (about
+  3 %) carry `log_only`, exactly the flash files' events. Delete intervals: median 1 generation,
+  maximum 6. One `link` per build that never happened, from a version seen through a walk with
+  gaps. Every miss is of a file whose needed versions no source shows. About 15 s per build.
+- **Verified.** The registered predictions P1, P3 to P6 hold; P2 is refuted for precision and
+  reported so (follow-up in EXP-009 §8: `never_committed` and name changes seen through gapped
+  walks should need evidence, not absence; not fixed here). New test: m4_deep's timeline agrees
+  with the generations its log holds (creates exact, renames and deletes inside their interval).
+  Fresh clone of the branch: `./setup.sh` built all 20 images and ran 999 tests, all passing,
+  none skipped; the clone was deleted. In the worktree, ruff clean and `sha256sum -c` OK.
+## 2026-10-07 — Research for M6 and M7: hiding images, baselines, logical-range reuse
+
+- **Branch:** `docs/research-m6-m7` (from `main`). Added `docs/research/fishy-btrfs.md`,
+  `docs/research/baselines.md`, `docs/research/logical-range-reuse.md`; changed `docs/plan.md`.
+  Docs only.
+- **Why.** Three questions blocked M6e, M7d and EXP-010 (map tickets #46, #47, #48).
+- **Findings.** fishy has no public btrfs module. The `fkie-cad/hide-and-seek-dataset` repository
+  is online again, with four btrfs images and no licence. All nine free baselines have pinnable
+  sources, but none is built yet. The guest has no compiler, so it needs a pinned build disk. The
+  FKIE-TSK fork cannot open btrfs with `tsk_recover`. At v7.0 the kernel reuses a logical chunk
+  range only after the topmost chunk is removed (`find_next_chunk`, volumes.c:2000-2016), and no
+  corpus image shows reuse, so EXP-007 cannot tell per-generation maps from a merged map.
+- **Decisions (maintainer, 2026-10-07), applied to plan.md.** C5 and the M6 definition of done are
+  reworded: planted by our own `mutate.py` and guest scenarios, with the hide-and-seek images as an
+  independent check. PhotoRec is pinned as its static binary; FKIE-TSK is run through its pool
+  tools; SecurityRonin runs through a small Rust harness under `corpus/baselines/`; every baseline
+  is built and run in the guest; commercial tools are out.
+- **Verified.** Every build step and command in baselines.md is marked UNVERIFIED until M7d runs it.
 
 ## 2026-10-07 — The mentor demo, tracked and runnable
 
