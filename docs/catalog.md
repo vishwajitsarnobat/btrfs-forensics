@@ -20,6 +20,75 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — M7d (work in progress): the baseline harness, every baseline built and run inside the pinned guest
+
+- **Branch:** `feature/m7-baseline-harness` (from `main` at `e74b282`; issue #61). New
+  `corpus/baselines/`: `baselines.lock`, `resolve.py`, `fetch.sh`, `toolchain.py`, `vm.sh`,
+  `build.sh`, `run.sh`, `score.py`, `guest/` (`init`, `job.sh`, `fls-tree.awk`), `tools/<tool>/`
+  (build and run recipes of nine tools, the `recover_deleted` harness crate with its
+  `Cargo.lock`), `README.md`; `tests/test_baselines.py`. Changed `docs/plan.md` (M7d plan and
+  status). `setup.sh` and `corpus/vm/` are unchanged.
+- **Why.** M7 compares `btrfska` with every baseline the research found (issue #47,
+  `docs/research/baselines.md`), each pinned by SHA-256 and built and run inside the pinned guest,
+  never on the host (maintainer, 2026-10-07). The guest had no compiler.
+- **What changed.** `baselines.lock` pins 274 inputs: one source per tool by hand, and four
+  computed groups, `toolchain` (171 noble `.deb`s, the Depends closure of 38 packages from the
+  same Ubuntu snapshot as `guest.lock`), the 63 Go module files of btrfscue's go.sum, the 22
+  crates of SecurityRonin's Cargo.lock and the 6 cp314 wheels of mbkn's uv.lock. The toolchain is
+  unpacked without maintainer scripts (usr-merged, alternatives links by hand) and formatted
+  with the bundle's `mkfs.btrfs --rootdir` into a 1.6 GB disk. Each build or run is one guest
+  boot from the corpus kernel and initramfs plus a second init: toolchain disk read-only and
+  chroot'ed into, evidence copy `readonly=on` as `/dev/vdb` (the guest refuses to run a tool
+  unless the kernel reports it read-only; the copy's SHA-256 is compared before and after), job
+  input and output as tars on raw disks, no network, `-m 3072` for builds and `-m 2048` for runs.
+  Every run writes `files.tsv` (path, recovered name, size, SHA-256) and `run.tsv` (version,
+  exit, wall time, peak RSS from GNU time, image hash, pins, host). `score.py` reads them against
+  the scenario log and reports files produced, hash-exact and names recovered, overall and for the
+  files the log marks deleted.
+- **Builds.** All nine build. Changes of ours, all build settings and none to a source file:
+  FKIE-TSK is compiled as C++14 with `-include cstdint` (on GCC 13 its `Basics/Enums.h` fails,
+  "'ItemType' has not been declared", because `<cstdint>` is no longer included on the way);
+  btrForensics gets the same `-include` by one `sed` on its CMakeLists.txt and is linked against
+  FKIE-TSK's TSK 4.4.2, because against TSK `develop` its `Uuid.cpp` does not compile
+  (`gpt_entry.type_guid` became a struct); PhotoRec is the publisher's static binary; mbkn is
+  copied into site-packages because its build backend is not available offline.
+- **Smoke results** (one run each, i5-1335U host, QEMU 10.2.2; not an EXP record, EXP-011 runs
+  the full set; hash-exact over the logged files, of which m4_deep's 33 are all deleted:
+  24 victims, 8 flash files, 1 orphan; s01's 3 have no deletion events):
+
+  | Tool | m4_deep produced | hash-exact | named | s01 produced | hash-exact |
+  |---|---|---|---|---|---|
+  | btrfs restore + find-root -a | 27611 | 19 (18 victims, orphan) | 19 | 210 | 2 |
+  | undelete-btrfs | 473 | 19 (18 victims, orphan) | 19 | 1 | 1 |
+  | mbkn-btrfs-rescue | 479 | 11 (10 victims, orphan) | 11 | 12 | 3 |
+  | PhotoRec | 28136 | 5 (4 flash, orphan) | 0 | 6470 | 0 |
+  | btrfscue | 37 | 0 | 0 | 4 (exit 2) | 0 |
+  | SecurityRonin `recover_deleted` | 0 | 0 | 0 | 0 | 0 |
+  | TSK develop | 0 (exit 1) | 0 | 0 | 0 (exit 1) | 0 |
+  | FKIE-TSK | 418 | 0 | 0 | 0 | 0 |
+  | btrForensics | 0 | 0 | 0 | 0 | 0 |
+
+  On the crc32c image `m6_datacsum` (7 logged live files) TSK develop and FKIE-TSK each recover
+  6 hash-exact with names; btrForensics 0.
+- **Findings from the smoke runs**, each read from the run's logs: TSK develop refuses both
+  xxhash images ("No valid superblock found in btrfs_open"), as baselines.md predicted from
+  `btrfs.cpp:886-891`; btrForensics refuses every image, "This chunk has more than 1 stripes!",
+  because mkfs gives single-device metadata DUP; btrfscue panics on s01's compressed inline extent
+  (`index out of range [20] with length 12`, `pkg/btrfs/btrfs.go:645`) and copies compressed
+  extents raw (its `deleted_big.txt` has the wrong hash); SecurityRonin finds nothing on either
+  image (no victim is in a backup root of m4_deep; peak RSS 514 MiB, the whole image in memory);
+  FKIE-TSK lists only the top-level FS tree, so s01's files, all in subvolume `sv1`, are not
+  listed.
+- **Verified so far.** Every tool built by `build.sh TOOL` and run by `run.sh` under the shared
+  heavy lock, one at a time; every evidence copy hashed equal before and after. 15 new tests (lock
+  format, recipe completeness, setup.sh untouched, Debian version order, the closure, the fls
+  parser, the scorer including hostile run directories) pass; ruff clean. The mbkn row was
+  measured before its last recipe change (restore destination one level up, which changes the
+  output paths, not the files or names).
+- **Not done yet (stopped at a checkpoint, 2026-10-07).** The mbkn smoke rerun with the final
+  recipe, the full test suite, the fresh-clone proof of `setup.sh` (unchanged, but required), the
+  plan status, and the pull request.
+
 ## 2026-10-07 — Renames within one directory proved through INODE_REF, and EXP-009 addendum B
 
 - **Branch:** `feature/timeline-inode-ref-renames` (from `main` at `4334698`; issue #84).
