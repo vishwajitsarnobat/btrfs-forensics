@@ -2411,6 +2411,13 @@ host script, `corpus/vm/scenarios/matrix.sh`, whose environment names the value 
 - a fresh clone runs `./setup.sh`; the matrix tier is built here, one image at a time behind the
   shared lock, with image counts, disk use and build time per tier in the catalog.
 
+**M7a status 2026-10-07: done** (catalog.md, M7a entry; `tests/test_matrix.py`,
+`tests/test_corpus_groundtruth.py`, `tests/test_corpus_build.py`). Each bullet of the definition
+of done is a test, apart from the fresh clone and the build itself, which the catalog records. The
+design changed twice on the way, both written into points 3 and 4 above: the settle phases, without
+which reclaim never ran, and the `=== COMMIT` window, without which one image's generations were
+wrong.
+
 ### M8 — Rust scan core + product polish (Track P, after paper submission)
 - `rust/scan-core`: memmap2 + rayon + crc32c/crc-fast + zerocopy structs
   (seed layouts from `btrfs-diskformat`); PyO3 module via maturin; numpy
