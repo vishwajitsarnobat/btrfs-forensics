@@ -1744,6 +1744,42 @@ images and their log. Whatever does not hold is reported as a finding, not tuned
 bullet held on the first build; no recovery code had to change. What is left of M5's list is
 the btrfscue comparison, which waits for M7's baseline builds.
 
+**M5f: logical-range reuse, per-generation maps against a merged map** (EXP-010, issue #57;
+design fixed 2026-10-07, before implementation).
+
+*What it is.* C6 reads a state's file data through the chunk map of its own time (M5a).
+`mbkn-btrfs-rescue` reads every version through one map merged from all CHUNK_ITEMs it found,
+the newest record per chunk start winning (research.md §12). The two give the same answer
+everywhere except where one logical range belonged to two chunks with different physical
+placement at different times, and no corpus image has such a range (the answer on issue #48).
+M5f adds a scenario that makes one, and an experiment that reads it both ways.
+1. **The scenario** (`reuse`, image `m5_reuse`): six 64 MiB data chunks fill a 512 MiB image;
+   the three that hold only deleted files, the topmost among them, are removed with `balance
+   -dusage=0`; the next data chunk starts at the topmost one's logical address and, because a
+   data chunk takes the largest device hole when none is 1 GiB (volumes.c:5529, 1883-1946 at
+   v7.0), lands on the 128 MiB hole two lower chunks left. A pilot build of the layout proposed
+   on issue #48 put the new chunk back on the removed chunk's own bytes (that issue's answer
+   assumed first fit); that layout is kept as the control (`reuse_same`, image
+   `m5_reuse_same`): logical reuse on the same physical bytes, where both designs must agree.
+2. **The merged map is an emulation, in the experiment script, not a `recover` option.**
+   `experiments/exp010.py` builds one map from the chunks of every `historical` and the
+   `current` map in the evidence database, the record of the newest map winning per chunk start,
+   and reads every cataloged state through it with the engine's own `recover_roots`. It is
+   labelled as an emulation of the design research.md §12 describes, not mbkn's code. A
+   `--maps merged` option was not added: btrfska never merges maps (scan/chunkmaps.py), a
+   reading known to be wrong in the case under test does not belong among the tool's choices,
+   and the experiment needs nothing the engine does not already export.
+3. **Nothing in `src/` changes, and no schema change.** If the experiment shows a defect in the
+   per-generation reading, the fix is a separate pull request.
+
+*Definition of done.* Both rows in `corpus/manifest.tsv`, a fresh clone runs `./setup.sh`. On
+`m5_reuse`, tested relative to the image and its log: two accepted chunks of different maps
+cover one logical address with different stripes; the `dev_extents` map rejects that address;
+`recover --maps own` gives the full version of `b.bin` with the logged SHA-256 and notes that a
+newer map gives the address to another chunk. On `m5_reuse_same`: the address is missing from a
+map between two maps that place it identically. EXP-010 registered and committed before any
+file is read through any map, five builds per scenario, median and range, reported either way.
+
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.
