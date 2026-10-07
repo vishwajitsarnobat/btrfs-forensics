@@ -9,7 +9,10 @@ The log of a matrix image (corpus/vm/scenarios/matrix.guest.sh) holds:
     ones, from /proc/mounts (`=== MOUNTED`);
   - the configuration (`=== MATRIX axis=value ...`) and what reclaim did (`=== RECLAIM`);
   - every file state: `=== EVENT KIND INODE GENERATION PATH [NEW PATH] [sha256=HEX]`, the format of
-    scenario deep (deep logs carry no sha256), and `=== PHASE NAME GENERATION`.
+    scenario deep (deep logs carry no sha256), and `=== PHASE NAME GENERATION`;
+  - before each sync's events, `=== COMMIT GENERATION PREVIOUS`: those events happened after
+    generation PREVIOUS and are on disk from GENERATION on (exactly GENERATION when it is
+    PREVIOUS + 1). Deep logs have no such line.
 
 A malformed line of a known kind raises LogError with its line number; lines of other kinds
 (the guest's console, the boot firmware) are ignored. `check` then tests the history for
@@ -41,6 +44,12 @@ class Event:
     path: str
     new_path: str | None = None
     sha256: str | None = None
+    after: int | None = None  # the event happened in a generation above this one (COMMIT line)
+
+    @property
+    def exact(self) -> bool:
+        """Whether GENERATION is the transaction the event happened in, not only a bound."""
+        return self.after is not None and self.after + 1 == self.generation
 
 
 @dataclass
@@ -52,11 +61,12 @@ class Truth:
     matrix: dict[str, str] = field(default_factory=dict)
     reclaim: list[dict[str, str]] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
+    commits: list[tuple[int, int]] = field(default_factory=list)  # (generation, previous)
     phases: list[tuple[str, int]] = field(default_factory=list)
     done: bool = False
 
 
-def _event(words: list[str], number: int) -> Event:
+def _event(words: list[str], number: int, after: int | None) -> Event:
     if len(words) < 4 or words[0] not in KINDS or not words[1].isdigit() or not words[2].isdigit():
         raise LogError(f"line {number}: malformed EVENT: {' '.join(words)}")
     kind, inode, generation, *rest = words
@@ -71,11 +81,11 @@ def _event(words: list[str], number: int) -> Event:
     if digest is not None and kind not in CONTENT_KINDS:
         raise LogError(f"line {number}: a {kind} has no content hash")
     return Event(kind, int(inode), int(generation), rest[0], rest[1] if len(rest) == 2 else None,
-                 digest)  # fmt: skip
+                 digest, after)  # fmt: skip
 
 
 def parse(text: str) -> Truth:
-    truth = Truth()
+    truth, after = Truth(), None
     for number, raw in enumerate(text.splitlines(), 1):
         # the serial console can glue terminal escapes in front of a marker
         start = raw.find("=== ")
@@ -85,7 +95,12 @@ def parse(text: str) -> Truth:
         tag, _, rest = line.partition(" ")
         words = rest.split()
         if tag == "EVENT":
-            truth.events.append(_event(words, number))
+            truth.events.append(_event(words, number, after))
+        elif tag == "COMMIT":
+            if len(words) != 2 or not all(w.isdigit() for w in words):
+                raise LogError(f"line {number}: malformed COMMIT: {rest}")
+            truth.commits.append((int(words[0]), int(words[1])))
+            after = int(words[1])
         elif tag == "PHASE":
             if len(words) != 2 or not words[1].isdigit():
                 raise LogError(f"line {number}: malformed PHASE: {rest}")
@@ -122,6 +137,8 @@ def check(truth: Truth) -> list[str]:
         where = f"{event.kind} {event.path} at generation {event.generation}"
         if event.generation < last:
             problems.append(f"{where}: generation goes back from {last}")
+        if event.after is not None and event.after >= event.generation:
+            problems.append(f"{where}: not after generation {event.after}")
         last = max(last, event.generation)
         if event.kind == "create":
             if event.path in live:

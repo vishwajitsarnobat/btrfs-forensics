@@ -24,13 +24,17 @@ SeaBIOS (version 1.17.0)
 === MOUNTED /dev/vda /mnt btrfs rw,relatime,discard,space_cache=v2,commit=300 0 0
 === MATRIX op=delete size=512M compress=none csum=crc32c bgt=off discard=sync layout=single
 === RECLAIM space=data bg_reclaim_threshold=0 reclaim_count=0
+=== COMMIT 7 6
 === EVENT create 256 7 data
 === EVENT create 257 7 data/a.txt sha256={H1}
 === PHASE settled-after-population 7
+=== COMMIT 8 7
 === EVENT overwrite 257 8 data/a.txt sha256={H2}
+=== COMMIT 9 8
 === EVENT rename 257 9 data/a.txt data/b.txt
 === EVENT create 258 9 data/c.txt sha256={H1}
-=== EVENT delete 258 10 data/c.txt
+=== COMMIT 12 9
+=== EVENT delete 258 12 data/c.txt
 === SCENARIO-DONE
 """
 
@@ -51,8 +55,11 @@ def test_a_matrix_log_parses_into_every_field():
     assert truth.reclaim == [{"space": "data", "bg_reclaim_threshold": "0", "reclaim_count": "0"}]
     assert truth.phases == [("settled-after-population", 7)]
     assert truth.done
-    assert truth.events[1] == gt.Event("create", 257, 7, "data/a.txt", None, H1)
-    assert truth.events[3] == gt.Event("rename", 257, 9, "data/a.txt", "data/b.txt", None)
+    assert truth.events[1] == gt.Event("create", 257, 7, "data/a.txt", None, H1, 6)
+    assert truth.events[3] == gt.Event("rename", 257, 9, "data/a.txt", "data/b.txt", None, 8)
+    assert truth.commits == [(7, 6), (8, 7), (9, 8), (12, 9)]
+    # the kernel committed twice on its own before the last sync: only a window is claimed
+    assert [e.exact for e in truth.events] == [True] * 5 + [False]
     assert gt.check(truth) == []
     final = gt.final_states(truth)
     assert set(final) == {"data", "data/b.txt"}
@@ -63,6 +70,7 @@ def test_a_deep_log_without_hashes_parses():
     log = "=== EVENT create 300 12 victims/v_1.txt\n=== EVENT unlink 300 13 victims/v_1.txt\n"
     truth = gt.parse(log)
     assert [e.kind for e in truth.events] == ["create", "unlink"]
+    assert truth.events[0].after is None and not truth.events[0].exact
     assert gt.check(truth) == [] and gt.final_states(truth) == {}
 
 
@@ -98,6 +106,8 @@ def test_check_names_each_inconsistency(lines, problem):
         "=== PHASE settled x",
         "=== MOUNTED /dev/vda",
         "=== MATRIX nothing here",
+        "=== COMMIT 7",
+        "=== COMMIT 7 six",
     ],
 )
 def test_a_malformed_line_raises_log_error_with_its_number(line):
@@ -105,12 +115,17 @@ def test_a_malformed_line_raises_log_error_with_its_number(line):
         gt.parse(f"boot noise\n{line}\n")
 
 
+def test_an_event_not_after_its_commit_window_is_an_inconsistency():
+    truth = gt.parse("=== COMMIT 5 5\n=== EVENT create 1 5 a\n")
+    assert any("not after generation 5" in p for p in gt.check(truth))
+
+
 def test_hostile_logs_raise_log_error_or_parse():
     """Random bytes, random marker soup and truncations: LogError or a result, nothing else."""
     rng = random.Random(58)
-    words = ["===", "EVENT", "PHASE", "MATRIX", "RECLAIM", "MOUNTED", "HOST-X", "GUEST", "create",
-             "rename", "delete", "1", "18446744073709551616", "-3", "sha256=" + H1, "a/b", "=",
-             "\x00", " ", "x=y", "SCENARIO", "MOUNTOPTS"]  # fmt: skip
+    words = ["===", "EVENT", "COMMIT", "PHASE", "MATRIX", "RECLAIM", "MOUNTED", "HOST-X", "GUEST",
+             "create", "rename", "delete", "1", "18446744073709551616", "-3", "sha256=" + H1,
+             "a/b", "=", "\x00", " ", "x=y", "SCENARIO", "MOUNTOPTS"]  # fmt: skip
     samples = [LOG[:cut] for cut in range(0, len(LOG), 7)]
     samples += [bytes(rng.randrange(256) for _ in range(400)).decode("latin-1") for _ in range(50)]
     samples += [

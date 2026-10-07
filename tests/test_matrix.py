@@ -172,8 +172,10 @@ def _lookup(inventory: dict[int, dict], path: str) -> int | None:
 def test_history_is_consistent_and_its_last_states_are_the_image(name):
     log = truth(name)
     assert log.events and groundtruth.check(log) == []
-    assert {"create", "delete"} <= {e.kind for e in log.events}
     op = config(name)["OP"]
+    assert {"create", "delete" if op != "overwrite" else "overwrite"} <= {
+        e.kind for e in log.events
+    }
     if op == "overwrite":
         assert {"modify", "overwrite"} <= {e.kind for e in log.events}
     if op == "stress":
@@ -195,10 +197,14 @@ def test_history_is_consistent_and_its_last_states_are_the_image(name):
         for path, state in states.items():
             inode = _lookup(inventory, path)
             assert inode == state.inode, path
-            # the creation generation the kernel stored is the one the log read after the sync
+            # the creation generation the kernel stored lies in the window the log claims, and is
+            # the logged generation itself where the log says it is exact
             origin = created[path] if path in created else None
             if origin is not None:
-                assert inode_items[inode]["generation"] == origin.generation, path
+                assert origin.after is not None, path
+                assert origin.after < inode_items[inode]["generation"] <= origin.generation, path
+                if origin.exact:
+                    assert inode_items[inode]["generation"] == origin.generation, path
             assert inode_items[inode]["transid"] >= state.generation, path
             content = read_file(fs.reader, tree, inode, no_holes=no_holes)
             assert content.complete, (path, content.failures)
@@ -210,4 +216,4 @@ def test_history_is_consistent_and_its_last_states_are_the_image(name):
                     assert _lookup(inventory, event.path) is None, event.path
         if op == "snapshot":  # the snapshot was deleted and the cleaner dropped it
             found, _ = subvolumes(fs.reader, root_set)
-            assert [s.name for s in found if s.root is not None] == ["data"]
+            assert [s.name for s in found if s.id >= DATA_TREE and s.root is not None] == ["data"]

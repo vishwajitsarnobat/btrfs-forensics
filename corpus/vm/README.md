@@ -110,7 +110,9 @@ Derived images and the manifest (one level up, in `corpus/`):
   scenario `deep`'s, `=== EVENT KIND INODE GENERATION PATH [NEW PATH]`, with
   `sha256=HEX` after every create, modify and overwrite of a regular file in the
   matrix scenario. GENERATION is the superblock's, read with dump-super after
-  the sync that committed the change.
+  the sync that committed the change; a `=== COMMIT GENERATION PREVIOUS` line
+  before each sync's events says the change happened after PREVIOUS (exactly
+  in GENERATION when that is PREVIOUS + 1).
 - `corpus/mutate.py SRC DST OP` writes a damaged copy of a generated image
   (`set-incompat-bit BIT`, `zero-primary-sb`, `transplant-sb DONOR MIRROR
   GENERATION`, `flip-byte OFFSET...`). It only reads `SRC` (and `DONOR`) and

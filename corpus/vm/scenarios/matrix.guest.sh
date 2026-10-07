@@ -18,11 +18,17 @@
 #
 # KIND is create, modify (part of the file rewritten or appended), overwrite (all of it
 # replaced), rename or delete. GENERATION is the superblock's generation read after the sync with
-# dump-super (which only reads the device): the transaction the change was committed in. PATH is
-# relative to the mount point; inode numbers repeat between subvolumes, the path tells them
+# dump-super (which only reads the device): the change is on disk from that generation on. PATH
+# is relative to the mount point; inode numbers repeat between subvolumes, the path tells them
 # apart. sha256= follows every create, modify and overwrite of a regular file: the content in that
-# transaction. A workload never changes one file twice in one transaction, so every logged state
-# is a committed state. A snapshot logs a create for each file it contains, and its deletion a
+# transaction. A workload never changes one file twice between two syncs, so every logged state
+# is a committed state.
+#
+# Each sync's events follow a line `=== COMMIT GENERATION PREVIOUS`: PREVIOUS is the generation of
+# the scenario's own sync (or phase) before. When GENERATION is PREVIOUS + 1 the events happened in
+# exactly that transaction. When the kernel committed on its own in between (it does, to flush
+# space, on the small MIXED_GROUPS filesystem), an event happened in some transaction after
+# PREVIOUS and no later than GENERATION, and only that window is claimed. A snapshot logs a create for each file it contains, and its deletion a
 # delete for each. Balance, defragmentation and reclaim move extents without changing any file,
 # and are logged as `=== PHASE NAME GENERATION`.
 #
@@ -50,10 +56,12 @@ note() {
 commit() {
     sync
     g=$(gen)
+    echo "=== COMMIT $g $LAST"
+    LAST=$g
     while read -r kind inode rest; do echo "=== EVENT $kind $inode $g $rest"; done < $PENDING
     : > $PENDING
 }
-phase() { echo "=== PHASE $1 $(gen)"; }
+phase() { LAST=$(gen); echo "=== PHASE $1 $LAST"; }
 # created PATH: note the create of a file just written
 created() { note create "$1"; }
 # rm_noted PATH...: note the delete of each file, then remove them
@@ -101,6 +109,7 @@ settle() {
     phase settled-$1
 }
 
+LAST=$(gen)
 OP=${sc_op:-delete}
 RECLAIM=${sc_reclaim:-0}
 IDLE=${sc_idle:-0}

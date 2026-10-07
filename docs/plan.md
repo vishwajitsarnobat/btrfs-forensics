@@ -2040,8 +2040,11 @@ host script, `corpus/vm/scenarios/matrix.sh`, whose environment names the value 
 3. **Ground truth.** The serial log records every file state, not only the last: every create,
    modify, overwrite, rename and delete as `=== EVENT KIND INODE GENERATION PATH [NEW PATH]
    [sha256=HEX]`, the format of scenario `deep` with the content hash added; the generation is the
-   superblock's, read after the sync that committed the change, and the long commit interval
-   (300 s) keeps every commit the scenario's own. Balance, defrag and the settle phases are
+   superblock's, read after the sync that committed the change. A `=== COMMIT GENERATION
+   PREVIOUS` line before each sync's events gives the window: the long commit interval (300 s)
+   keeps almost every commit the scenario's own, and then GENERATION is PREVIOUS + 1 and exact;
+   where the kernel commits on its own in between (it flushes space by committing on the small
+   mixed filesystem, as the first build showed), only the window is claimed. Balance, defrag and the settle phases are
    `=== PHASE` lines. The log also records the host's mkfs version and arguments, the image size,
    the device count and whether discards reach the file (new `=== HOST-*` lines written by
    `make_image.sh` for every image), the guest kernel, the mount options asked for and those in
