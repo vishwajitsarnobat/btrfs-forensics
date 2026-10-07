@@ -2092,6 +2092,85 @@ generations: relocation gives a data extent a newer generation and leaves the fi
 `in_use` for data is decided by the extent's back-references (same address, length and inode
 number, directly or through a shared leaf).
 
+**M6c: confidence tiers for every artifact** (issue #51; claim C4; design fixed 2026-10-07,
+before implementation). Kernel citations are to v7.0.
+
+*What it is.* Every artifact `recover` records gets one of three tiers, `confirmed`, `probable`
+or `unattached`, computed from named evidence rules, and the list of the rules that fired. A tier
+answers two questions about the artifact, each from evidence the run already holds:
+1. **Is it tied to a committed state?** Yes when it was reached by a walk down from a committed
+   root tree (`anchored_root`, `orphan_item`): every block on the path was reached through its
+   parent's key pointer, with address, generation, level, first key and owner checked (M1, the
+   walk's linkage rules), and a commit writes a whole tree. For any other source (a lone leaf, a
+   fragment, a log tree), yes only when every data extent it read from disk matched the csum
+   tree of a cataloged state *and* the extent tree of that same state gives the extent to this
+   inode (rule `backref_attributed`): a committed state then held these bytes for this inode.
+   A log tree is durable but no commit wrote it; it is not tied by itself.
+2. **Is its content proven?** Yes when its data checksum is `match` and every csum tree that
+   decided a sector belongs to its own state (for a log tree, its own EXTENT_CSUM items) or to a
+   state whose extent tree gives the extent to this inode; or when it has no data on disk at all
+   (inline extents, holes and prealloc extents, a directory, a symlink, a special file): its
+   content is then in leaves whose own checksum verified (M1). **Decode success never raises
+   confidence**: the checksum of a compressed extent covers the bytes on disk before decoding
+   (M6a), and an inline extent's bytes are covered by the leaf checksum. Unproven when the data
+   has no checksum (`no_csum` with reason `nodatasum`, or none in a complete tree),
+   `unavailable`, `partial_match`, a match decided by another state's csum tree whose extent
+   tree does not give the extent to this inode (the address may have been reused), or when not
+   every byte was read. *Contradicted* when a check fails (below).
+
+Tier: any contradiction gives `unattached`; tied and proven gives `confirmed`; one of the two
+gives `probable`; neither gives `unattached`. `confirmed` therefore needs a checksum over the
+content and a commit that held it; `mismatch` is never `confirmed`; `no_csum` data is at most
+`probable` (the only other proof accepted is the leaf checksum, for content that lies in the
+leaf). The tier is about the content and the state, not the path: `attached` says whether the
+name reaches the root directory.
+
+| Rule | Effect | Fires when | Why |
+|---|---|---|---|
+| `blocks_validated` | required | every leaf the artifact's items came from has a valid copy (every check of its M1 validation record passed) | a block that failed a check is not evidence of what the kernel wrote |
+| `block_not_validated` | contradicts | one has none | as above |
+| `anchored` | tied | `source_kind` `anchored_root` or `orphan_item` | reached from a committed root tree through checked key pointers |
+| `backref_attributed` | tied | not anchored; every data extent read from disk is `match` in a state's csum tree whose extent tree back-references it to this inode | a committed state held these bytes for this inode (transaction.c:2473 runs every delayed reference before the commit writes the roots, :2502) |
+| `not_committed` | not tied | neither | a version written within a transaction, a lone leaf or a log tree: no commit vouches for it |
+| `csum_match` | proven | `csum_verdict` `match`, every deciding tree its own state's (or log's) or attributed | the bytes are the ones the filesystem checksummed for this file (M6a) |
+| `content_in_leaf` | proven | no data on disk: only inline, hole and prealloc extents, or not a regular file | the content is inside checksummed leaves |
+| `csum_match_unattributed` | unproven | `match`, but some deciding tree is another state's whose extent tree does not give the extent to this inode | a later file at the same address could have that checksum |
+| `csum_partial_match`, `csum_unavailable`, `csum_no_csum`, `csum_not_checked` | unproven | data on disk with that verdict, or none | nothing proves those bytes |
+| `not_complete` | unproven | not every byte of the content was read (`partial`, `failed`, `refused_encrypted`, an unreadable symlink target, an inode logged without content) | unread bytes are not proven |
+| `no_inode_item` | unproven | items but no INODE_ITEM | size and type are unknown |
+| `backref_agrees` | support | anchored, and the extent tree of the artifact's own state gives every data extent read from disk to this inode | the commit's two trees agree |
+| `backref_unknown` | none | that extent tree is missing or was walked with a gap and does not hold the extent | absence in a tree with a gap proves nothing |
+| `backref_disagrees` | contradicts | anchored, and that extent tree, walked without a gap, has no extent at the address and length that a back-reference gives to this inode (an EXTENT_DATA_REF with its inode number, or a SHARED_DATA_REF whose parent leaf holds the file extent; extent-tree.c:2569-2578, :5006-5009; btrfs_tree.h:243, :253, :830-835) | a commit leaves no file extent without its back-reference |
+| `generation_owner_consistent` | support | no item is newer than its leaf, no inode created after its last change, no leaf newer than the root that reached it, and every leaf's owner passes the M1 owner check for the tree read | the copy-on-write order of one commit |
+| `generation_inconsistent`, `owner_inconsistent` | contradict | one of those fails | items or blocks that do not belong together |
+| `inode_item_older_than_extent` | contradicts | the `missing` reason of M5c | the data and the inode item are from two moments: neither version |
+| `csum_mismatch` | contradicts | `csum_verdict` `mismatch` | the bytes are not the ones checksummed |
+| `duplicate` | inherits | `status` `duplicate` | the same file as an earlier artifact: its tier and rules are repeated (issue #81) |
+
+*Duplicates (issue #81).* A `duplicate` repeats its original's notes (`problems`, after one
+line naming the original) and verdicts (`csum_verdict`, `csum_sources`, the space verdict and
+risk, tier and rules), so a filter on its own row sees them.
+
+*Records.* Schema version 10: `artifacts.tier`, `artifacts.tier_rules` (JSON list of rule ids),
+`artifacts.provenance_chain` (JSON: the root and its kind, every leaf with its generation, owner
+and reach, the joins, the csum trees and extent trees asked, the chunk maps, the allocation view,
+the original of a duplicate), `provenance.backref` (per data extent: `agrees`, `disagrees`,
+`unknown`), and `backref` in `provenance.read_record`; `by_tier` and `tier_rules` in
+`recovery_runs.summary`; the same keys in `manifest.jsonl`; a `confidence:` line on stdout. The
+hiding-detection branch takes version 11.
+
+*Definition of done.*
+- every artifact of every run has a tier, its rules and its chain;
+- synthetic, per rule: a forged record that fires it and gives the tier the table says;
+- images: on `m6_datacsum_flipped` the `mismatch` file is `unattached`; on `m6_datacsum` and
+  every csum type and codec, every current-state file with checksummed data is `confirmed`, the
+  nodatasum file `probable`; on `m4_deep` no `orphan_node` file is `confirmed` without
+  `csum_match` and `backref_attributed`; on `m5_reuse` every version of `b.bin`, duplicates
+  included, carries the reuse note in its own `problems` and its original's tier;
+- README, evidence-db.md and this section give the rule table; EXP-020 measures the tiers per
+  source kind on the corpus and the share of `confirmed` files whose hash the scenario logged,
+  with a committed script and the prediction registered first.
+
 **M6f: foreign-FSID discovery** (issue #54; design fixed 2026-10-07, before implementation).
 
 *What it is.* An optional mode, `btrfska scan --foreign` and `btrfska catalog build --foreign`,
