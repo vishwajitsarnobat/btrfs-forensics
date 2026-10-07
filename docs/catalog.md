@@ -20,6 +20,58 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — M6f: foreign-FSID discovery, a reformat or an fsid change and what survives (EXP-018)
+
+- **Branch:** `feature/m6-foreign-fsid` (from `main` at `523be2b`; issue #54). New
+  `src/btrfska/scan/foreign.py`, `corpus/vm/scenarios/foreign.guest.sh`, `reformat.sh`,
+  `fsid_change.sh`, `tests/test_foreign.py`, `tests/test_foreign_images.py`,
+  `experiments/EXP-018.md`, `experiments/exp018.py`. Changed `cli.py` (`scan --foreign`),
+  `catalog/build.py` and `catalog/cli.py` (`catalog build --foreign`), `corpus/manifest.tsv`,
+  `corpus/vm/README.md`, `README.md`, `docs/evidence-db.md`, `docs/plan.md` (M6f). **No schema
+  change** (still version 8).
+- **Why.** The M2 prefilter keeps only blocks whose header carries the tree fsid, so the tree
+  blocks of a filesystem that was on the device before a reformat, and those this filesystem wrote
+  before `btrfstune -u`, were never candidates (the M2a review; README's scan limitation). M1
+  already reported a foreign superblock copy, but nothing looked for the trees behind it.
+- **What changed.** An optional second pass over the scan plan's regions. A census counts every
+  4096-byte aligned offset that looks like a tree-block header under its header fsid, in a
+  mergeable Misra-Gries summary of at most 1024 fsids. Every recurring fsid other than the tree
+  fsid and the superblock fsid (at most 8), and the fsid of every foreign superblock copy, is then
+  validated with its own context: the foreign superblock's geometry when one survives, otherwise
+  the (nodesize, csum type) under which most of its first 32 blocks verify; without a superblock
+  the generation check is not made. What it was: `fsid_change` when its chunk-tree leaves or
+  superblock name the current device uuid (`btrfstune -u` keeps it; btrfs-progs v6.6.3
+  tune/change-uuid.c:145-197), `reformat` when they name only other device uuids or when a
+  foreign generation is above the current superblock's, `undetermined` otherwise. A change through
+  metadata_uuid (`btrfstune -m`), which rewrites no header, is read from the superblock. `scan
+  --json` gains `foreign_node` and `foreign_filesystem` records; `catalog build --foreign` puts
+  the summary into `scan_runs.scan_summary` under `foreign` and its lines into `problems` (source
+  `foreign`), so the schema stays as it is. Four corpus images, built in the guest:
+  `m6_reformat` (same options, no second life), `m6_reformat_geometry` (crc32c 32 KiB to mixed
+  xxhash 4 KiB at 60 MiB, second life; the old mirror-1 superblock survives), `m6_fsid_u`,
+  `m6_fsid_m`.
+- **Numbers (EXP-018, N = 5 regenerations of each row, this host).** Old-fsid valid blocks,
+  median (range): `m6_reformat` 196 (196-196), `reformat` from the generations, context inferred
+  (16384, xxhash64); `m6_reformat_geometry` 218 (218-218), `reformat` from the device uuids,
+  context from the surviving superblock (32768, crc32c); `m6_fsid_u` 30 (30-32) plus 5 invalid
+  (mkfs's never-written blocks), `fsid_change` from 31 chunk-tree items naming the current device;
+  `m6_fsid_m` no foreign header, the metadata_uuid change reported, 5 of 5. No other foreign
+  filesystem in any build; on 24 control images (a 25th, `m1_unknown_incompat`, is refused by the gate) only `m1_foreign_mirror`'s transplanted
+  superblock, with no block. Hostile input, on sandbox copies whose 39 680-sector trailing gap is
+  all header-shaped: a random fsid per sector selects nothing at a 10.7 MiB peak heap (0.27 s);
+  one foreign fsid in every sector is validated, all invalid, at 2.1 MiB (2.9 s). Budget 16 MiB.
+- **Must know.** On a block device with discard, mkfs trims the whole device unless `-K`
+  (common/device-utils.c:270-278), so a reformat there may leave nothing; these images are files,
+  where mkfs trims nothing. A same-options reformat followed by a second life left 2 old blocks in
+  a pilot. Foreign blocks are found and validated, not yet read as a filesystem (its chunk map and
+  roots); they are not `nodes` rows. EXP-017's open point (a real reformat with its trees) is
+  answered by `m6_reformat_geometry`.
+- **Verified.** `ruff check`, `ruff format --check`, `sha256sum -c tests/fixtures/SHA256SUMS`;
+  fresh-clone proof: the branch cloned into `images/scratch/`, `./setup.sh` built all 28 corpus
+  rows including the four new ones and ran 1 109 tests, all passed, nothing skipped; the clone was
+  deleted. In the working checkout 1 108 passed and one test of EXP-009 skipped, because the
+  shared `m4_deep` there predates the event log EXP-009 added.
+
 ## 2026-10-07 — M6a: recovered content verified against the data checksums (EXTENT_CSUM)
 
 - **Branch:** `feature/m6-extent-csum` (from `main` at `b918555`, rebased on `bef52dd`; issue

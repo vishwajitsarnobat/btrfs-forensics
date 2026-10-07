@@ -1995,6 +1995,15 @@ snapshot, churn with deletions; every file names the fsid it was written under):
 - README documents `--foreign` and every new key, evidence-db.md the `foreign` summary and
   problems source; the fresh-clone proof builds the four images.
 
+**M6f status 2026-10-07: done** (catalog.md, M6f entry; `tests/test_foreign.py`,
+`tests/test_foreign_images.py`; EXP-018). Each bullet of the definition of done is a test, and
+EXP-018 measured the four rows over five regenerations: every reformat and fsid change was found
+and identified in every build. Two things the design did not foresee: a reformat with the same
+options leaves no old chunk-tree leaf (the new mkfs writes its chunk tree where the old one was),
+so `m6_reformat` is identified by its generations, not by a device uuid; and on a block device
+with discard, mkfs trims the whole device by default, so these file-backed images are the
+favourable case (EXP-018 §7).
+
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
 - Corpus generator = `corpus/vm/` scaled up (already in use since M1):
   scenario scripts × matrix below, per-image manifest (per-file SHA-256,
