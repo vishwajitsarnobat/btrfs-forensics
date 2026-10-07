@@ -7,6 +7,7 @@ from btrfska.catalog import db
 from btrfska.recover.dbtree import RootNotCataloged
 from btrfska.recover.engine import RecoveryError, recover
 from btrfska.recover.output import OutputError
+from btrfska.recover.tiers import TIERS
 from btrfska.substrate import ondisk
 from btrfska.substrate.datacsum import VERDICTS
 from btrfska.substrate.freespace import LEVELS
@@ -97,6 +98,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
         + "; overwrite risk: "
         + ", ".join(f"{level} {(done.by_risk or {}).get(level, 0)}" for level in LEVELS)
     )
+    tiers = {t: sum(n for (_, k), n in (done.by_tier or {}).items() if k == t) for t in TIERS}
+    print("confidence: " + ", ".join(f"{t} {n}" for t, n in tiers.items()))
     incomplete = sum(
         done.counts.get(name, 0) for name in ("partial", "refused_encrypted", "failed")
     )
