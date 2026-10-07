@@ -51,10 +51,11 @@ TRUSTED_FST = ondisk.COMPAT_RO["FREE_SPACE_TREE"] | ondisk.COMPAT_RO["FREE_SPACE
 
 
 class SpaceViews:
-    """The allocation views of one recovery, each read once, and the discard mode."""
+    """The allocation views of one recovery, each read once, and the discard mode. `discard` is
+    the stated mode; `use_fst` False reads no free space tree, as on a filesystem without one."""
 
     def __init__(self, conn: sqlite3.Connection, reader: NodeReader, *,
-                 discard: str | None = None) -> None:  # fmt: skip
+                 discard: str | None = None, use_fst: bool = True) -> None:  # fmt: skip
         self.conn, self.reader = conn, reader
         self.map: ChunkMap = reader.chunk_map
         self.nodesize, self.sectorsize = reader.ctx.nodesize, reader.ctx.sectorsize
@@ -62,7 +63,7 @@ class SpaceViews:
             "SELECT compat_ro_flags, incompat_flags, image_size FROM scan_runs"
         ).fetchone()
         compat_ro, incompat, self.device_size = scan if scan else (0, 0, reader.img.size)
-        self.fst_trusted = compat_ro & TRUSTED_FST == TRUSTED_FST
+        self.fst_trusted = use_fst and compat_ro & TRUSTED_FST == TRUSTED_FST
         self.bgt = bool(compat_ro & ondisk.COMPAT_RO["BLOCK_GROUP_TREE"])
         self.zoned = bool(incompat & ondisk.INCOMPAT["ZONED"])
         rows = conn.execute(
