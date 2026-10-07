@@ -2245,6 +2245,15 @@ pinned by SHA-256, never committed (no licence); setup.sh fetches them when it c
 - README documents `hiding` and every key, evidence-db.md the `hiding` summary and problems
   source. The false-positive measurement is issue #53.
 
+**M6d status 2026-10-07: done** (catalog.md, M6d entry; `tests/test_hiding.py`,
+`tests/test_hiding_images.py`). Each bullet of the definition of done is a test. Three things the
+design did not foresee: every corpus image carries a stale sys_chunk_array tail (mkfs drops its
+temporary system chunk the way the kernel does, without clearing), so that rule had to know the
+two shapes removal leaves; log-tree inode items keep stale bytes in their reserved field, so log
+trees are exempt from that rule; and the hide-and-seek "hidden snapshot" is a plain directory
+named U+FEFF, not a subvolume, so the name rule covers every directory entry (`hidden_name`).
+`m6_reformat_geometry` keeps two `device_slack` findings: the replaced, larger filesystem.
+
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
 - Corpus generator = `corpus/vm/` scaled up (already in use since M1):
   scenario scripts × matrix below, per-image manifest (per-file SHA-256,
