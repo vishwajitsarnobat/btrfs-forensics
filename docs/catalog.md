@@ -51,6 +51,24 @@ Maintenance rules:
   with the generations its log holds (creates exact, renames and deletes inside their interval).
   Fresh clone of the branch: `./setup.sh` built all 20 images and ran 999 tests, all passing,
   none skipped; the clone was deleted. In the worktree, ruff clean and `sha256sum -c` OK.
+## 2026-10-07 — Research for M6 and M7: hiding images, baselines, logical-range reuse
+
+- **Branch:** `docs/research-m6-m7` (from `main`). Added `docs/research/fishy-btrfs.md`,
+  `docs/research/baselines.md`, `docs/research/logical-range-reuse.md`; changed `docs/plan.md`.
+  Docs only.
+- **Why.** Three questions blocked M6e, M7d and EXP-010 (map tickets #46, #47, #48).
+- **Findings.** fishy has no public btrfs module. The `fkie-cad/hide-and-seek-dataset` repository
+  is online again, with four btrfs images and no licence. All nine free baselines have pinnable
+  sources, but none is built yet. The guest has no compiler, so it needs a pinned build disk. The
+  FKIE-TSK fork cannot open btrfs with `tsk_recover`. At v7.0 the kernel reuses a logical chunk
+  range only after the topmost chunk is removed (`find_next_chunk`, volumes.c:2000-2016), and no
+  corpus image shows reuse, so EXP-007 cannot tell per-generation maps from a merged map.
+- **Decisions (maintainer, 2026-10-07), applied to plan.md.** C5 and the M6 definition of done are
+  reworded: planted by our own `mutate.py` and guest scenarios, with the hide-and-seek images as an
+  independent check. PhotoRec is pinned as its static binary; FKIE-TSK is run through its pool
+  tools; SecurityRonin runs through a small Rust harness under `corpus/baselines/`; every baseline
+  is built and run in the guest; commercial tools are out.
+- **Verified.** Every build step and command in baselines.md is marked UNVERIFIED until M7d runs it.
 
 ## 2026-10-07 — The mentor demo, tracked and runnable
 
