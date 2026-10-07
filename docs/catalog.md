@@ -20,6 +20,38 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — EXP-009: how right the timeline is, per event type, on `m4_deep`
+
+- **Branch:** `feature/exp009-timelines` (from `main` at `b918555`; issue #55). Changed
+  `corpus/vm/scenarios/deep.guest.sh`, `corpus/vm/make_image.sh`, `corpus/vm/README.md`,
+  `corpus/manifest.tsv` (the `m4_deep` note), `tests/test_timeline.py`, `docs/plan.md` (§8,
+  "E-timeline"); new `experiments/EXP-009.md`, `experiments/exp009.py`.
+- **Why.** C3 (`btrfska timeline`) had tests but no measured number. The paper needs precision
+  and recall per event type against a ground truth, with the share of events that rest on an
+  assumed order or on a log tree alone.
+- **What changed.** Scenario `deep` logged hashes only and renamed nothing. It now logs every
+  create, rename and delete of tree 5 as `=== EVENT KIND INODE GENERATION PATH [NEW PATH]`, the
+  generation read in the guest from the superblock after the committing `sync` (dump-super only
+  reads), and renames one small inline file per round on a commit the round makes anyway (the
+  number of commits is unchanged). `make_image.sh` takes `OUT_DIR` (always under `images/`), so
+  the experiment builds into its own directory with its own initramfs and touches neither
+  `images/scenarios` nor `images/vm`. The prediction was registered and pushed (`52547ea`) before
+  the first build of the extended scenario.
+- **Numbers** (EXP-009 §6; N = 5 builds, i5-1335U host, median and range): create precision 1.0,
+  recall 0.987 (0.987–0.989); rename precision 1.0, recall 0.870 (20 of 23, every build); delete
+  recall 0.889, **precision 1.0 in three builds and 0.98 in two**: one `never_committed` for a
+  file committed in generation 10, whose state survives only as a walk with gaps, and no state
+  of 11 to 20 at all. No create, rename or delete event carries `order_assumed`; 16 of 538 (about
+  3 %) carry `log_only`, exactly the flash files' events. Delete intervals: median 1 generation,
+  maximum 6. One `link` per build that never happened, from a version seen through a walk with
+  gaps. Every miss is of a file whose needed versions no source shows. About 15 s per build.
+- **Verified.** The registered predictions P1, P3 to P6 hold; P2 is refuted for precision and
+  reported so (follow-up in EXP-009 §8: `never_committed` and name changes seen through gapped
+  walks should need evidence, not absence; not fixed here). New test: m4_deep's timeline agrees
+  with the generations its log holds (creates exact, renames and deletes inside their interval).
+  Fresh clone of the branch: `./setup.sh` built all 20 images and ran 999 tests, all passing,
+  none skipped; the clone was deleted. In the worktree, ruff clean and `sha256sum -c` OK.
+
 ## 2026-10-07 — The mentor demo, tracked and runnable
 
 - **Branch:** `docs/demo` (from `main` at `1330f43`). Added `docs/demo/README.md`,

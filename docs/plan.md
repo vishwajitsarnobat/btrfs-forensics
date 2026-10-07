@@ -2145,6 +2145,13 @@ one run of 15 (365/353/18/828), the async and sync rows never.
     median and range, host named; the corpus change proved from a fresh clone (`./setup.sh`,
     every test passing, nothing skipped); a test that the extended log agrees with the image's
     creation generations; the result written up whichever way it goes.
+  - **Status 2026-10-07: done, partly refuted** (EXP-009; catalog.md). Over five builds, create
+    and rename precision 1.0, recall 0.987 to 0.989 and 0.870; delete recall 0.889, precision 1.0
+    in three builds and 0.98 in two, from one `never_committed` for a file that was committed in
+    a generation whose state survives only with gaps. No measured event rests on an assumed
+    order; about 3 % rest on a log tree alone (the flash files). Follow-up: `never_committed`,
+    and name changes seen through walks with gaps, should need evidence rather than absence
+    (EXP-009 §8).
 - **Minimum experiment set for paper 1** (EXP records, ≥ 5 regenerations
   where a guest runs; details in `paper-draft.md` §10):
   - E-rec: file-level recovery per source, on no-balance, aged and ≥ 8 GiB
