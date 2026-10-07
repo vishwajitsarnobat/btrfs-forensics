@@ -355,6 +355,7 @@ def test_an_inode_item_newer_than_its_leaf_contradicts_the_artifact():
         run(conn, reader, out)
         row = by_source(conn)["anchored_root", 257]
         assert row["tier"] == "unattached" and "generation_inconsistent" in rules_of(row)
+        assert any("is newer than its leaf" in p for p in json.loads(row["problems"]))
 
 
 def test_a_duplicate_repeats_its_original_s_notes_verdicts_and_tier():

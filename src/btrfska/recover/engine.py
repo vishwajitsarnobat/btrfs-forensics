@@ -405,7 +405,8 @@ class _Run:
         if row["status"] == "duplicate":
             self._inherit(row, problems)
         else:
-            row["tier"], rules, backrefs, asked = self._tier(root, record, row, reads, missing)
+            found = self._tier(root, record, row, reads, missing, problems)
+            row["tier"], rules, backrefs, asked = found
             row["tier_rules"] = json.dumps(rules)
         row["provenance_chain"] = json.dumps(self._chain(root, record, row, asked))
         if row["space_verdict"] is not None:
@@ -525,8 +526,10 @@ class _Run:
                 owner.append(f"leaf {leaf.bytenr} is owned by tree {found}, not {root.tree_id}")
         return validated, generation, owner
 
-    def _tier(self, root: Root, record: InodeRecord, row: dict, reads: list, missing: list):
-        """(tier, rules, per extent read the back-references asked, extent trees asked)."""
+    def _tier(self, root: Root, record: InodeRecord, row: dict, reads: list, missing: list,
+              problems: list):  # fmt: skip
+        """(tier, rules, per extent read the back-references asked, extent trees asked); what the
+        consistency checks found goes into `problems`."""
         labels = self.csum_trees.labels
         states = {label: state_id for state_id, label in labels.items()}
         anchored = row["source_kind"] in ("anchored_root", "orphan_item")
@@ -563,6 +566,7 @@ class _Run:
         else:
             read = True  # a special file, or an inode without content: nothing to read
         validated, generation, owner = self._consistency(root, record, reads)
+        problems += generation + owner
         own = labels.get(root.state_id) if anchored else None
         evidence = Evidence(
             anchored=anchored,
