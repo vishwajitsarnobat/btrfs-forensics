@@ -4,7 +4,7 @@
 # modify and delete files over more than four commits (so every backup root slot is refilled),
 # unmount. Under the name stability_balance (stability_balance.guest.sh) a full balance follows.
 # Prints the scrub summary, every file that cannot be read, and every BTRFS kernel message.
-echo "=== SCRUB $(btrfs scrub start -B -r $MNT 2>&1 | grep -i -e 'error' -e 'status' | tr '\n' ' ')"
+btrfs scrub start -B -r $MNT 2>&1 | while read -r line; do echo "=== SCRUB $line"; done
 find $MNT -type f | while read -r f; do
     cat "$f" > /dev/null 2>&1 || echo "=== READ-ERROR $f"
 done
