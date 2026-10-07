@@ -8,6 +8,7 @@ from btrfska.recover.dbtree import RootNotCataloged
 from btrfska.recover.engine import RecoveryError, recover
 from btrfska.recover.output import OutputError
 from btrfska.substrate import ondisk
+from btrfska.substrate.datacsum import VERDICTS
 from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat
 
 EXIT_ERROR = 1
@@ -80,6 +81,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
             print(f"orphan graph: artifacts with a recorded join {found['orphan_graph']}")
     counts = ", ".join(f"{name} {done.counts.get(name, 0)}" for name in STATUSES)
     print(f"artifacts: {counts}; {done.bytes_written} bytes written")
+    verdicts = {v: sum(n for (_, k), n in (done.by_csum or {}).items() if k == v) for v in VERDICTS}
+    print("data checksums: " + ", ".join(f"{v} {n}" for v, n in verdicts.items()))
     incomplete = sum(
         done.counts.get(name, 0) for name in ("partial", "refused_encrypted", "failed")
     )
