@@ -20,6 +20,22 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — Prior art of October recorded, EXP-004 status corrected
+
+- **Branch:** `docs/prior-art-october` (from `main` at `0cea88e`). Changed `docs/research.md`,
+  `docs/plan.md`, `docs/paper-draft.md`, `experiments/EXP-004.md`. Docs only.
+- **Why.** The prior-art watch run on 2026-10-03 for the paper found one new tool,
+  `michal2229/mbkn-btrfs-rescue` (v0.4.0, 2026-09-27), that narrows C1, C3 and C6, and the number
+  audit found the EXP-004 status line still quoting the totals from before §6.7 and §6.8. Neither
+  had reached the repository. Every later experiment argues against the corrected claims.
+- **What changed.** research.md §12 records the watch: what the tool does, read from its source at
+  `c2eddfb`, what it does to each claim, and the items that did not change. plan.md §1 cites it in
+  the C1, C3 and C6 rows; the M7 baseline list carries it; §8 records that paper 1 is submitted to
+  DFC Europe 2027. paper-draft.md §5.3 has a bullet and a Table T-1 column for it. EXP-004 §8 now
+  gives both totals: 229 of 229 inside and 0 of 133 outside on the 13 images of §6.2, and 394 of
+  394 and 0 of 136 with §6.7 and §6.8.
+- **Verified.** Read the diff against the October notes and EXP-004 §6.2 and §6.8.
+
 ## 2026-09-22 — Final review of M0 to M5: what two independent reads of the code found
 
 - **Branch:** `fix/m5-final-review` (from `main` at `74948d5`). Changed `recover/engine.py`,

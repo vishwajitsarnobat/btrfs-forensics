@@ -318,6 +318,14 @@ Sources: research.md §2, §4, §6, §10.1, §10.2; plan.md §1 and §8.
   `core/src/chunk.rs`; research.md §10.2, §10.12). Not run by us.
 - **btrfs-progs `restore` and `btrfs-find-root`.** Salvage; find-root groups scanned blocks by
   generation and highest level (research.md §2.1).
+- **`michal2229/mbkn-btrfs-rescue`** (Python, GPL-3.0, v0.4.0, 2026-09-27; research.md §12).
+  Sweeps every 4 KiB of the device for checksum-valid tree blocks with no chunk map, keeps every
+  generation in SQLite and rebuilds files from superseded leaves, so recovery from orphan nodes is
+  no longer ours alone (C1 narrows to ORPHAN_ITEM resurrection, recovery labelled by source and
+  state, and items kept per block rather than merged per (tree, inode)). It lists per-inode
+  versions but no ordered events (C3). It stores every CHUNK_ITEM per generation but reads every
+  version through one merged newest-wins map, which misreads only where a logical range was
+  reused (C6; EXP-010). A candidate M7 baseline.
 - **btrfscue v0.7.** Indexes FSID-matching leaves into a database; recovers unreferenced
   subvolumes (research.md §2.4, §10.2).
 - **The Sleuth Kit.** Experimental Btrfs on `develop` since PR #3065 (2024-11-27), unreleased;
@@ -366,16 +374,16 @@ state it as "by its description".
 **Claim matrix (Table 1 draft).** ✓ = does it; ✗ = does not; ? = unknown or not checked; "—" = not
 applicable. Every non-btrfska cell must be verified before submission.
 
-| Capability | find-root + restore | Beyond Carving | SecurityRonin | btrfscue v0.7 | TSK develop | btrfska (M2) |
-|---|---|---|---|---|---|---|
-| Historical roots beyond the 4 backups | ✓ (scan) | ✓ (scan of chunk-mapped tree regions, Alg. 3; independent of the superblock root pointer, §X.G) | ✗ (backup-root-bounded: all four slots, FS tree 5 only; `forensic/src/lib.rs`) | ? | ? | ✓ (metadata chunks and unmapped gaps; DATA with `--full-sweep`) |
-| Scans outside the current chunk map | ✗ (source and EXP-004: 0 of 133 outside-map states printed) | ✗ by its description | ✗ | ? | ? | ✓ |
-| All four csum types validated | ✓ (prints the same root-tree blocks as btrfska on the crc32c, xxhash, sha256 and blake2b images, EXP-004) | ✗ (no tree-block checksum validation described; Alg. 2 prunes on generation, blockptr, level) | ✗ (superblock: crc32c, others `None`; node crc32c status does not gate recovery) | "crc32c-era assumptions" (research.md §2.4) | ? | ✓ (EXP-001) |
-| Every mirror copy validated and reported | ✗ (research.md §10.8) | ✗ (first stripe only, §X.H.7) | ✗ (stripe 0, `core/src/chunk.rs`) | ✗ (no RAID) | ? | ✓ |
-| Completeness and missing-block classes per state | ✗ | outcome taxonomy per file | ✗ | ✗ | ✗ | ✓ (tree level) |
-| File-level deleted-file recovery | ✓ | ✓ | ✓ | ✓ | ? | ✗ (M4) |
-| Timelines | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ (M5) |
-| Confidence tiers with provenance | ✗ | taxonomy | severity grades | ✗ | ✗ | ✗ (M6; records exist) |
+| Capability | find-root + restore | Beyond Carving | SecurityRonin | btrfscue v0.7 | TSK develop | mbkn-btrfs-rescue v0.4.0 | btrfska (M2) |
+|---|---|---|---|---|---|---|---|
+| Historical roots beyond the 4 backups | ✓ (scan) | ✓ (scan of chunk-mapped tree regions, Alg. 3; independent of the superblock root pointer, §X.G) | ✗ (backup-root-bounded: all four slots, FS tree 5 only; `forensic/src/lib.rs`) | ? | ? | partial (indexes ROOT_ITEMs of every root-tree leaf; walks only the newest root per subvolume) | ✓ (metadata chunks and unmapped gaps; DATA with `--full-sweep`) |
+| Scans outside the current chunk map | ✗ (source and EXP-004: 0 of 133 outside-map states printed) | ✗ by its description | ✗ | ? | ? | ✓ (whole-device 4 KiB sweep, no chunk map) | ✓ |
+| All four csum types validated | ✓ (prints the same root-tree blocks as btrfska on the crc32c, xxhash, sha256 and blake2b images, EXP-004) | ✗ (no tree-block checksum validation described; Alg. 2 prunes on generation, blockptr, level) | ✗ (superblock: crc32c, others `None`; node crc32c status does not gate recovery) | "crc32c-era assumptions" (research.md §2.4) | ? | ✓ (`checksum.py`) | ✓ (EXP-001) |
+| Every mirror copy validated and reported | ✗ (research.md §10.8) | ✗ (first stripe only, §X.H.7) | ✗ (stripe 0, `core/src/chunk.rs`) | ✗ (no RAID) | ? | validated per copy; reporting ? | ✓ |
+| Completeness and missing-block classes per state | ✗ | outcome taxonomy per file | ✗ | ✗ | ✗ | ✗ (a missing count for the current tree only) | ✓ (tree level) |
+| File-level deleted-file recovery | ✓ | ✓ | ✓ | ✓ | ? | ✓ (from superseded leaves) | ✗ (M4) |
+| Timelines | ✗ | ✗ | ✗ | ✗ | ✗ | partial (per-inode version list, no events) | ✗ (M5) |
+| Confidence tiers with provenance | ✗ | taxonomy | severity grades | ✗ | ✗ | partial (per-file categories from data checksums) | ✗ (M6; records exist) |
 
 ### 5.4 Threat model and forensic-soundness requirements
 
