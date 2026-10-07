@@ -64,7 +64,7 @@ listed here, and a test fails when one is not (`tests/test_catalog.py`).
 | `nodesize`, `sectorsize` | bytes |
 | `csum_type`, `csum_name` | 0 crc32c, 1 xxhash64, 2 sha256, 3 blake2b |
 | `incompat_flags`, `compat_ro_flags` | *u64* |
-| `scan_summary` | JSON: the counts `btrfska scan` prints, per class and per region; with `--foreign`, the foreign-FSID summary under `foreign` (README, `btrfska scan` output) |
+| `scan_summary` | JSON: the counts `btrfska scan` prints, per class and per region; with `--foreign`, the foreign-FSID summary under `foreign` (README, `btrfska scan` output); with `--hiding`, the `hiding_summary` of `btrfska hiding` under `hiding`, its findings as `records` (README, `btrfska hiding`) |
 
 ### `superblocks`: every copy the image could hold
 
@@ -86,7 +86,7 @@ listed here, and a test fails when one is not (`tests/test_catalog.py`).
 | Column | Meaning |
 |---|---|
 | `problem_id` | row id |
-| `source` | `superblock` (copies disagree), `chunk_map`, `scan_plan`, `walk`, or `roots` (more root-tree candidates than `--max-states`: the older ones are in `nodes` and `root_items` but not in `states`), or `chunk_maps` (more chunk-tree roots than the bound of 4096 historical maps: the roots a superblock slot names and then the newest were built), or `foreign` (with `--foreign`: the census, each foreign filesystem with its kind and evidence, and an fsid change through metadata_uuid, one line each as `scan --foreign` prints them) |
+| `source` | `superblock` (copies disagree), `chunk_map`, `scan_plan`, `walk`, or `roots` (more root-tree candidates than `--max-states`: the older ones are in `nodes` and `root_items` but not in `states`), or `chunk_maps` (more chunk-tree roots than the bound of 4096 historical maps: the roots a superblock slot names and then the newest were built), or `foreign` (with `--foreign`: the census, each foreign filesystem with its kind and evidence, and an fsid change through metadata_uuid, one line each as `scan --foreign` prints them), or `hiding` (with `--hiding`: the summary lines, then per finding its technique and place, its evidence and its bytes, one line each as `btrfska hiding` prints them) |
 | `detail` | the message |
 
 ### `chunk_maps`, `chunks` and `stripes`: the current chunk map and the historical ones
@@ -534,7 +534,7 @@ SELECT slot, type_name, key_objectid, key_offset FROM items WHERE content_id = 1
 ## Not stored yet
 
 Confidence tiers on `artifacts` arrive with plan.md M6c (they will read `csum_verdict`), and with them the decision whether a
-block's slack content is tampering (`slack_class` only describes it). Log generations and the (owner,
+block's slack content is tampering (`slack_class` only describes it; `--hiding` decides it for the blocks of the current state, as `btrfska hiding` does). Log generations and the (owner,
 generation, level) groups that `btrfska roots` prints are one `GROUP BY` over `nodes`. Stripe orders
 are never guessed, so a striped chunk known only from DEV_EXTENTs stays rejected.
 
@@ -570,6 +570,9 @@ are never guessed, so a striped chunk known only from DEV_EXTENTs stays rejected
   another copy matches, `recover` now writes that copy's bytes, so such a file's content can differ
   from what version 7 wrote. Nothing the scan writes changed. A version-7 database is refused;
   rebuild it from the image.
+  Added without a change of the DDL (2026-10-07, `catalog build --hiding`, plan.md M6d):
+  `hiding` in `scan_runs.scan_summary` and the `problems` source `hiding`. A database built
+  without `--hiding` has neither.
 - **7** (2026-09-21): `artifacts.in_current` is gone, as M4b announced. "Deleted since" is a
   `delete` event of `btrfska timeline` now, bounded by two states, for an identity of tree, inode
   number and creation generation; the flag compared one artifact with one tree. A timeline is a

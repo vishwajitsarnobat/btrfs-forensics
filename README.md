@@ -17,8 +17,8 @@ timelines): the catalog keeps the chunk maps of superseded chunk-tree roots and 
 a state from before a balance through the map of its own time; `recover --graph` joins orphan
 blocks where a join can be justified; `btrfska timeline` follows every inode through every
 cataloged state. M6a: every recovered data extent is checked against the data checksums of
-the csum tree of its own state, with a verdict per extent and per file. The prototype that came
-first is the git tag `legacy-final`.
+the csum tree of its own state, with a verdict per extent and per file. M6d: `btrfska hiding`
+reports data hidden by every known btrfs technique. The prototype that came first is the git tag `legacy-final`.
 - `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID|all]... [--tree ID|all] [--orphans|--graph]`
   extracts the files of a tree as the current, a backup or a discovered root saw them, and with
   `--orphans` also from leaves that no root tree leads to, one extent at a time, with a
@@ -27,6 +27,11 @@ first is the git tag `legacy-final`.
 - `btrfska timeline DB [--tree ID|all] [--inode N] [--uncommitted] [--json]` follows every inode
   through every cataloged state: create, modify, rename, move, link, unlink, delete, by tree,
   inode number and creation generation.
+- `btrfska hiding IMAGE [--json]` reports data hidden in btrfs: superblock reserved bytes
+  (the ranges taken from the feature flags), padding and sys_chunk_array slack, overwritten
+  superblock slots, the boot area, backup-root divergence, node slack, diverging block copies,
+  inode reserved bytes, nanosecond timestamps, STRING_ITEMs, file slack, device slack and
+  invisible names, each with its offset, its bytes and why a clean filesystem has none.
 - `btrfska scan IMAGE [--full-sweep] [--workers N] [--foreign] [--json]` finds tree
   blocks of the filesystem anywhere on the image, including chunks that have
   since been removed. It classifies each one as `live`, `backup_reachable`,
@@ -589,7 +594,7 @@ the class earliest in the list above wins:
 
 ### `btrfska catalog`
 
-`btrfska catalog build IMAGE --db PATH [--full-sweep] [--workers N] [--max-states N] [--foreign] [--no-rehash]`
+`btrfska catalog build IMAGE --db PATH [--full-sweep] [--workers N] [--max-states N] [--foreign] [--hiding] [--no-rehash]`
 scans the image once, read-only, and writes everything `scan` and `roots`
 compute, plus the superblock copies, the chunk maps (the current one, one per
 superseded chunk-tree root the scan found, and one assembled from DEV_EXTENT
@@ -613,6 +618,9 @@ column, with example queries.
 - `--foreign` adds the `scan --foreign` pass: its summary goes into
   `scan_runs.scan_summary` under `foreign`, and its text lines into `problems`
   with source `foreign`. Foreign blocks are not `nodes` rows.
+- `--hiding` runs `btrfska hiding` on the current state, with the historical chunk maps the
+  pass found: its summary and its findings (as `records`) go into `scan_runs.scan_summary` under
+  `hiding`, and its text lines into `problems` with source `hiding`.
 - btrfs u64 values are stored as signed 64-bit integers, so the high objectids
   read as btrfs names them: owner `-6` is the log tree.
 
@@ -644,6 +652,96 @@ uv run btrfska catalog build sandbox.img --db images/scratch/sandbox.db
 uv run btrfska catalog info images/scratch/sandbox.db
 sqlite3 -readonly images/scratch/sandbox.db \
   "SELECT status, outside_map, COUNT(*) FROM nodes WHERE orphan GROUP BY 1, 2"
+```
+
+### `btrfska hiding`
+
+`btrfska hiding IMAGE [--json] [--allow-unsupported]` checks every place where a known technique
+hides data in btrfs (plan.md M6d) and reports each one that holds something: where it is on the
+image, how many bytes are not zero, the first bytes, and the evidence. A rule reports only what
+mkfs.btrfs and the kernel never write, so a filesystem they alone wrote is quiet; each rule names
+the kernel source (v7.0, file and line) that says why. Nothing is written. The techniques, with
+the `technique` name each finding carries:
+
+- `superblock_reserved`: non-zero bytes in the superblock's `reserved[199]` (0x264-0x32A), in a
+  backup root slot's padding, or in a field that only a feature gives a meaning, while that
+  feature's incompat flag is clear: `metadata_uuid` (METADATA_UUID), `nr_global_roots`
+  (EXTENT_TREE_V2), `remap_root` and its generation and level (REMAP_TREE). **The reserved range
+  depends on the feature flags**: the published range of 0xF0 bytes at 0x23B is the layout
+  before kernel 5.0, and taken literally it reports every filesystem changed by `btrfstune -m`.
+  Every superblock copy is examined, valid or not, since a hider may leave the checksum stale.
+- `superblock_padding`: non-zero bytes in `padding[565]` (0xDCB-0xFFF).
+- `sys_chunk_array_slack`: bytes beyond `sys_chunk_array_size`. Removing a system chunk leaves
+  stale bytes there, because the kernel and mkfs.btrfs move the array down without clearing its
+  end: either the removed entry itself or a copy of the array's last bytes. Those two shapes are
+  counted in `stale_array_tails` (every corpus image has one) and are not findings.
+- `superblock_slot`: a superblock slot inside the device that is not zero but holds no
+  superblock. Every commit writes every copy that fits in the device.
+- `pre_superblock`: non-zero bytes in the first 64 KiB or in the rest of the first MiB. The
+  kernel allocates nothing below 1 MiB, and mkfs.btrfs leaves it zero; a boot loader (GRUB 2
+  embeds itself there) is named in the evidence when sector 0 ends with 0x55 0xAA.
+- `backup_root_divergence` (after SecurityRonin/btrfs-forensic): a backup root newer than the
+  superblock, no slot of the superblock's generation, that slot disagreeing with the superblock
+  fields written with it, slot generations that repeat or are not consecutive, or a mirror of the
+  same generation with other backup roots.
+- `node_slack`: a valid tree block of the current state whose slack is not zero and does not read
+  as stale items. The kernel zeroes the slack of every tree block it writes (EXP-005); what
+  mkfs.btrfs leaves there reads as stale items and is counted in `stale_slack`, not reported.
+- `copy_divergence`: two copies (DUP, RAID1) of one tree block that both pass every check but
+  differ. The kernel writes all copies from one buffer.
+- `inode_reserved`: non-zero bytes in an inode item's `reserved` (32 bytes at 0x50). A log tree's
+  inode items keep whatever their buffer held there and are counted in `log_inode_reserved`.
+- `timestamp_nsec`: an inode's nanosecond field of 10^9 or more, which no kernel timestamp has,
+  or four different nanosecond values that all read as printable ASCII.
+- `string_item`: an item of type STRING_ITEM (253), which nothing creates.
+- `file_slack`: non-zero bytes past the end of a regular file in its last sector (uncompressed
+  regular extents); the kernel zeroes them before the sector is written. `detail.csum` says what
+  the data checksum of that sector shows: `covers_hidden` (it was recomputed with the hidden
+  bytes), `matches_zeroed` (it matches only with them zeroed, as the kernel wrote the sector),
+  `mismatch`, `none` or `unavailable`.
+- `device_slack`: non-zero bytes past this device's last device extent, or past its size. Bytes
+  where a chunk of a historical chunk map once was (a chunk removed by balance) are counted in
+  `explained_bytes`, not reported; those maps come from a scan for older chunk trees, run only
+  when such bytes exist.
+- `hidden_name`: a directory entry, a subvolume or snapshot included, whose name has invisible or
+  control characters (U+FEFF, zero-width and bidirectional marks), bytes that are not UTF-8, or
+  only whitespace. Hidden directories on its path are named in the evidence.
+
+The trees examined are those of the current state, root, chunk and log trees included; blocks the
+current state does not reach are not examined here (`catalog build` describes their slack).
+
+The text output is a summary line, the counts that are explained and not reported, then per
+finding its `technique`, place and byte count, the evidence and the bytes as text. With `--json`,
+stdout carries one `finding` record per finding and then one `hiding_summary` record; the summary
+lines go to stderr. Exit status 0, or 2 when the image is refused.
+
+A `finding` record has `record`, `unsupported_format`, `technique`, `physical` (the image offset
+of the area examined), `length`, `nonzero` (non-zero bytes in it; for a field rule its count of
+fields), `where` (the place in words), `evidence`, `preview` (hex of up to 32 bytes from the
+first non-zero byte) and `text` (the same bytes, unprintable ones as `.`), and `detail`, which
+depends on the technique: `first_nonzero` for every area rule; `mirror`, `field`, `copy_valid`
+and `csum_ok` for the superblock rules; `bytenr`, `generation`, `owner`, `level` for the block
+rules; `tree`, `inode`, `slot` for the item rules; `nsec` for `timestamp_nsec`; `logical`,
+`size` and `csum` for `file_slack`; `devid`, `area` (`past_last_extent` or `past_device_size`),
+`runs` (up to 16 `[start, end)` ranges of non-zero 4 KiB blocks) and `runs_not_listed` for
+`device_slack`; `kind`, `path`, `name_hex`, `directory`, `target` and `subvolume` for
+`hidden_name`; `generations` and `reasons` for `backup_root_divergence`.
+
+The `hiding_summary` record has `record`, `unsupported_format`, `techniques` (the list above, in
+report order), `findings` (their number), `by_technique` (a count for each), `superblock`
+(`copies` examined, `slots_without_superblock`, `stale_array_tails` by shape), `trees` (`trees`,
+`blocks` and `copies` examined, `nonzero_slack` block copies, `stale_slack` of them read as stale
+items with the first 16 in `stale_slack_blocks` as `[bytenr, generation, owner, level]`, `inodes`,
+`log_inode_reserved`, `files_checked` file tails, `subvolumes`, and `problems` met on the walks)
+and `device` (`devid`, `total_bytes`, `last_extent_end`, `explained_bytes`, `history`: how many
+historical chunk maps were read and how many of their stripes lie on this device, or null when
+none were needed, and `extents`, the device extents of this device).
+
+```sh
+uv run btrfska hiding sandbox.img                       # 0 findings
+uv run btrfska hiding --json images/scenarios/m6_hide_nsec.img
+uv run python corpus/hide_and_seek.py                   # the four third-party images
+uv run btrfska hiding images/hide-and-seek/btrfs_inode_reserved.img
 ```
 
 ### `btrfska timeline`

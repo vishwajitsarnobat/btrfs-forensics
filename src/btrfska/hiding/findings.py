@@ -36,10 +36,11 @@ def nonzero(data) -> int:
 
 
 def preview(data) -> tuple[str, str]:
-    """(hex, text) of up to PREVIEW bytes from the first non-zero byte of `data`."""
+    """(hex, text) of up to PREVIEW bytes from the first non-zero byte of `data`, without the
+    zero bytes that end them."""
     raw = bytes(data)
     stripped = raw.lstrip(b"\0")
-    shown = stripped[:PREVIEW]
+    shown = stripped[:PREVIEW].rstrip(b"\0")
     text = "".join(chr(b) if 0x20 <= b < 0x7F else "." for b in shown)
     return shown.hex(), text
 

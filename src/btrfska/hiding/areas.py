@@ -110,17 +110,19 @@ def stale_tail(array: bytes, size: int, tail: bytes, sectorsize: int) -> str | N
 
 
 def superblock_findings(img, fields: dict) -> tuple[list[Finding], dict]:
-    """Findings over every superblock slot inside the device, and what was examined."""
+    """Findings over every superblock slot of the image, and what was examined. A copy with the
+    magic is examined wherever it is; a slot without one only inside the device (`fields` is the
+    selected superblock), since past the device's size it is device slack."""
     found, checked = [], {"copies": 0, "slots_without_superblock": 0, "stale_array_tails": {}}
-    device_end = min(img.size, ondisk.DEV_ITEM.unpack_from(fields["dev_item"])["total_bytes"])
+    device_end = ondisk.DEV_ITEM.unpack_from(fields["dev_item"])["total_bytes"] or img.size
     for mirror in range(ondisk.SUPER_MIRROR_MAX):
         offset = ondisk.sb_offset(mirror)
-        if offset + ondisk.SUPER_INFO_SIZE > device_end:
+        if offset + ondisk.SUPER_INFO_SIZE > img.size:
             continue
         block = bytes(img.mmap[offset : offset + ondisk.SUPER_INFO_SIZE])
         copy = superblock.parse_copy(block, mirror)
         if not copy.magic_ok:
-            if nonzero(block):
+            if nonzero(block) and offset + ondisk.SUPER_INFO_SIZE <= device_end:
                 checked["slots_without_superblock"] += 1
                 found.append(
                     area_finding(
