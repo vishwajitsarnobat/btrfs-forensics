@@ -18,7 +18,7 @@ from btrfska.substrate.node import NodeReader
 _NEWEST = 1 << 64  # the current map's place in time when its chunk root is not recorded
 
 
-def _stored_map(conn: sqlite3.Connection, map_id: int, name: str, devices) -> ChunkMap:
+def stored_map(conn: sqlite3.Connection, map_id: int, name: str, devices) -> ChunkMap:
     chunks = []
     rows = conn.execute(
         "SELECT chunk_id, logical, length, type, sub_stripes, origin FROM chunks"
@@ -59,9 +59,9 @@ class Readers:
                 place = _NEWEST if generation is None else u64(generation)
                 self.dated.append((name, place, current.chunk_map))
             elif kind == "historical":
-                self.dated.append((name, u64(generation), _stored_map(conn, map_id, name, devices)))
+                self.dated.append((name, u64(generation), stored_map(conn, map_id, name, devices)))
             else:
-                self.fallback.append(_stored_map(conn, map_id, name, devices))
+                self.fallback.append(stored_map(conn, map_id, name, devices))
 
     def reader(self, root: Root) -> NodeReader:
         if not self.own:

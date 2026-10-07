@@ -83,6 +83,10 @@ python3 corpus/vm/probe_stale_metadata.py images/scenarios/x.img
 | `scenarios/discard_{none,async,sync}.sh` | The three §10.4 discard rows |
 | `scenarios/matrix.sh NAME` | One image of the M7 corpus matrix (plan.md M7a): the axes `OP`, `SIZE`, `COMPRESS`, `CSUM`, `BGT`, `DISCARD_MODE`, `RECLAIM`, `LAYOUT` (values and base in its header) become mkfs arguments, mount options, the virtio discard setting and guest parameters |
 | `scenarios/matrix.guest.sh` | The matrix workload: a population of subvolume `data`, one operation (delete, overwrite, stress, snapshot, balance, defrag), two settle phases for the cleaner, three churn commits; every file state logged as `=== EVENT` with its SHA-256 |
+| `scenarios/foreign.guest.sh` | One life of a filesystem: files, a snapshot, churn with deletions; every file names the fsid it was written under (plan.md M6f) |
+| `scenarios/reformat.sh` | A life, the pinned mkfs over the same image again (`NEW_CSUM`, `NEW_MKFS_ARGS`), and unless `NEW_LIFE=0` a second life |
+| `scenarios/fsid_change.sh` | A life, the pinned `btrfstune -f $TUNE` (`-u` or `-m`), a second life |
+| `scenarios/hidden.guest.sh` | A snapshot named U+FEFF moved into `.lib32` and a normally named one, after Schwietert & Hilgert 2025 (plan.md M6d) |
 | `probe_stale_metadata.py` | Prints `fsid_blocks stale_blocks needle_copies nonzero_blocks` (definitions in its docstring) |
 
 Derived images and the manifest (one level up, in `corpus/`):

@@ -23,6 +23,7 @@ from tests.test_recover import (
     ROOT_DIR_ITEMS,
     dir_items_,
     file_items,
+    inode_extref,
     inode_item,
     inode_ref,
     synthetic,
@@ -155,14 +156,117 @@ def test_absence_from_a_walk_with_a_gap_is_not_a_delete():
 
 def test_uncommitted_sources_add_versions_never_a_delete_and_name_what_was_never_committed():
     committed = [*ROOT_DIR_ITEMS, *file_items(257, b"kept", b"x")]
-    lone = {"items": [*ROOT_DIR_ITEMS, *file_items(300, b"flash", b"never committed")],
+    lone = {"items": [*ROOT_DIR_ITEMS, *file_items(300, b"flash", b"never committed",
+                                                   generation=9)],
             "generation": 9}  # fmt: skip
-    trees = {"backup:8": committed, "current": committed}
+    trees = {"backup:8": committed, "current": committed}  # generations 8 and 9
     assert kinds(events_of(trees, [lone]), 300) == []
     events = events_of(trees, [lone], uncommitted=True)
     assert kinds(events, 300) == ["create", "never_committed"]
     assert all(e["uncommitted_only"] for e in events if e["objectid"] == 300)
     assert kinds(events, 257) == ["create"]  # absent from the lone leaf: that proves nothing
+
+
+def test_never_committed_needs_the_commit_of_its_creating_transaction_walked_whole():
+    """EXP-009: a file committed in generation 10, whose only view left was an uncommitted leaf
+    of 10 while the committed state of 10 survived only with gaps, was said never committed.
+    Absence proves it only from the tree as that transaction's commit left it, walked whole."""
+    committed = [*ROOT_DIR_ITEMS, *file_items(257, b"kept", b"x")]
+    created_in_9 = [*ROOT_DIR_ITEMS, *file_items(300, b"f", b"y", generation=9)]
+    trees = {"backup:8": committed, "current": committed}  # generations 8 and 9
+
+    def ending(items=created_in_9, gapped=False, current_generation=9):
+        with synthetic(trees, loose=({"items": items, "generation": 9},)) as (conn, _, _):
+            for table in ("states", "state_trees"):
+                conn.execute(f"UPDATE {table} SET generation = ? WHERE state_id = 2",
+                             (current_generation,))  # fmt: skip
+            timeline = Timeline(conn, uncommitted=True)
+            for shown in timeline.trees[5]:
+                if shown.seen.source == "current" and gapped:
+                    shown.complete = False  # as when a block of that tree was not found
+            return [e for e in timeline.events(5) if e["objectid"] == 300][-1]
+
+    proved = ending()
+    assert (proved["event"], proved["generations"], proved["order_assumed"]) == (
+        "never_committed", [8, 9], False,
+    )  # fmt: skip
+    gapped = ending(gapped=True)
+    assert gapped["event"] == "not_seen" and "walked with gaps" in gapped["reason"]
+    assert gapped["between"] is None and gapped["generations"] is None  # when it ended: unknown
+    lost = ending(current_generation=10)  # no committed state of generation 9 survives
+    assert lost["event"] == "not_seen" and "whether a commit held it is unknown" in lost["reason"]
+    # created in 7 and still there in 9: a commit held it, even if no surviving one does
+    older = ending([*ROOT_DIR_ITEMS, *file_items(300, b"f", b"y", generation=7)])
+    assert older["event"] == "not_seen" and "so a commit held it" in older["reason"]
+
+
+def test_a_name_that_a_walk_did_not_reach_is_no_link_and_no_unlink():
+    """EXP-009: `pad/p2` had no name in states whose walks had gaps (its INODE_REF lay in a leaf
+    they did not reach) and its name again from the next whole walk on: a `link` that never
+    happened. A fragment or a lone leaf is a part of a tree and can miss a name the same way."""
+    inode_item_, _, extent = file_items(257, b"p2", b"x")
+    nameless = [*ROOT_DIR_ITEMS, inode_item_, extent]
+    named = [*ROOT_DIR_ITEMS, *file_items(257, b"p2", b"x")]
+    renamed = [*ROOT_DIR_ITEMS, *file_items(257, b"p3", b"x", transid=11)]
+    trees = {"backup:8": named, "backup:9": nameless, "backup:10": named, "current": renamed}
+    with synthetic(trees) as (conn, _, _):
+        timeline = Timeline(conn)
+        # walked whole, the name really was gone in 9
+        assert kinds(list(timeline.events(5)), 257) == ["create", "unlink", "link", "rename"]
+        for shown in timeline.trees[5]:
+            if shown.seen.source == "backup:9":
+                shown.complete = False
+        # with a gap it may only have been out of reach; the rename between whole walks stays
+        assert kinds(list(timeline.events(5)), 257) == ["create", "rename"]
+    lone = {"items": nameless, "generation": 10}
+    events = events_of({"backup:8": named, "backup:9": named, "current": named}, [lone],
+                       uncommitted=True)  # fmt: skip
+    assert kinds(events, 257) == ["create"]
+
+
+def test_a_rename_within_one_directory_is_proved_through_a_whole_inode_ref_item():
+    """Issue #84: EXP-009 lost the renames of `moves/m_4.txt` and `m_5.txt`, whose old names were
+    seen only through committed walks with gaps. Every name of an inode in one directory is in
+    one INODE_REF item, which a walk reads whole or not at all, so a rename within one directory
+    is proved from such a walk. A move, a link or an unlink is not: a gap can hide the item of
+    another directory. Nor is anything from a lone leaf, or a name in an INODE_EXTREF item."""
+    docs = dir_items_(300, b"docs")
+    named = [*ROOT_DIR_ITEMS, *docs, *file_items(257, b"m_4.txt", b"x")]
+    renamed = [*ROOT_DIR_ITEMS, *docs, *file_items(257, b"m_4.moved", b"x", transid=11)]
+    moved = [*ROOT_DIR_ITEMS, *docs, *file_items(257, b"m_4.moved", b"x", parent=300,
+                                                 transid=12)]  # fmt: skip
+    linked = [*ROOT_DIR_ITEMS, *docs, *file_items(257, b"m_4.moved", b"x", parent=300,
+                                                  nlink=2, transid=13),
+              ((257, K["INODE_REF"], 256), inode_ref(b"other"))]  # fmt: skip
+    trees = {"backup:8": named, "backup:9": renamed, "backup:10": moved, "current": linked}
+    expected = {
+        (): ["create", "rename", "move", "link"],
+        ("backup:8",): ["create", "rename", "move", "link"],  # the old name's item was read
+        ("backup:9",): ["create", "rename", "link"],  # no move: either side may hide a name
+        ("current",): ["create", "rename", "move"],  # no link: the other name may have been there
+    }
+    with synthetic(trees) as (conn, _, _):
+        timeline = Timeline(conn)
+        for gapped, told in expected.items():
+            for shown in timeline.trees[5]:
+                shown.complete = shown.seen.source not in gapped
+            assert kinds(list(timeline.events(5)), 257) == told, gapped
+        rename = [e for e in timeline.events(5) if e["event"] == "rename"][0]
+        assert (rename["from"]["name"], rename["to"]["name"]) == ("m_4.txt", "m_4.moved")
+    # seen under the old name only in a lone leaf: a part of a tree, not a walk of a state
+    lone = {"items": named, "generation": 8}
+    events = events_of({"backup:9": renamed, "current": renamed}, [lone], uncommitted=True)
+    assert kinds(events, 257) == ["create"]
+    # the old name in an INODE_EXTREF item: other names of that directory need not be with it
+    inode_item_, _, extent = file_items(257, b"m_4.txt", b"x")
+    extended = [*ROOT_DIR_ITEMS, inode_item_, ((257, K["INODE_EXTREF"], 99),
+                                               inode_extref(256, b"m_4.txt")), extent]  # fmt: skip
+    with synthetic({"backup:8": extended, "current": renamed}) as (conn, _, _):
+        timeline = Timeline(conn)
+        assert kinds(list(timeline.events(5)), 257) == ["create", "rename"]  # walked whole
+        for shown in timeline.trees[5]:
+            shown.complete = shown.seen.source != "backup:8"
+        assert kinds(list(timeline.events(5)), 257) == ["create"]
 
 
 def test_an_uncommitted_version_with_a_stale_inode_item_is_marked_inconsistent():
@@ -327,12 +431,51 @@ def test_flash_files_are_never_committed_and_belong_to_the_tree_their_log_root_n
     assert all(e["first_seen"]["source"].startswith("log:") for e in events)
 
 
+def test_names_change_only_where_the_scenario_changed_them(deep):
+    """EXP-009 found one `link` per build that the scenario never did, on `pad/p2`, from versions
+    seen through walks with gaps. The scenario renames within one directory and makes no hard
+    link, so the only other name change is the unlink of the file unlinked while open."""
+    log = DEEP.with_suffix(".log").read_text()
+    unlinked = {int(n) for n in re.findall(r"=== EVENT unlink (\d+) ", log)}
+    if not unlinked:
+        pytest.skip("m4_deep was built before its scenario logged events: rebuild it")
+    events = list(Timeline(deep, tree_id=5, uncommitted=True).events(5))
+    changed = [(e["event"], e["objectid"], e["path"]) for e in events
+               if e["event"] in ("link", "unlink", "move")]  # fmt: skip
+    assert [c for c in changed if c[0] != "unlink" or c[1] not in unlinked] == []
+
+
+def test_a_rename_is_reported_whenever_committed_walks_show_both_names(deep):
+    """EXP-009 addendum A: the renames of `moves/m_4.txt` and `m_5.txt` were lost because their
+    old names were seen only through committed walks with gaps. A rename within one directory
+    is proved from such a walk through its INODE_REF item (issue #84), so every logged rename
+    whose old and new names committed walks of this image show is reported."""
+    log = DEEP.with_suffix(".log").read_text()
+    logged = re.findall(r"=== EVENT rename (\d+) (\d+) (\S+) (\S+)", log)
+    if not logged:
+        pytest.skip("m4_deep was built before its scenario logged events: rebuild it")
+    timeline = Timeline(deep, tree_id=5, uncommitted=True)
+    versions = timeline.versions(5)
+    reported = {e["objectid"] for e in timeline.events(5) if e["event"] == "rename"}
+    shown = 0
+    for number, _, old, new in logged:
+        names = {
+            name
+            for (objectid, _), history in versions.items() if objectid == int(number)
+            for version in history if any(seen.committed for seen in version.seen)
+            for _, name in version.observation.names
+        }  # fmt: skip
+        if {old.rsplit("/", 1)[-1].encode(), new.rsplit("/", 1)[-1].encode()} <= names:
+            shown += 1
+            assert int(number) in reported, (old, new)
+    assert shown >= len(logged) // 2
+
+
 def test_events_agree_with_the_generations_the_log_holds(deep):
     """The scenario logs every create, rename and delete with its inode and the transaction it
-    happened in (EXP-009). A create carries that transaction exactly; a rename and a delete lie
-    between their bounding states. `never_committed` is left out: it rests on absence from the
-    committed states that survive, and EXP-009 found it wrong for a file that was committed in
-    a generation whose state did not survive whole."""
+    happened in (EXP-009). A create carries that transaction exactly; a rename, a delete and a
+    `never_committed` lie between their bounding states. EXP-009 found a `never_committed` for a
+    file committed in a generation whose state survived only with gaps: that is `not_seen` now."""
     log = DEEP.with_suffix(".log").read_text()
     logged = re.findall(r"=== EVENT (create|rename|delete) (\d+) (\d+) (\S+)(?: (\S+))?", log)
     if not logged:
@@ -345,9 +488,10 @@ def test_events_agree_with_the_generations_the_log_holds(deep):
     assert {"create", "rename", "delete"} <= {e["event"] for e in events}
     for event in events:
         assert event["created"] == created[event["objectid"]]
-        if event["event"] in ("rename", "delete"):
+        if event["event"] in ("rename", "delete", "never_committed"):
             low, high = event["generations"]
-            assert low <= when[event["event"], event["objectid"]] <= high
+            kind = "rename" if event["event"] == "rename" else "delete"
+            assert low <= when[kind, event["objectid"]] <= high, event
         if event["event"] == "rename":
             assert event["to"]["name"] == renamed[event["objectid"]]
     found = {e["objectid"] for e in events if e["event"] == "create"}

@@ -37,6 +37,30 @@ a refused run leaves no file behind. Unchanged all-zero regions stay sparse.
       `all` mirrors; the data checksum is left stale (plan.md M6a: one mirror is a sector the
       checksum repairs from the other copy, all mirrors a mismatch). The source needs those files
       in a data chunk with copies (m6_datacsum, data DUP).
+
+Hiding techniques (plan.md M6d), each with the checksums recomputed in the source's csum type:
+  uv run python corpus/mutate.py SRC DST plant-sb-reserved [--field FIELD] [--message TEXT]
+      TEXT in the superblock's reserved[199] (0x264), or in a feature-gated FIELD
+      (metadata_uuid, nr_global_roots, remap_root) whose incompat flag is clear, every copy
+  uv run python corpus/mutate.py SRC DST plant-sb-padding [--message TEXT]
+      TEXT in the superblock's padding (0xDCB), every copy
+  uv run python corpus/mutate.py SRC DST plant-chunk-array-slack [--message TEXT]
+      TEXT at the end of the sys_chunk_array, behind its stale tail, every copy
+  uv run python corpus/mutate.py SRC DST plant-backup-roots
+      the oldest backup root slot copied over the slot of the superblock's generation
+  uv run python corpus/mutate.py SRC DST plant-pre-sb [--message TEXT] [--offset N]
+      TEXT in the first 64 KiB (no checksum covers it)
+  uv run python corpus/mutate.py SRC DST plant-inode-reserved [--message TEXT]
+      TEXT (32 bytes) in the reserved bytes of the first regular file's INODE_ITEM
+  uv run python corpus/mutate.py SRC DST plant-nsec
+      16 bytes in that inode's four nanosecond fields, each value 10^9 or more (Göbel et al.)
+  uv run python corpus/mutate.py SRC DST plant-string-item [--message TEXT]
+      a STRING_ITEM (253) holding TEXT appended to the fs tree's last leaf (Toolan & Humphries)
+  uv run python corpus/mutate.py SRC DST plant-file-slack NAME [--message TEXT] [--keep-csum]
+      TEXT past the end of file NAME (top directory) in its last sector, every data copy, and
+      its EXTENT_CSUM entry rewritten unless --keep-csum
+  uv run python corpus/mutate.py SRC DST plant-device-slack [--message TEXT]
+      TEXT past the last device extent, where no historical chunk was (Wani et al. 2020)
 """
 
 import argparse
@@ -45,13 +69,14 @@ import struct
 import sys
 from pathlib import Path
 
+from btrfska.hiding.areas import intervals_minus, removed_stripes
 from btrfska.scan.roots import discover_image
 from btrfska.substrate import csum, items, ondisk
 from btrfska.substrate import superblock as sb
 from btrfska.substrate.fs import open_filesystem
 from btrfska.substrate.image import open_image
 from btrfska.substrate.node import parse_items, parse_key_ptrs
-from btrfska.substrate.roots import find_root_set, resolve_tree
+from btrfska.substrate.roots import find_root_set, resolve_tree, subvolumes
 from btrfska.substrate.slack import slack_range
 from btrfska.substrate.tree import walk
 
@@ -253,6 +278,283 @@ def flip_data(path: Path, targets: list[tuple[str, str]]) -> tuple[dict[int, byt
     return patches, "data bytes inverted: " + "; ".join(done)
 
 
+# ---------------------------------------------------------------------------
+# Hiding techniques (plan.md M6d): one subcommand each, checksums recomputed with the image's
+# own csum type, so the hidden bytes sit in a block or superblock that still validates.
+# ---------------------------------------------------------------------------
+HIDDEN = b"hidden by corpus/mutate.py, plan.md M6d"
+SB_FIELDS = {  # superblock byte ranges a hider writes to; the gated ones need their flag clear
+    "reserved": (0x264, 0x32B, None),
+    "metadata_uuid": (0x23B, 0x24B, "METADATA_UUID"),
+    "nr_global_roots": (0x24B, 0x253, "EXTENT_TREE_V2"),
+    "remap_root": (0x253, 0x264, "REMAP_TREE"),
+    "padding": (0xDCB, 0x1000, None),
+}
+NOTED = ("plant-inode-reserved", "plant-nsec", "plant-string-item", "plant-file-slack",
+         "plant-device-slack")  # fmt: skip
+NSEC_MESSAGE = b"\xa5hid\xa5den\xa5 in\xa5 ns"  # four distinct values, each >= 10^9
+
+
+def each_superblock(src, size: int, edit) -> dict[int, bytes]:
+    """Patches that apply `edit(block, fields)` to every valid superblock copy in the image and
+    recompute each copy's checksum."""
+    patches = {}
+    for mirror in range(ondisk.SUPER_MIRROR_MAX):
+        offset = ondisk.sb_offset(mirror)
+        if offset + ondisk.SUPER_INFO_SIZE >= size:
+            continue
+        block = read_valid_copy(src, size, mirror, "source")
+        edit(block, ondisk.SUPERBLOCK.unpack_from(block))
+        patches[offset] = recompute_csum(block)
+    return patches
+
+
+def plant_sb_field(src, size: int, field: str, message: bytes) -> dict[int, bytes]:
+    start, end, flag = SB_FIELDS[field]
+
+    def edit(block, fields):
+        if flag and fields["incompat_flags"] & ondisk.INCOMPAT[flag]:
+            sys.exit(f"incompat flag {flag} is set: {field} is in use, not spare")
+        piece = message[: end - start]
+        block[start : start + len(piece)] = piece
+
+    return each_superblock(src, size, edit)
+
+
+def plant_chunk_array_slack(src, size: int, message: bytes) -> dict[int, bytes]:
+    """`message` at the end of the 2048-byte array, behind whatever the array's tail holds."""
+    array = ondisk.SUPERBLOCK.offset("sys_chunk_array")
+
+    def edit(block, fields):
+        used = fields["sys_chunk_array_size"]
+        stop = array + ondisk.SYSTEM_CHUNK_ARRAY_SIZE - MARGIN
+        start = stop - len(message)
+        if start < array + 2 * used:  # leave the live array and its stale tail alone
+            sys.exit("the message does not fit behind the sys_chunk_array's tail")
+        block[start:stop] = message
+
+    return each_superblock(src, size, edit)
+
+
+def plant_backup_roots(src, size: int) -> dict[int, bytes]:
+    """Copy the oldest backup root slot over the one of the superblock's generation, as an edit
+    that rolls the array back would."""
+    base, length = ondisk.SUPERBLOCK.offset("super_roots"), ondisk.ROOT_BACKUP.size
+
+    def edit(block, fields):
+        roots = sb.backup_roots(fields)
+        newest = [r for r in roots if r["tree_root_gen"] == fields["generation"]]
+        if not newest or roots[0] is newest[0]:
+            sys.exit("no older backup root slot to copy over the newest one")
+        old, new = base + roots[0]["slot"] * length, base + newest[0]["slot"] * length
+        block[new : new + length] = block[old : old + length]
+
+    return each_superblock(src, size, edit)
+
+
+def plant_pre_sb(src, size: int, message: bytes, offset: int) -> dict[int, bytes]:
+    if not 512 <= offset <= ondisk.SUPER_INFO_OFFSET - len(message):
+        sys.exit(f"offset {offset} is not inside the first 64 KiB after sector 0")
+    return {offset: message}
+
+
+def rewrite_block(img, node, ctx, edit) -> dict[int, bytes]:
+    """Patches that apply `edit(block)` to every physical copy of a tree block and recompute its
+    checksum with the image's csum type."""
+    patches = {}
+    for copy in node.copies:
+        block = bytearray(img.mmap[copy.physical : copy.physical + ctx.nodesize])
+        edit(block)
+        block[: ondisk.CSUM_SIZE] = bytes(ondisk.CSUM_SIZE)
+        digest = csum.compute(ctx.csum_type, block[ondisk.CSUM_SIZE :])
+        block[: len(digest)] = digest
+        patches[copy.physical] = bytes(block)
+    return patches
+
+
+def fs_leaves(fs, tree: str | int = "fs"):
+    root = resolve_tree(fs.reader, find_root_set(fs.fields, "current"), tree)
+    for visit in walk(fs.reader, root.bytenr, root.expect()):
+        if visit.node.valid and visit.node.level == 0:
+            yield visit.node
+
+
+def first_file_inode(fs):
+    """The first leaf holding an INODE_ITEM of a regular file, and that item: in the top-level
+    fs tree, else in the subvolumes in id order."""
+    subvols, _ = subvolumes(fs.reader, find_root_set(fs.fields, "current"))
+    for tree in ["fs", *(sv.id for sv in subvols if sv.id != ondisk.FS_TREE_OBJECTID and sv.root)]:
+        for node in fs_leaves(fs, tree):
+            for item in node.items:
+                if item.key.type == ondisk.ITEM_KEYS["INODE_ITEM"] and item.key.objectid > 256:
+                    if items.inode_item(item.data)["mode"] & 0o170000 == 0o100000:
+                        return node, item
+    sys.exit("no subvolume of the current state has a regular file")
+
+
+def plant_inode_reserved(path: Path, message: bytes) -> tuple[dict[int, bytes], str]:
+    start = ondisk.INODE_ITEM.offset("sequence") + 8
+    with open_image(path) as img:
+        fs = open_filesystem(img)
+        node, item = first_file_inode(fs)
+        at = ondisk.HEADER.size + item.offset + start
+
+        def edit(block):
+            block[at : at + 32] = message[:32].ljust(32, b"\0")
+
+        note = f"inode {item.key.objectid} in leaf {node.logical} slot {item.slot}"
+        return rewrite_block(img, node, fs.reader.ctx, edit), note
+
+
+def plant_nsec(path: Path, message: bytes) -> tuple[dict[int, bytes], str]:
+    if len(message) != 16:
+        sys.exit("the nanosecond message must be 16 bytes, 4 per field")
+    names = ("atime_nsec", "ctime_nsec", "mtime_nsec", "otime_nsec")
+    with open_image(path) as img:
+        fs = open_filesystem(img)
+        node, item = first_file_inode(fs)
+        base = ondisk.HEADER.size + item.offset
+
+        def edit(block):
+            for i, name in enumerate(names):
+                at = base + ondisk.INODE_ITEM.offset(name)
+                block[at : at + 4] = message[4 * i : 4 * i + 4]
+
+        note = f"inode {item.key.objectid} in leaf {node.logical} slot {item.slot}"
+        return rewrite_block(img, node, fs.reader.ctx, edit), note
+
+
+def plant_string_item(path: Path, message: bytes) -> tuple[dict[int, bytes], str]:
+    """A STRING_ITEM appended to the last leaf of the fs tree, as Toolan & Humphries 2026 §3.6
+    describe: nritems + 1, a 25-byte item header after the last one, the payload just below the
+    lowest item data offset. Its key sorts after the leaf's last key, so the leaf stays ordered
+    and no parent key changes."""
+    header, item_size = ondisk.HEADER.size, ondisk.ITEM.size
+    with open_image(path) as img:
+        fs = open_filesystem(img)
+        leaves = list(fs_leaves(fs))
+        if not leaves:
+            sys.exit("the current fs tree has no leaf")
+        node = leaves[-1]
+        last = node.items[-1]
+        free = min(i.offset for i in node.items) - (len(node.items) + 1) * item_size
+        if free < len(message):
+            sys.exit(f"leaf {node.logical} has {free} free bytes; the message needs {len(message)}")
+        offset = min(i.offset for i in node.items) - len(message)
+        key_offset = last.key.offset + 1 if last.key.type == 253 else 0
+        nritems = ondisk.HEADER.offset("nritems")
+
+        def edit(block):
+            slot = len(node.items)
+            struct.pack_into("<I", block, nritems, slot + 1)
+            struct.pack_into("<QBQII", block, header + slot * item_size, last.key.objectid,
+                             253, key_offset, offset, len(message))  # fmt: skip
+            block[header + offset : header + offset + len(message)] = message
+
+        new_key = f"({last.key.objectid} 253 {key_offset})"
+        note = f"leaf {node.logical} slot {len(node.items)}, key {new_key}"
+        return rewrite_block(img, node, fs.reader.ctx, edit), note
+
+
+def plant_file_slack(path: Path, name: str, message: bytes, keep_csum: bool):
+    """`message` past the end of file NAME (top directory of the current fs tree) in its last
+    sector, in every copy; unless `keep_csum`, the sector's EXTENT_CSUM entry is recomputed and
+    the csum-tree leaf rewritten (Göbel et al. 2024 §3.2)."""
+    key = ondisk.ITEM_KEYS
+    with open_image(path) as img:
+        fs = open_filesystem(img)
+        ctx = fs.reader.ctx
+        ss = ctx.sectorsize
+        names, sizes, logical = {}, {}, None
+        for node in fs_leaves(fs):
+            for item in node.items:
+                if item.key.type == key["INODE_REF"] and item.key.offset == 256:
+                    for ref in items.inode_refs(item.data):
+                        names[ref["name"]] = item.key.objectid
+                elif item.key.type == key["INODE_ITEM"]:
+                    sizes[item.key.objectid] = items.inode_item(item.data)["size"]
+        if name not in names:
+            sys.exit(f"{path}: no file {name!r} in the top directory")
+        objectid = names[name]
+        size = sizes[objectid]
+        if not size % ss or len(message) > ss - size % ss:
+            sys.exit(f"{name!r}: {ss - size % ss if size % ss else 0} bytes past the end; "
+                     f"the message needs {len(message)}")  # fmt: skip
+        sector = (size - 1) // ss * ss
+        for node in fs_leaves(fs):
+            for item in node.items:
+                if (item.key.objectid, item.key.type) != (objectid, key["EXTENT_DATA"]):
+                    continue
+                extent = items.file_extent(item.data)
+                covers = item.key.offset <= sector < item.key.offset + extent["num_bytes"]
+                if (extent["type"] == ondisk.FILE_EXTENT_REG and not extent["compression"]
+                        and extent["disk_bytenr"] and covers):  # fmt: skip
+                    logical = extent["disk_bytenr"] + extent["offset"] + sector - item.key.offset
+        if logical is None:
+            sys.exit(f"{name!r}: its last sector is not in an uncompressed regular extent")
+        tail = size % ss
+        patches, data = {}, None
+        for copy in fs.chunk_map.copies(logical, ss):
+            data = bytearray(img.mmap[copy.physical : copy.physical + ss])
+            data[tail : tail + len(message)] = message
+            patches[copy.physical] = bytes(data)
+        note = f"{name} (inode {objectid}, size {size}): sector at logical {logical}"
+        if keep_csum:
+            return patches, note + ", data checksum left as it was"
+        size_ = csum.csum_size(ctx.csum_type)
+        root = resolve_tree(fs.reader, find_root_set(fs.fields, "current"), "csum")
+        for visit in walk(fs.reader, root.bytenr, root.expect()):
+            node = visit.node
+            if not node.valid or node.level:
+                continue
+            for item in node.items:
+                if item.key.type != key["EXTENT_CSUM"]:
+                    continue
+                start, count = item.key.offset, item.size // size_
+                if start <= logical < start + count * ss:
+                    at = ondisk.HEADER.size + item.offset + (logical - start) // ss * size_
+                    digest = csum.compute(ctx.csum_type, bytes(data))[:size_]
+
+                    def edit(block, at=at, digest=digest):
+                        block[at : at + size_] = digest
+
+                    patches |= rewrite_block(img, node, ctx, edit)
+                    return patches, note + f", EXTENT_CSUM in csum-tree leaf {node.logical}"
+        sys.exit(f"{name!r}: no EXTENT_CSUM covers logical {logical}")
+
+
+def plant_device_slack(path: Path, message: bytes) -> tuple[dict[int, bytes], str]:
+    """`message` halfway between this device's last device extent and its end (Wani et al. 2020,
+    volume slack)."""
+    with open_image(path) as img:
+        fs = open_filesystem(img)
+        device = ondisk.DEV_ITEM.unpack_from(fs.fields["dev_item"])
+        root = resolve_tree(fs.reader, find_root_set(fs.fields, "current"), "dev")
+        last = 1 << 20
+        for visit in walk(fs.reader, root.bytenr, root.expect()):
+            for item in visit.node.items if visit.node.valid and not visit.node.level else ():
+                if (item.key.type, item.key.objectid) == (
+                    ondisk.ITEM_KEYS["DEV_EXTENT"],
+                    device["devid"],
+                ):
+                    length = ondisk.DEV_EXTENT.unpack_from(item.data)["length"]
+                    last = max(last, item.key.offset + length)
+        end = min(device["total_bytes"], img.size)
+        # Not where a removed chunk was, nor in a superblock slot: the bytes must be unexplained.
+        maps = [entry.chunk_map for entry in discover_image(img, fs).discovery.chunk_maps]
+        cut = removed_stripes(maps, device["devid"]) + [
+            (slot, slot + ondisk.SUPER_INFO_SIZE)
+            for slot in map(ondisk.sb_offset, range(ondisk.SUPER_MIRROR_MAX))
+        ]
+        free, _ = intervals_minus([(last, end)], cut)
+        lo, hi = max(free, key=lambda piece: piece[1] - piece[0], default=(0, 0))
+        offset = (lo + (hi - lo) // 2) // 4096 * 4096
+        if hi - lo < 2 * 4096 + len(message):
+            sys.exit(f"no room past the last device extent (ends at {last}, device {end})")
+        note = f"devid {device['devid']}: last device extent ends at {last}, device at {end}"
+        return {offset: message}, note
+
+
 def check_patches(size: int, patches: dict[int, bytes]) -> None:
     for offset, block in patches.items():
         if offset < 0 or offset + len(block) > size:
@@ -273,7 +575,7 @@ def write_patched(src, out, size: int, patches: dict[int, bytes], chunk: int = C
             if lo < hi:
                 data[lo - position : hi - position] = block[lo - offset : hi - offset]
         assert len(data) == end - position
-        if any(data):
+        if data.count(0) != len(data):  # any(data), without a Python loop over every byte
             out.write(data)
         else:
             out.seek(len(data), os.SEEK_CUR)
@@ -313,6 +615,21 @@ def main(argv: list[str] | None = None) -> None:
     data.add_argument("targets", nargs="+", metavar="NAME MIRROR")
     plant = ops.add_parser("plant-slack")
     plant.add_argument("--message", default=MESSAGE)
+    field = ops.add_parser("plant-sb-reserved")
+    field.add_argument("--field", choices=[f for f in SB_FIELDS if f != "padding"],
+                       default="reserved")  # fmt: skip
+    for name in ("plant-sb-reserved", "plant-sb-padding", "plant-chunk-array-slack",
+                 "plant-pre-sb", "plant-inode-reserved", "plant-string-item",
+                 "plant-file-slack", "plant-device-slack"):  # fmt: skip
+        sub = field if name == "plant-sb-reserved" else ops.add_parser(name)
+        sub.add_argument("--message", default=HIDDEN.decode())
+        if name == "plant-pre-sb":
+            sub.add_argument("--offset", type=int, default=0x8000)
+        if name == "plant-file-slack":
+            sub.add_argument("name", metavar="NAME")
+            sub.add_argument("--keep-csum", action="store_true")
+    ops.add_parser("plant-nsec")
+    ops.add_parser("plant-backup-roots")
     args = parser.parse_args(argv)
 
     dst = checked_output(args.src, args.dst)
@@ -335,6 +652,28 @@ def main(argv: list[str] | None = None) -> None:
                 sys.exit("flip-data takes pairs of NAME MIRROR")
             pairs = list(zip(args.targets[::2], args.targets[1::2], strict=True))
             patches, note = flip_data(args.src, pairs)
+        elif args.op == "plant-sb-reserved":
+            patches = plant_sb_field(src, size, args.field, args.message.encode())
+        elif args.op == "plant-sb-padding":
+            patches = plant_sb_field(src, size, "padding", args.message.encode())
+        elif args.op == "plant-chunk-array-slack":
+            patches = plant_chunk_array_slack(src, size, args.message.encode())
+        elif args.op == "plant-backup-roots":
+            patches = plant_backup_roots(src, size)
+        elif args.op == "plant-pre-sb":
+            patches = plant_pre_sb(src, size, args.message.encode(), args.offset)
+        elif args.op == "plant-inode-reserved":
+            patches, note = plant_inode_reserved(args.src, args.message.encode())
+        elif args.op == "plant-nsec":
+            patches, note = plant_nsec(args.src, NSEC_MESSAGE)
+        elif args.op == "plant-string-item":
+            patches, note = plant_string_item(args.src, args.message.encode())
+        elif args.op == "plant-file-slack":
+            patches, note = plant_file_slack(
+                args.src, args.name, args.message.encode(), args.keep_csum
+            )
+        elif args.op == "plant-device-slack":
+            patches, note = plant_device_slack(args.src, args.message.encode())
         else:
             patches = flip_bytes(src, size, args.offsets)
         check_patches(size, patches)
@@ -342,7 +681,7 @@ def main(argv: list[str] | None = None) -> None:
         with open(dst, "xb") as out:
             write_patched(src, out, size, patches)
     print(f"{dst}: {args.op} {' '.join(str(o) for o in patches)}")
-    if args.op in ("lose-root-node", "lose-root-items", "flip-data"):
+    if args.op in ("lose-root-node", "lose-root-items", "flip-data", *NOTED):
         print(note)
 
 

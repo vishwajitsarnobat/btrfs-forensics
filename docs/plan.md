@@ -1612,7 +1612,8 @@ between one backup slot and the current tree (SecurityRonin) or over discovered 
    state of their generation, marked `uncommitted`, and never produce a `delete`: absence from a
    fragment proves nothing. A version with an inode item older than its extent (EXP-008) is
    marked `inconsistent`. An identity seen only there gets `never_committed` (a file written,
-   fsynced and deleted within one transaction).
+   fsynced and deleted within one transaction); since 2026-10-07 only with proof, otherwise
+   `not_seen` (see the M5d fix below).
 7. **`artifacts.in_current` goes** (schema version 7), as M4b announced: "deleted since" is a
    `delete` event now, with its bounds, instead of a flag computed against one tree.
 8. **EXTENT_OWNER_REF (172) is not used.** Simple quotas need `btrfs quota enable --simple` or
@@ -1640,6 +1641,74 @@ a test in `tests/test_timeline.py`. One thing the plan did not foresee: two root
 generation can survive (one written in the middle of the transaction, which no superblock ever
 named), and generations cannot order them. They are taken by address, the superblock-named one
 last, and every event that rests on that order says `order_assumed`.
+
+*M5d fix, 2026-10-07: the two wrong events of EXP-009* (issue #78, branch
+`fix/timeline-absence-verdicts`). EXP-009 found two conclusions drawn from absence alone:
+a `never_committed` for `moves/m_1.txt`, committed in generation 10 (its only view left is an
+uncommitted leaf of 10, and the committed state of 10 survives only as a walk with gaps), and a
+`link` for `pad/p2` in every build (its versions in states 21 to 23 have no name because those
+walks have gaps and do not reach its INODE_REF). Decision 6 is narrowed and decision 3 gains one
+rule:
+- **`never_committed` needs proof.** An identity created in transaction G that outlives G is in
+  G's commit. So `never_committed` needs the tree as G's commit left it (a root block of
+  generation G that a committed root tree names) walked without a gap, and every sighting of the
+  identity in generation G. The ROOT_ITEM of an fs tree changed in G is rewritten only during G's
+  commit, once no task can change a tree any more (`commit_fs_roots`, fs/btrfs/transaction.c:1471
+  to 1541, state asserted at 1482), and carries the generation of its root block
+  (`btrfs_set_root_node`, fs/btrfs/root-tree.c:117-123). So a root tree written in the middle
+  of G still names the tree as an earlier commit left it, with a root block older than G, and is
+  not that proof. Otherwise the ending is `not_seen`
+  with a reason (the walk had gaps; no such walk survives; the identity was seen after G, so a
+  commit held it), and `between` and `generations` are `null`: when it ended is not known.
+- **Names are compared only between versions seen in a whole walk.** A version seen only through
+  walks with gaps, fragments or lone leaves (each can miss the leaf that holds an INODE_REF), or
+  only in a log tree replayed without its base, gives no `rename`, `move`, `link` or `unlink`;
+  when its names differ from those of the version beside it, no `touch` either (a `touch` says
+  that the names did not change). Its other changes are still reported.
+
+*Definition of done.* Tests that fail before the fix: a forged catalog for each `not_seen` reason
+and for the proof; a forged walk with a gap that misses a name, and a lone leaf that does; on
+`m4_deep`, no `link`, `unlink` or `move` that the scenario's log does not hold; the EXP-009 test
+no longer leaves `never_committed` out. README and this section describe the rule. EXP-009 is
+re-run (N = 5) and the results added to EXP-009.md as an addendum, the original results kept.
+
+**Status 2026-10-07: done** (catalog.md; EXP-009 addendum A). Every bullet is a test in
+`tests/test_timeline.py`; the three new tests failed before the fix (the m4_deep one by the
+`link` of `pad/p2`). EXP-009 re-run: no wrong event in five builds, rename recall 0.870 → 0.783.
+
+*M5d fix, part 2, 2026-10-07: renames within one directory through INODE_REF* (issue #84, branch
+`feature/timeline-inode-ref-renames`). The rule above cost EXP-009 two right renames
+(`moves/m_4.txt`, `moves/m_5.txt`): under the old name each was seen only through committed walks
+with gaps. A gap can hide a name but cannot invent one, and the names of an inode within one
+directory are one item: the key of an INODE_REF is (inode, INODE_REF, directory)
+(`btrfs_insert_inode_ref`, fs/btrfs/inode-item.c:307-309 at v7.0), a second name in the same
+directory extends that item (inode-item.c:318-333), and only when it cannot grow does the name go
+to an INODE_EXTREF item instead (inode-item.c:334-343 and 355-364). An item lies in one leaf, so
+a walk that read the item read every name it holds. One rule is added:
+- **A rename within one directory is derived when one or both versions were seen only through
+  committed walks with gaps**, if the names differ by exactly one gone and one come, both in the
+  same directory, and no name the two versions show in that directory comes from an INODE_EXTREF
+  item. The version under the old name then holds that directory's INODE_REF item, which does not
+  hold the new name, and the version under the new name holds the item without the old name. A
+  name of that directory in an INODE_EXTREF item the walk did not reach is not excluded: that
+  needs an INODE_REF item that once could not grow (hundreds of names of one inode in one
+  directory), which no corpus scenario makes.
+- Everything else stays as above: a `move`, `link` or `unlink`, or a rename whose names sit in an
+  INODE_EXTREF item, still needs both versions seen in a whole walk; versions seen only in
+  fragments, lone leaves or a log tree replayed without its base give no name change at all.
+
+*Definition of done.* Tests that fail before the change: a forged catalog whose walk with a gap
+reads a whole INODE_REF item gives the rename, and still no `link`, `unlink` or `move` from such
+a walk, and no rename when a name comes from an INODE_EXTREF item; on `m4_deep`, the renames of
+`moves/m_4.txt` and `moves/m_5.txt` are reported (every logged rename whose two names committed
+walks show) and still no `link` of `pad/p2`. README and this section describe the rule. EXP-009
+addendum B (N = 5, with predictions committed before the builds) compares the code before and
+after on the same builds.
+
+**Status 2026-10-07: done** (catalog.md; EXP-009 addendum B). The forged test and the `m4_deep`
+test failed before the change. EXP-009 addendum B: rename recall 0.783 → 0.870 in each of five
+builds, precision 1.0, no `link` or `move`, every other count the same; the timeline gains
+exactly the renames of `m_4` and `m_5`.
 
 **M5 status 2026-09-21: the definition of done holds; three items of its scope are open.**
 Parts M5a (historical chunk maps, EXP-007), M5b (integrity and linkage), M5c-1 (the orphan graph,
@@ -1918,6 +1987,272 @@ are intact. The kernel zeroes the rest of that sector before it checksums it
 (extent_io.c:1857-1858), so the sector is also tried with those bytes zeroed and reported as
 `tail_rewritten` (ten sectors on `m4_deep`). Only the sectors that hold the file's bytes are
 checked; an extent that lies wholly past the inode's size is not checked at all.
+
+**M6b: free-space-tree forensics and overwrite risk** (issue #50; claim C2; design fixed
+2026-10-07, before implementation). Kernel citations are to v7.0.
+
+*What it is.* Every extent `recover` reads from disk, and every tree block an artifact's items
+came from, is placed in the current state's allocation: still held by the same extent, free, or
+allocated to another extent. Each gets an overwrite-risk score built from documented kernel
+behaviour, and the free space trees of older states say, where they survive, between which two
+commits the space was freed.
+1. **Items, as the kernel reads them.** FREE_SPACE_INFO (198) is keyed (block group start, 198,
+   length) and holds `extent_count` and `flags` (btrfs_tree.h:262-266, :1243-1248;
+   USING_BITMAPS 1<<0). FREE_SPACE_EXTENT (199) is keyed (start, 199, length) with no payload
+   (:268-272). FREE_SPACE_BITMAP (200) is keyed (start, 200, length) and holds one bit per sector,
+   least significant bit first (:274-280; free-space-tree.c:152-156 sizes it, :176-195 sets bits,
+   :510-530 tests them). The items of one block group follow its INFO item in key order, and the
+   INFO flag says which kind they are (free-space-tree.c:1673-1710). Bitmaps are read as the
+   kernel reads them: runs of set bits, merged across adjacent bitmaps, are free extents
+   (:1536-1614).
+2. **Hostile input.** There is no tree-checker rule for these items; the kernel ASSERTs that an
+   entry lies inside its block group (free-space-tree.c:1568, :1646) and fails the load with
+   -EIO when the count of free extents differs from `extent_count` (:1603-1611, :1660-1668).
+   btrfska skips and reports: an INFO item whose size is not 8 or whose range is empty, passes
+   2^64 or overlaps another INFO; an entry before any INFO or outside its block group; an entry
+   whose start or length is not sector-aligned or is zero; a bitmap whose size is not
+   ceil(length / sectorsize / 8) (which also bounds it by the leaf: nothing is allocated from
+   the key's claim); an entry of the kind the INFO flag does not name. Overlapping free ranges are
+   merged and reported. A count mismatch marks the block group `inconsistent`; its ranges are
+   kept and the run says so.
+3. **Which allocation view.** The current state's: its tree 10 when the superblock has
+   FREE_SPACE_TREE and FREE_SPACE_TREE_VALID (the kernel rebuilds a tree without VALID,
+   disk-io.c:3062-3067) and the tree is walked in the database without a gap. Otherwise free space
+   is derived from its extent tree (tree 2: EXTENT_ITEM, and METADATA_ITEM of one node) and its
+   block groups (BLOCK_GROUP_ITEM, in tree 11 with BLOCK_GROUP_TREE): a block group minus its
+   extents minus the superblock stripes the kernel excludes (block-group.c:2277-2330, through
+   the reverse mapping of :2202-2268) is free. The kernel keeps both in step in every commit
+   (extent-tree.c:3187 adds a freed extent to the free space tree, :4973 removes an allocated
+   one), so where both exist they are compared and every disagreement is reported. A space cache
+   v1 is not read: the derivation stands in for it. The source used is named in every record.
+   Block group usage and flags always come from the BLOCK_GROUP_ITEMs.
+4. **Placing an extent.** By the physical bytes it was read from (the copy used), mapped back to
+   a logical address through the current chunk map as btrfs_rmap_block does
+   (block-group.c:2202-2268; RAID5/6 not mapped). This also places bytes read through a
+   historical map after a balance. Verdicts: `in_use` (the current extent tree has an extent at
+   the same address and length, allocated no later than the file extent's generation, or for a
+   tree block a tree block of the same generation: the same allocation, still referenced);
+   `free` (no byte is allocated now); `allocated` (every byte belongs to another extent);
+   `partial` (some bytes do); `no_block_group` (no current block group holds the bytes: their chunk
+   was removed, so the device space is unallocated). An extent that could not be read, or a view
+   that is missing, gives no verdict.
+5. **Overwrite risk** (an ordinal score, each step one kernel behaviour; no weights):
+   0 `none` for `in_use` (space is freed only when the last reference goes,
+   extent-tree.c:3187); 1 `low` for `no_block_group` (new chunks are allocated only after the
+   allocator has searched the free space of the existing block groups, extent-tree.c:3733-3755,
+   :4368); 2 `medium` for `free` in a block group (the next allocation may take it);
+   3 `high` for `free` when at least one of: discard applies to the block group (`sync`: every
+   range freed at commit, extent-tree.c:2997-3005; `async`: data-only block groups only,
+   discard.c:116, :696, after 120 s, :56, and re-queued at the next mount, free-space-cache.c:2679);
+   the block group is unused (used 0: queued for deletion at mount, block-group.c:2533-2538, and
+   trimmed whole at that commit under `sync`, extent-tree.c:3058-3063); the block group is
+   reclaim-eligible under the kernel's default (only zoned filesystems have one, 75 % used,
+   zoned.h:29 and space-info.c:254-255; otherwise reclaim is off until sysfs enables it, which is
+   not on disk). 4 `reallocated` for `allocated` and `partial`. A file's score is the highest
+   of its data extents (of its tree blocks when it has no data extent read from disk); every
+   rule that fired is listed.
+6. **Discard mode.** As stated by the examiner (`recover --discard none|async|sync`), else as
+   observed on the image: `trimmed_metadata` when a block a committed state points to reads as
+   zeros (the scan's `zeroed` walk failures: only `sync` or a FITRIM discards metadata block
+   groups, discard.c:116); `trimmed_data` when, among sampled freed data extents of the current
+   map's time, a first sector reads as zeros although a csum tree holds a non-zero checksum for
+   it; `not_trimmed` when freed tree blocks or freed data still hold their bytes; `unknown`
+   otherwise. Only a stated or observed trim raises a score. `async` with a quick unmount leaves
+   the image exactly as no discard does (EXP-002), so it is observable only when stated.
+7. **Freed between two commits.** For each extent, the free space trees of the states not older
+   than the artifact's own (read without a gap, each through its own state's chunk map) give the
+   newest state in which the bytes were allocated and the first in which they were wholly free:
+   the space was freed by a commit in between (`freed_in`).
+8. **Records.** Schema version 9: `artifacts.space_verdict`, `artifacts.overwrite_risk` (0-4),
+   `artifacts.risk_reasons`, `artifacts.space_source`; `provenance.space_verdict` (the data
+   extent's) and `provenance.block_space` (the tree block's); the full record as `space` in
+   `provenance.read_record`; `free_space` in `recovery_runs.summary` (source, cross-check, discard
+   mode and its evidence, counts per verdict and score); the same keys in `manifest.jsonl`; a
+   `free space:` line on stdout.
+
+*Definition of done.*
+- synthetic: extents, bitmaps (across two items) and their count; every hostile item of 2
+  skipped or reported without a crash; each verdict and each risk rule;
+- on every corpus image with a free space tree, the free space derived from the extent tree
+  equals the tree's own, sector for sector, apart from what the cross-check reports;
+- the `s01` discard trio: `sync` observed as `trimmed_metadata`, `none` and `async` as
+  `not_trimmed`; `m4_deep` and `m6_datacsum`: every file of the current state `in_use` with score
+  0, and deleted files of older states classified with a `freed_in` where the trees survive;
+- schema 9 documented column by column, README's `recover` section documents every new key and
+  `--discard`; EXP-019 measures the classification across the corpus with a committed script, the
+  prediction registered first.
+
+**M6b status 2026-10-07: done** (catalog.md, M6b entry; `tests/test_freespace.py`,
+`tests/test_freespace_images.py`; EXP-019). Each bullet of the definition of done is a test. Two
+things the design did not foresee. A block group the kernel creates enters the free space tree
+free from end to end, superblock stripes included (free-space-tree.c:1433-1434); the kernel
+leaves them out only when it loads free space (block-group.c:530-570), so the view does the same
+and the cross-check compares both sources without them. And "the same allocation" cannot rest on
+generations: relocation gives a data extent a newer generation and leaves the file extent's, so
+`in_use` for data is decided by the extent's back-references (same address, length and inode
+number, directly or through a shared leaf).
+
+**M6f: foreign-FSID discovery** (issue #54; design fixed 2026-10-07, before implementation).
+
+*What it is.* An optional mode, `btrfska scan --foreign` and `btrfska catalog build --foreign`,
+that finds the tree blocks of other filesystems on the device: a filesystem that was there before
+a reformat, or this filesystem before its fsid was changed. The M2 prefilter keeps only blocks
+whose header carries the tree fsid, so neither is a candidate today (README, scan limitations).
+1. **Census.** Every 4096-byte aligned offset of the scan plan's regions (the targeted plan, or
+   every range with `--full-sweep`) whose bytes look like a tree-block header is counted under its
+   header fsid. A header looks like one when its flags have WRITTEN set and no bit other than
+   WRITTEN and RELOC below the backref revision, the backref revision is 0 or 1 (btrfs_tree.h:765-766,
+   812-817), the level is below 8, and bytenr and generation are non-zero, bytenr a multiple of
+   4096. The alignment is 4096, not the current sectorsize, so a filesystem of a smaller
+   sectorsize is not missed. The count is bounded: a mergeable Misra-Gries summary holds at most
+   1024 fsids, so memory does not grow with the number of distinct fsids, and any fsid with more
+   than 1/1025 of the header-shaped offsets is kept. How much the summary may undercount is
+   reported.
+2. **Selection.** A *foreign fsid* is one that is neither the tree fsid nor the superblock fsid,
+   with at least 2 header-shaped blocks in the census; at most 8 are examined, the most frequent
+   first, and the summary says when more were left out. The tree fsid of every valid foreign
+   superblock copy (M1 `Selection.foreign`) is examined too, even with no block.
+3. **Context.** Each foreign fsid is validated with its own geometry: the nodesize, sectorsize,
+   csum type and generation of its foreign superblock copy when one survives (`context_source`
+   `superblock`). Otherwise the (nodesize, csum type) pair under which most of its first 32 blocks
+   pass their checksum, the current filesystem's pair tried first (`inferred`); the generation is
+   then unknown and the generation check is not made (`null`). When no pair verifies a single
+   block, the current geometry is used and every block is reported invalid (`none`).
+4. **Validation.** A second, exact pass finds every offset whose header carries that fsid (the
+   M2 prefilter with that fsid at 4096-byte alignment) and checks each block with `check_block`
+   in that context, without expectations, as `scan` does. Records stream; only counters are kept.
+5. **What it was.** The valid chunk-tree leaves (owner 3) of a foreign fsid name device uuids, in
+   DEV_ITEMs and in CHUNK_ITEM stripes; a foreign superblock copy names one in its dev_item. A
+   device uuid equal to the current superblock's dev_item uuid means the same device under a new
+   fsid: `fsid_change` (`btrfstune -u` keeps the device uuid; btrfs-progs v6.6.3
+   tune/change-uuid.c:145-197). Only other device uuids mean a new mkfs: `reformat`. Without a
+   device uuid, a foreign generation above the current superblock's also means `reformat`:
+   btrfstune leaves the generation alone, so blocks written before an fsid change are never newer
+   than the filesystem that carries on. Neither: `undetermined`. Separately, a current superblock with METADATA_UUID whose fsid
+   differs from metadata_uuid reports an fsid change made through metadata_uuid (`btrfstune -m`):
+   its tree blocks were never rewritten, so there are no foreign headers to find.
+6. **Records, no schema change.** `scan --json` adds `foreign_node` records (one per foreign
+   candidate, the `node` keys that make sense without the current chunk map, plus `fsid`) and one
+   `foreign_filesystem` record per fsid; the text summary adds one line per foreign filesystem.
+   `catalog build --foreign` keeps the evidence database at its schema: the summary goes into
+   `scan_runs.scan_summary` under `foreign`, and one `problems` row per finding with source
+   `foreign`. Foreign blocks are not `nodes` rows: they belong to another filesystem, and reading
+   them as one (its chunk map, its roots) is later work.
+
+*Hostile input.* A flood of header-shaped sectors, each with a new random fsid, must stay within
+the memory budget of the candidate-flood test (`tests/test_scan_hostile.py`) and select nothing;
+validation work is bounded by the offsets probed, as in `scan`, because each offset has one fsid.
+
+*Corpus.* Built in the guest by two host drivers around a new guest scenario `foreign` (files, a
+snapshot, churn with deletions; every file names the fsid it was written under):
+- `m6_reformat`: xxhash, nodesize 16 KiB, one life, then the pinned mkfs again with the same
+  options over the whole image, and no life after it;
+- `m6_reformat_geometry`: crc32c, nodesize 32 KiB, one life, then `mkfs --mixed -b 60M` with
+  xxhash (nodesize 4 KiB), and a second life. mkfs zeroes only the superblock copies inside its
+  size (btrfs-progs v6.6.3 common/device-utils.c:290-293), so the old mirror 1 at 64 MiB survives:
+  M1's foreign superblock, here from a real reformat instead of `corpus/mutate.py`;
+- `m6_fsid_u`: one life, `btrfstune -u`, a second life;
+- `m6_fsid_m`: one life, `btrfstune -m`, a second life.
+
+*Definition of done.*
+- on `m6_reformat` and `m6_reformat_geometry` the old fsid (from the scenario's log) is found,
+  validated in its own geometry (inferred on the first, from the foreign superblock on the
+  second: nodesize 32 KiB, crc32c), and reported as `reformat`;
+- on `m6_fsid_u` the pre-change fsid is found, its valid blocks are never live blocks of the
+  current filesystem, and it is reported as `fsid_change`; on `m6_fsid_m` no foreign fsid is
+  found and the metadata_uuid change is reported;
+- on `sandbox.img` and the clean corpus images the mode finds no foreign fsid (`m1_foreign_mirror`
+  reports its transplanted superblock with no blocks);
+- the random-fsid flood stays within the budget and selects nothing; a flood of one foreign fsid
+  is validated within the same budget;
+- README documents `--foreign` and every new key, evidence-db.md the `foreign` summary and
+  problems source; the fresh-clone proof builds the four images.
+
+**M6f status 2026-10-07: done** (catalog.md, M6f entry; `tests/test_foreign.py`,
+`tests/test_foreign_images.py`; EXP-018). Each bullet of the definition of done is a test, and
+EXP-018 measured the four rows over five regenerations: every reformat and fsid change was found
+and identified in every build. Two things the design did not foresee: a reformat with the same
+options leaves no old chunk-tree leaf (the new mkfs writes its chunk tree where the old one was),
+so `m6_reformat` is identified by its generations, not by a device uuid; and on a block device
+with discard, mkfs trims the whole device by default, so these file-backed images are the
+favourable case (EXP-018 §7).
+
+**M6d: hiding detection** (issue #52; design fixed 2026-10-07, before implementation).
+
+*What it is.* `btrfska hiding IMAGE [--json]`, and `catalog build --hiding`, report every place on
+the image where bytes are hidden by a known technique, with its offset, the bytes, and the
+evidence. A rule reports only what mkfs.btrfs and the kernel never produce, so a clean filesystem
+is quiet; each rule says why, citing the kernel at v7.0 by file and line (`hiding/detect.py`).
+1. **Techniques** (research.md §8.3, Toolan & Humphries 2026; Göbel et al. 2024; Wani et al.
+   2020; Schwietert & Hilgert 2025), each a `technique` name:
+   - `superblock_reserved`: non-zero bytes in `reserved[199]` (0x264-0x32A), in a feature-gated
+     field whose incompat flag is clear (`metadata_uuid` without METADATA_UUID, `nr_global_roots`
+     without EXTENT_TREE_V2, `remap_root*` without REMAP_TREE), or in a backup root slot's padding.
+     The ranges come from the copy's own feature flags (research.md §10.13). Every copy in the
+     device, valid or not, because a hider may not recompute the checksum.
+   - `superblock_padding` (0xDCB-0xFFF) and `sys_chunk_array_slack`: bytes beyond
+     `sys_chunk_array_size` other than the two shapes the kernel's and mkfs's removal of a system
+     chunk leaves (volumes.c:3204 memmoves without clearing): the removed entry itself, or a copy
+     of the array's last bytes.
+   - `superblock_slot`: a mirror slot inside the device with non-zero bytes but no superblock.
+   - `pre_superblock`: non-zero bytes in the first 64 KiB, or in the rest of the first MiB (the
+     kernel allocates from 1 MiB). A boot signature is named, since GRUB 2 embeds there.
+   - `backup_root_divergence` (after SecurityRonin's `BTRFS-BACKUP-ROOT-DIVERGENCE`): a slot newer
+     than the superblock, no slot of its generation, that slot disagreeing with the superblock,
+     repeated or non-consecutive slot generations, a same-generation mirror with other slots.
+   - `node_slack`: a valid block of the current state whose slack is non-zero and does not read
+     as stale items (`substrate/slack.py`; EXP-005: the kernel zeroes slack, mkfs leaves stale
+     items, which are counted, not reported). `copy_divergence`: two copies of one block that both
+     pass every check and differ.
+   - `inode_reserved`, `timestamp_nsec` (a field of 10^9 or more, or four different values all
+     printable ASCII), `string_item` (any item of type 253).
+   - `file_slack`: non-zero bytes past EOF in a regular file's last sector, with the data-checksum
+     verdict on that sector (M6a's tail logic: the checksum covers the hidden bytes, or matches
+     only with them zeroed, or neither).
+   - `device_slack`: non-zero bytes past this device's last device extent, or past its
+     total_bytes. Bytes in a stripe of a chunk a historical chunk map holds (M5a) are a removed
+     chunk's and are counted, not reported; the maps are discovered only when such bytes exist.
+   - `hidden_name`: a directory entry, subvolume or snapshot included, whose name has invisible or
+     control characters, bytes that are not UTF-8, or only whitespace (U+FEFF).
+2. **Scope.** The trees of the current state (root, chunk and log trees included), every valid
+   copy of every block. Superseded blocks are not examined here; the catalog's `contents` table
+   already describes their slack.
+3. **Records, no schema change.** `hiding --json` writes one `finding` record per finding and one
+   `hiding_summary`. `catalog build --hiding` stores the summary in `scan_runs.scan_summary` under
+   `hiding` (findings included) and one `problems` row per report line with source `hiding`, as
+   M6f stores `foreign`.
+
+*Corpus.* One `corpus/mutate.py` subcommand per technique, each a manifest row derived from a
+pinned image, the four csum types spread over the rows: `plant-sb-reserved` (with `--field` for
+a feature-gated field), `plant-sb-padding`, `plant-chunk-array-slack`, `plant-pre-sb`,
+`plant-inode-reserved`, `plant-nsec`, `plant-string-item` (Toolan & Humphries §3.6),
+`plant-file-slack` (EXTENT_CSUM and csum-tree leaf rewritten), `plant-device-slack`,
+`plant-backup-roots`; `plant-slack` (M4) already covers node slack. A guest scenario `hidden`
+makes a U+FEFF snapshot in `.lib32` beside a normally named one. `corpus/hide_and_seek.py` fetches
+the btrfs images of `fkie-cad/hide-and-seek-dataset` at `decd14b` into `images/hide-and-seek/`,
+pinned by SHA-256, never committed (no licence); setup.sh fetches them when it can.
+
+*Definition of done.*
+- every planted row is detected with the right technique at the planted offset, and the mutate
+  subcommands recompute checksums correctly for all four csum types;
+- the guest row reports the U+FEFF snapshot and not the normal one;
+- the hide-and-seek images: the overwritten mirror 1 of `btrfs_superblock`, the five inode
+  items (and the diverging DUP copy) of `btrfs_inode_reserved`, the U+FEFF directory of
+  `btrfs_hidden_snapshot`, the 50 MiB past the last device extent of `btrfs_raid1_slack` dev2;
+  tests skip when the images are absent;
+- every clean corpus image and `sandbox.img` is quiet, or its findings are explained here;
+  hostile input (forged superblock fields, truncated items, cyclic directory refs) does not crash;
+- README documents `hiding` and every key, evidence-db.md the `hiding` summary and problems
+  source. The false-positive measurement is issue #53.
+
+**M6d status 2026-10-07: done** (catalog.md, M6d entry; `tests/test_hiding.py`,
+`tests/test_hiding_images.py`). Each bullet of the definition of done is a test. Three things the
+design did not foresee: every corpus image carries a stale sys_chunk_array tail (mkfs drops its
+temporary system chunk the way the kernel does, without clearing), so that rule had to know the
+two shapes removal leaves; log-tree inode items keep stale bytes in their reserved field, so log
+trees are exempt from that rule; and the hide-and-seek "hidden snapshot" is a plain directory
+named U+FEFF, not a subvolume, so the name rule covers every directory entry (`hidden_name`).
+`m6_reformat_geometry` keeps two `device_slack` findings: the replaced, larger filesystem.
 
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
 - Corpus generator = `corpus/vm/` scaled up (already in use since M1):
@@ -2360,6 +2695,16 @@ one run of 15 (365/353/18/828), the async and sync rows never.
     order; about 3 % rest on a log tree alone (the flash files). Follow-up: `never_committed`,
     and name changes seen through walks with gaps, should need evidence rather than absence
     (EXP-009 §8).
+  - **Re-run 2026-10-07 after the M5d fix** (EXP-009, addendum A; issue #78). On five new builds,
+    each measured by the code before and after the fix: delete precision 1.0 in every build
+    (0.98 in one before), no `link` or `move` (one per build before), creates and flags
+    unchanged; rename recall 0.870 → 0.783, because two right renames rested on versions seen
+    only through walks with gaps. A refinement that would keep them is described there and left
+    to the maintainer.
+  - **Re-run 2026-10-07 after the INODE_REF rule** (EXP-009, addendum B; issue #84). A rename
+    within one directory is derived from a walk with gaps that read the directory's INODE_REF
+    item. On five new builds, each measured before and after: rename recall 0.783 → 0.870,
+    precision 1.0, still no `link` or `move`, every other count unchanged.
 - **Minimum experiment set for paper 1** (EXP records, ≥ 5 regenerations
   where a guest runs; details in `paper-draft.md` §10):
   - E-rec: file-level recovery per source, on no-balance, aged and ≥ 8 GiB

@@ -17,8 +17,12 @@ timelines): the catalog keeps the chunk maps of superseded chunk-tree roots and 
 a state from before a balance through the map of its own time; `recover --graph` joins orphan
 blocks where a join can be justified; `btrfska timeline` follows every inode through every
 cataloged state. M6a: every recovered data extent is checked against the data checksums of
-the csum tree of its own state, with a verdict per extent and per file. The prototype that came
-first is the git tag `legacy-final`.
+the csum tree of its own state, with a verdict per extent and per file. M6b: every recovered
+extent and tree block is placed in the current allocation (free space tree, or the extent
+tree) as in use, free or reallocated, with an overwrite-risk score and, where older free space
+trees survive, the two commits between which it was freed. M6d: `btrfska hiding` reports data
+hidden by every known btrfs technique. The prototype that came first is
+the git tag `legacy-final`.
 - `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID|all]... [--tree ID|all] [--orphans|--graph]`
   extracts the files of a tree as the current, a backup or a discovered root saw them, and with
   `--orphans` also from leaves that no root tree leads to, one extent at a time, with a
@@ -27,10 +31,17 @@ first is the git tag `legacy-final`.
 - `btrfska timeline DB [--tree ID|all] [--inode N] [--uncommitted] [--json]` follows every inode
   through every cataloged state: create, modify, rename, move, link, unlink, delete, by tree,
   inode number and creation generation.
-- `btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` finds tree
+- `btrfska hiding IMAGE [--json]` reports data hidden in btrfs: superblock reserved bytes
+  (the ranges taken from the feature flags), padding and sys_chunk_array slack, overwritten
+  superblock slots, the boot area, backup-root divergence, node slack, diverging block copies,
+  inode reserved bytes, nanosecond timestamps, STRING_ITEMs, file slack, device slack and
+  invisible names, each with its offset, its bytes and why a clean filesystem has none.
+- `btrfska scan IMAGE [--full-sweep] [--workers N] [--foreign] [--json]` finds tree
   blocks of the filesystem anywhere on the image, including chunks that have
   since been removed. It classifies each one as `live`, `backup_reachable`,
-  `unreferenced` or `invalid`.
+  `unreferenced` or `invalid`. With `--foreign` it also finds the tree blocks of
+  other filesystems on the device, validates them in their own geometry and
+  says whether they show a reformat or an fsid change.
 - `btrfska roots IMAGE [--full-sweep] [--json]` finds historical tree roots
   among those blocks. It reports every candidate root-tree block (a state)
   with the trees it names and how completely they survive (chunk and log
@@ -280,7 +291,7 @@ peak of about twice the file size (explicit and implicit holes excepted).
 
 ### `btrfska scan` output
 
-`btrfska scan IMAGE [--full-sweep] [--workers N] [--json]` looks for tree
+`btrfska scan IMAGE [--full-sweep] [--workers N] [--foreign] [--json]` looks for tree
 blocks of the filesystem anywhere on the image. It validates each one and
 classifies it against anchored walks of the current state and of every
 backup root. The command opens no file other than the image.
@@ -312,8 +323,8 @@ byte-identical. On candidate-dense input 4 workers are about as fast as one
   summary line `skipped as DATA: N bytes` says how much was left out.
 - **Foreign filesystems.** The prefilter matches only the current fsid (or
   metadata_uuid). Tree blocks of a previous filesystem on the same device,
-  and blocks written before the fsid was changed (`btrfstune -m` or `-u`),
-  are not candidates at all.
+  and blocks written before the fsid was changed (`btrfstune -u`), are not
+  candidates at all. `--foreign` looks for them separately (below).
 
 **Memory.** Candidates are classified and printed one at a time. Memory grows
 with the size of the reachable trees (the walked copies of the current state,
@@ -382,6 +393,68 @@ Each record has:
 The summary line `walk failures: current N; backup roots M (…)` counts the
 invalid nodes the walks met, by the `roots` failure classes below. On an old
 backup root, `reused` is expected and is not damage.
+
+**Other filesystems (`--foreign`).** A second pass over the same regions
+(plan.md M6f):
+- *Census.* Every 4096-byte aligned offset whose bytes look like a tree-block
+  header (WRITTEN set, no unknown flag, backref revision 0 or 1, level below 8,
+  non-zero generation and 4096-aligned non-zero bytenr) is counted under its
+  header fsid. The census holds at most 1024 fsids (a Misra-Gries summary), so
+  a flood of random fsids cannot exhaust memory; it reports how much a count
+  may lack.
+- *Selection.* An fsid other than the tree fsid and the superblock fsid with at
+  least 2 such offsets is *recurring*; at most 8 are examined, the most frequent
+  first. The fsid of every valid foreign superblock copy (`info` lists them) is
+  examined too, even without a block.
+- *Context.* Blocks are validated with the geometry of their own filesystem:
+  the foreign superblock copy's when one survives, otherwise the nodesize and
+  checksum type under which most of the first 32 blocks verify. Without a
+  superblock the generation is unknown and its check is `null`.
+- *What it was.* `fsid_change` when a foreign chunk-tree leaf or superblock
+  names the current device uuid (`btrfstune -u` keeps it); `reformat` when it
+  names only other device uuids, or when a foreign generation is above the
+  current superblock's (an fsid change never leaves newer blocks behind);
+  `undetermined` otherwise. A change through metadata_uuid (`btrfstune -m`)
+  rewrites no tree block, so it leaves no foreign block; it is reported from
+  the current superblock.
+
+The text summary adds a `foreign:` census line, one `foreign filesystem FSID:
+KIND; …` line per filesystem with its `evidence:` lines, and the metadata_uuid
+line when it applies (or `foreign: no foreign filesystem found`). Foreign
+blocks are never classified as live or orphaned: they belong to another
+filesystem. With `--json`, each candidate block of a foreign fsid is a record
+after the node records, and each foreign filesystem a record after its blocks.
+
+A `foreign_node` record has `record`, `unsupported_format`, `fsid` (the header
+fsid), `physical`, `bytenr`, `generation`, `owner`, `level`, `nritems`,
+`valid`, `checks`, `problems` and `region`, as for a node, checked in the
+foreign context (`bytenr`, `chunk_tree_uuid`, `owner`, `parent_generation` and
+`first_key` are `null`, and `generation` too without a superblock).
+
+A `foreign_filesystem` record has `record`, `unsupported_format` and:
+- `fsid`; `census_blocks`: its header-shaped offsets in the census;
+- `kind`: `reformat`, `fsid_change` or `undetermined`; `evidence`: the reasons,
+  in words;
+- `context`: `source` (`superblock`, `inferred` or `none`: no block verified,
+  the current geometry was used), `mirror`, `nodesize`, `sectorsize`,
+  `csum_type`, `csum_name`, `generation` (`null` unless from a superblock),
+  `sampled` and `verified` (blocks tried when inferring, and how many passed);
+- `superblocks`: the foreign superblock copies of this fsid, each with
+  `mirror`, `offset`, `generation`, `fsid` and `tree_fsid`;
+- `candidates`, `valid`, `invalid`, `truncated`: its blocks;
+- `generations`: `[oldest, newest]` of the valid blocks, or `null`;
+- `levels`, `owners`: valid blocks per level and per owner (at most 32 owners;
+  the rest in `owners_more`);
+- `device_uuids`: the device uuids its valid chunk-tree leaves name, with how
+  many items name each (at most 16; the rest in `device_uuids_more`);
+- `in_current_map`: valid blocks inside a stripe of the current chunk map;
+  `region_kinds`: valid blocks per region kind.
+
+The Python API (`scan.foreign.foreign_scan`) returns the whole summary:
+`alignment`, `header_shaped`, `fsids_held`, `undercount`, `current_blocks`
+(header-shaped offsets of the tree fsid), `recurring`, `left_out`,
+`filesystems` (the records above) and `metadata_uuid_change` (`null`, or the
+superblock `fsid` and the `metadata_uuid` the tree blocks carry).
 
 ### `btrfska roots` output
 
@@ -531,7 +604,7 @@ the class earliest in the list above wins:
 
 ### `btrfska catalog`
 
-`btrfska catalog build IMAGE --db PATH [--full-sweep] [--workers N] [--max-states N] [--no-rehash]`
+`btrfska catalog build IMAGE --db PATH [--full-sweep] [--workers N] [--max-states N] [--foreign] [--hiding] [--no-rehash]`
 scans the image once, read-only, and writes everything `scan` and `roots`
 compute, plus the superblock copies, the chunk maps (the current one, one per
 superseded chunk-tree root the scan found, and one assembled from DEV_EXTENT
@@ -552,6 +625,12 @@ column, with example queries.
 - Up to 4096 root trees are evaluated as states (`--max-states`; `btrfska roots` reports 64).
   A root tree that is not a state cannot be named to `recover`, so when an image has more
   candidates than the bound, `problems` says so.
+- `--foreign` adds the `scan --foreign` pass: its summary goes into
+  `scan_runs.scan_summary` under `foreign`, and its text lines into `problems`
+  with source `foreign`. Foreign blocks are not `nodes` rows.
+- `--hiding` runs `btrfska hiding` on the current state, with the historical chunk maps the
+  pass found: its summary and its findings (as `records`) go into `scan_runs.scan_summary` under
+  `hiding`, and its text lines into `problems` with source `hiding`.
 - btrfs u64 values are stored as signed 64-bit integers, so the high objectids
   read as btrfs names them: owner `-6` is the log tree.
 
@@ -585,6 +664,96 @@ sqlite3 -readonly images/scratch/sandbox.db \
   "SELECT status, outside_map, COUNT(*) FROM nodes WHERE orphan GROUP BY 1, 2"
 ```
 
+### `btrfska hiding`
+
+`btrfska hiding IMAGE [--json] [--allow-unsupported]` checks every place where a known technique
+hides data in btrfs (plan.md M6d) and reports each one that holds something: where it is on the
+image, how many bytes are not zero, the first bytes, and the evidence. A rule reports only what
+mkfs.btrfs and the kernel never write, so a filesystem they alone wrote is quiet; each rule names
+the kernel source (v7.0, file and line) that says why. Nothing is written. The techniques, with
+the `technique` name each finding carries:
+
+- `superblock_reserved`: non-zero bytes in the superblock's `reserved[199]` (0x264-0x32A), in a
+  backup root slot's padding, or in a field that only a feature gives a meaning, while that
+  feature's incompat flag is clear: `metadata_uuid` (METADATA_UUID), `nr_global_roots`
+  (EXTENT_TREE_V2), `remap_root` and its generation and level (REMAP_TREE). **The reserved range
+  depends on the feature flags**: the published range of 0xF0 bytes at 0x23B is the layout
+  before kernel 5.0, and taken literally it reports every filesystem changed by `btrfstune -m`.
+  Every superblock copy is examined, valid or not, since a hider may leave the checksum stale.
+- `superblock_padding`: non-zero bytes in `padding[565]` (0xDCB-0xFFF).
+- `sys_chunk_array_slack`: bytes beyond `sys_chunk_array_size`. Removing a system chunk leaves
+  stale bytes there, because the kernel and mkfs.btrfs move the array down without clearing its
+  end: either the removed entry itself or a copy of the array's last bytes. Those two shapes are
+  counted in `stale_array_tails` (every corpus image has one) and are not findings.
+- `superblock_slot`: a superblock slot inside the device that is not zero but holds no
+  superblock. Every commit writes every copy that fits in the device.
+- `pre_superblock`: non-zero bytes in the first 64 KiB or in the rest of the first MiB. The
+  kernel allocates nothing below 1 MiB, and mkfs.btrfs leaves it zero; a boot loader (GRUB 2
+  embeds itself there) is named in the evidence when sector 0 ends with 0x55 0xAA.
+- `backup_root_divergence` (after SecurityRonin/btrfs-forensic): a backup root newer than the
+  superblock, no slot of the superblock's generation, that slot disagreeing with the superblock
+  fields written with it, slot generations that repeat or are not consecutive, or a mirror of the
+  same generation with other backup roots.
+- `node_slack`: a valid tree block of the current state whose slack is not zero and does not read
+  as stale items. The kernel zeroes the slack of every tree block it writes (EXP-005); what
+  mkfs.btrfs leaves there reads as stale items and is counted in `stale_slack`, not reported.
+- `copy_divergence`: two copies (DUP, RAID1) of one tree block that both pass every check but
+  differ. The kernel writes all copies from one buffer.
+- `inode_reserved`: non-zero bytes in an inode item's `reserved` (32 bytes at 0x50). A log tree's
+  inode items keep whatever their buffer held there and are counted in `log_inode_reserved`.
+- `timestamp_nsec`: an inode's nanosecond field of 10^9 or more, which no kernel timestamp has,
+  or four different nanosecond values that all read as printable ASCII.
+- `string_item`: an item of type STRING_ITEM (253), which nothing creates.
+- `file_slack`: non-zero bytes past the end of a regular file in its last sector (uncompressed
+  regular extents); the kernel zeroes them before the sector is written. `detail.csum` says what
+  the data checksum of that sector shows: `covers_hidden` (it was recomputed with the hidden
+  bytes), `matches_zeroed` (it matches only with them zeroed, as the kernel wrote the sector),
+  `mismatch`, `none` or `unavailable`.
+- `device_slack`: non-zero bytes past this device's last device extent, or past its size. Bytes
+  where a chunk of a historical chunk map once was (a chunk removed by balance) are counted in
+  `explained_bytes`, not reported; those maps come from a scan for older chunk trees, run only
+  when such bytes exist.
+- `hidden_name`: a directory entry, a subvolume or snapshot included, whose name has invisible or
+  control characters (U+FEFF, zero-width and bidirectional marks), bytes that are not UTF-8, or
+  only whitespace. Hidden directories on its path are named in the evidence.
+
+The trees examined are those of the current state, root, chunk and log trees included; blocks the
+current state does not reach are not examined here (`catalog build` describes their slack).
+
+The text output is a summary line, the counts that are explained and not reported, then per
+finding its `technique`, place and byte count, the evidence and the bytes as text. With `--json`,
+stdout carries one `finding` record per finding and then one `hiding_summary` record; the summary
+lines go to stderr. Exit status 0, or 2 when the image is refused.
+
+A `finding` record has `record`, `unsupported_format`, `technique`, `physical` (the image offset
+of the area examined), `length`, `nonzero` (non-zero bytes in it; for a field rule its count of
+fields), `where` (the place in words), `evidence`, `preview` (hex of up to 32 bytes from the
+first non-zero byte) and `text` (the same bytes, unprintable ones as `.`), and `detail`, which
+depends on the technique: `first_nonzero` for every area rule; `mirror`, `field`, `copy_valid`
+and `csum_ok` for the superblock rules; `bytenr`, `generation`, `owner`, `level` for the block
+rules; `tree`, `inode`, `slot` for the item rules; `nsec` for `timestamp_nsec`; `logical`,
+`size` and `csum` for `file_slack`; `devid`, `area` (`past_last_extent` or `past_device_size`),
+`runs` (up to 16 `[start, end)` ranges of non-zero 4 KiB blocks) and `runs_not_listed` for
+`device_slack`; `kind`, `path`, `name_hex`, `directory`, `target` and `subvolume` for
+`hidden_name`; `generations` and `reasons` for `backup_root_divergence`.
+
+The `hiding_summary` record has `record`, `unsupported_format`, `techniques` (the list above, in
+report order), `findings` (their number), `by_technique` (a count for each), `superblock`
+(`copies` examined, `slots_without_superblock`, `stale_array_tails` by shape), `trees` (`trees`,
+`blocks` and `copies` examined, `nonzero_slack` block copies, `stale_slack` of them read as stale
+items with the first 16 in `stale_slack_blocks` as `[bytenr, generation, owner, level]`, `inodes`,
+`log_inode_reserved`, `files_checked` file tails, `subvolumes`, and `problems` met on the walks)
+and `device` (`devid`, `total_bytes`, `last_extent_end`, `explained_bytes`, `history`: how many
+historical chunk maps were read and how many of their stripes lie on this device, or null when
+none were needed, and `extents`, the device extents of this device).
+
+```sh
+uv run btrfska hiding sandbox.img                       # 0 findings
+uv run btrfska hiding --json images/scenarios/m6_hide_nsec.img
+uv run python corpus/hide_and_seek.py                   # the four third-party images
+uv run btrfska hiding images/hide-and-seek/btrfs_inode_reserved.img
+```
+
 ### `btrfska timeline`
 
 `btrfska timeline DB [--tree ID|all] [--inode N] [--uncommitted] [--json]` says what happened to
@@ -603,9 +772,16 @@ root, the backup roots and the roots only the scan found.
   `touch` (the inode item changed and nothing else above: times, link count, a directory's
   entries), and `delete` when a later state of the same tree, walked without a gap, no longer
   holds the identity. When every later walk has gaps the event is `not_seen`: absence from an
-  incomplete walk proves nothing. `subvolume_deleted` is one event for a tree that a later
-  state, whose whole root tree was found, no longer names. Several changes between two surviving
-  states show as their net effect.
+  incomplete walk proves nothing. Names are compared only between versions seen in a whole walk:
+  a version seen only through walks with gaps, fragments or lone leaves (any of them can miss the
+  leaf that holds a name), or only in a log tree replayed without its base, gives no `rename`,
+  `move`, `link` or `unlink`, and no `touch` when its names differ. One exception: a `rename`
+  within one directory is still derived when a version was seen in a committed walk with gaps,
+  if the old and the new name are in the same directory and no name the two versions show in
+  that directory is in an INODE_EXTREF item. Every name of an inode in one directory is in one
+  INODE_REF item, and a walk that reads the item at all reads it whole. `subvolume_deleted` is
+  one event for a tree that a later state, whose whole root tree was found, no longer names.
+  Several changes between two surviving states show as their net effect.
 - **`modify` lists the byte ranges whose extent differs** between the two versions (`delta`:
   `offset`, `length`, `change` `added`, `removed` or `replaced`), comparing what the extent items
   point at (address and offset into it, compression, inline bytes), not how they are cut, and
@@ -620,8 +796,12 @@ root, the backup roots and the roots only the scan found.
   logged in exists-only mode is left out). Such observations sort before the committed state of
   their generation, are marked `uncommitted_only`, and never prove a `delete`. A version whose
   inode item is older than an extent (see `recover`) is marked `inconsistent`. An identity seen
-  only there ends with `never_committed`: a file written, fsynced and deleted within one
-  transaction, for instance.
+  only there ends with `never_committed` (a file written, fsynced and deleted within one
+  transaction, for instance) only when it is proved: every sighting is of the transaction that
+  created it, and the tree as that transaction's commit left it (a root block of that generation,
+  named by a committed root tree) was walked without a gap and does not hold it. A file that
+  outlives the transaction that created it is in that commit. Otherwise it ends with `not_seen`,
+  whose `reason` says which proof is missing.
 - When the database holds a recovery, an event carries the `sha256` of the complete artifact with
   the same tree, inode, creation generation and extent signature.
 
@@ -629,7 +809,9 @@ With `--json`, one object per event. Keys of every event: `event`, `tree_id`, `o
 `created` (the creation generation), `transaction` (the generation the event happened in, when the
 items say so exactly: the creation generation for `create`, the version's `transid` for a change;
 `null` otherwise), `between` (the two sources that bound the event, older first; `null` for
-`create`) and `generations` (theirs), `path`, `attached`, `kind`, `size`, `transid`,
+`create`, `never_committed` and a `not_seen` of an identity no committed state holds) and
+`generations` (theirs; for `never_committed`, the transaction that created the file and the one
+before), `path`, `attached`, `kind`, `size`, `transid`,
 `extent_signature`, `inconsistent`, `times`, `first_seen` and `last_seen` (`source` and
 `generation` of the version the event leads to; for `delete` and `not_seen`, of the last version),
 `seen_in` (how many sources showed that version), `uncommitted_only`, `log_only`, `sha256`, and `order_assumed`:
@@ -646,7 +828,7 @@ gaps go to stderr.
 
 ### `btrfska recover`
 
-`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--graph] [--logs] [--maps own|current] [--no-dedup] [--no-rehash]`
+`btrfska recover IMAGE --db DB --out DIR [--root ROOT]... [--tree ID|all] [--orphans] [--graph] [--logs] [--maps own|current] [--discard none|async|sync] [--no-dedup] [--no-rehash]`
 extracts files. `DB` is the evidence database built from `IMAGE` (`catalog build`, best with
 `--full-sweep`); the image's size and SHA-256 must match the ones recorded there (`--no-rehash`
 skips the hash, and the run is recorded as not checked).
@@ -735,6 +917,36 @@ skips the hash, and the run is recorded as not checked).
   byte was read**: a `complete` file with `csum_verdict` `mismatch` holds bytes that are not the
   ones the filesystem checksummed (overwritten, trimmed, or damaged). stdout ends with a
   `data checksums:` line that counts the files per verdict.
+- **Free space and overwrite risk** (plan.md M6b). Every extent read from disk, and every tree
+  block an artifact's items came from, is placed in the current state's allocation. That is its
+  free space tree (tree 10: FREE_SPACE_INFO, FREE_SPACE_EXTENT and FREE_SPACE_BITMAP items) when
+  the superblock marks it valid and it is read without a gap; otherwise free space is derived from
+  the extent tree and the block groups (a filesystem with a space cache v1, or none). Both are
+  read when both exist and every disagreement is reported. The bytes are placed by the physical
+  copy that was read, mapped back to a current logical address, so data read through a
+  historical chunk map is placed too. `space_verdict`: `in_use` (the current extent tree has the
+  same allocation: the same address and length, given to the same inode number by its
+  back-references; for a tree block, the same generation), `free`, `allocated` (to another
+  extent), `partial`, `no_block_group` (the chunk was removed). `overwrite_risk` is an ordinal
+  score, each step a kernel behaviour (v7.0): 0 `none` for `in_use` (space is freed only with
+  the last reference, extent-tree.c:3187); 1 `low` for `no_block_group` (a new chunk is allocated
+  only after the free space of the existing block groups has been searched,
+  extent-tree.c:3733-3755); 2 `medium` for `free`; 3 `high` for `free` when a discard mode trims
+  the block group (`sync` every kind, extent-tree.c:2997-3005; `async` data-only block groups,
+  discard.c:116, :696), when the block group is unused (deleted at the next mount,
+  block-group.c:2533-2538, and trimmed whole under `sync`, extent-tree.c:3058-3063), or when it
+  is reclaim-eligible under the kernel's default (zoned filesystems only, below 75 % used,
+  zoned.h:29); 4 `reallocated` for `allocated` and `partial`. `risk_reasons` lists the rules
+  that fired. The discard mode is the one given with `--discard` (mount options are not on
+  disk), else the one observed: `trimmed_metadata` when blocks a committed state points to read
+  as zeros (only `sync` or a FITRIM discards metadata), `trimmed_data` when freed data sectors
+  read as zeros against a non-zero checksum, `not_trimmed` when freed blocks or data still hold
+  their bytes, `unknown` otherwise; only a trim raises a score. `async` with a quick unmount
+  leaves the image exactly as no discard does, so it is seen only when stated. The free space
+  trees of older states give, per extent, `freed_in`: the newest state that held some of its
+  bytes allocated (`after`) and the first that held them all free (`by`). The per-extent record
+  is `space` in `provenance.read_record`; stdout ends with a `free space:` line (source, discard
+  mode, artifacts per verdict and per risk level).
 - **A file is not `complete` when one of its extents is newer than its INODE_ITEM** (`missing`
   reason `inode_item_older_than_extent`). A commit always updates the inode item, so no committed
   tree holds such a file; a leaf written in the middle of a transaction can, and then the data is
@@ -768,8 +980,9 @@ skips the hash, and the run is recorded as not checked).
   `inode_transid`, `kind`, `path`, `attached`, `names`, `size`, `mode`, `xattrs`,
   `symlink_target`, `status`, `bytes_written`, `sha256`, `extent_signature`, `duplicate_of`,
   `output_path`, `chunk_maps`, `joined`, `missing`, `problems`, `csum_verdict` (`null` when
-  nothing was checked: no content, a duplicate, a refusal), `csum_sources` (a list), and `inode`
-  (the whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
+  nothing was checked: no content, a duplicate, a refusal), `csum_sources` (a list), `space_verdict`, `overwrite_risk`,
+  `risk_reasons` (a list), `space_source` (`null` when there is no allocation to place the
+  artifact in), and `inode` (the whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
 - Exit status 0 when every file is complete; 1 when any is `partial`, `refused_encrypted` or
   `failed`, or on an error (unknown root, wrong image, `DIR` exists); 2 for a refused format.
 

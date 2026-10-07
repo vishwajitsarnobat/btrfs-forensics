@@ -20,6 +20,216 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — M6d: hiding detection, reserved ranges from the feature flags
+
+- **Branch:** `feature/m6-hiding-detection` (from `main` at `e74b282`, merged with `main` at
+  `f1b211c`; issue #52). New `src/btrfska/hiding/` (`findings.py`, `areas.py`, `trees.py`,
+  `detect.py`, `cli.py`), `corpus/hide_and_seek.py`, `corpus/vm/scenarios/hidden.guest.sh`,
+  `tests/test_hiding.py`, `tests/test_hiding_images.py`. Changed `src/btrfska/cli.py`,
+  `catalog/build.py` and `catalog/cli.py` (`--hiding`), `corpus/mutate.py` (ten subcommands, and
+  a C-speed zero check that makes every mutate row about four times faster), `corpus/manifest.tsv`
+  (twelve rows), `setup.sh`, `README.md`, `docs/evidence-db.md`, `docs/plan.md` (M6d),
+  `corpus/vm/README.md`.
+- **Why.** Claim C5: Toolan & Humphries 2026 say detection of btrfs data hiding is unbuilt and
+  easy, and their published superblock reserved range is a pre-5.0 layout (research.md §10.13).
+- **What changed.** `btrfska hiding IMAGE [--json]` checks fourteen techniques: superblock reserved
+  bytes (0x264-0x32A always; `metadata_uuid`, `nr_global_roots`, `remap_root*` only while their
+  incompat flag is clear; backup-slot padding), superblock padding, sys_chunk_array slack,
+  overwritten superblock slots, the boot area, backup-root divergence, node slack, diverging
+  block copies, inode reserved bytes, nanosecond timestamps, STRING_ITEMs, file slack (with the
+  data checksum's verdict on the sector), device slack and invisible names. Each rule cites the
+  kernel at v7.0 for why mkfs.btrfs and the kernel never produce what it reports. Two legitimate
+  residues found while building it are counted, not reported: the sys_chunk_array tail that
+  removing a system chunk leaves (volumes.c:3204 memmoves without clearing), and the reserved
+  bytes of log-tree inode items (tree-log.c fills an empty item field by field). Device slack
+  where a historical chunk map (M5a) had a stripe is a removed chunk's and is counted too; the
+  maps are discovered only when bytes past the last extent are not zero. `catalog build --hiding`
+  stores the summary and findings in `scan_summary` under `hiding` and the report lines as
+  `problems` with source `hiding`: no schema change.
+- **Corpus.** Eleven `corpus/mutate.py` rows, one per technique, over the four csum types
+  (`m6_hide_sb_reserved`, `_sb_gated`, `_sb_padding`, `_chunk_array`, `_backup_roots`, `_pre_sb`,
+  `_inode_reserved`, `_nsec`, `_string_item`, `_file_slack`, `_device_slack`), `m4_planted_slack`
+  for node slack, and the guest row `m6_hidden_snapshot` (a U+FEFF snapshot moved into `.lib32`,
+  and a normally named one). The four btrfs images of `fkie-cad/hide-and-seek-dataset` at
+  `decd14b` are fetched by URL and pinned by SHA-256 into `images/hide-and-seek/` (no licence:
+  never committed; tests skip without them).
+- **What the images say** (one build each; tests assert the claims relative to each image):
+  every planted row is reported with its technique at the planted bytes and nothing else; the
+  planting subcommands leave every rewritten superblock and tree block valid in all four csum
+  types. The clean corpus (every other row, 27 images incl. `m1_unknown_incompat`) and
+  `sandbox.img` give no finding except `m6_reformat_geometry`: two `device_slack` findings, the
+  bytes of the larger filesystem the `--mixed -b 60M` mkfs replaced (past the new last extent and
+  past the new device size), as M6f found. On `m5_reuse` 41 779 389 bytes past the last extent
+  are explained by a historical chunk map (the chunk balance removed). mkfs's stale slack (2 to 6
+  block copies per image) and system-chunk tail (every image) are counted. Hide-and-seek:
+  `btrfs_superblock` shows mirror 1 overwritten with "HIDDEN DATA" (`superblock_slot`; the
+  metadata's reserved-area offsets hold nothing, as fishy-btrfs.md §4.2 found), `btrfs_inode_reserved`
+  the five inode items at exactly the metadata's offsets plus the DUP copy left unchanged
+  (`copy_divergence`), `btrfs_hidden_snapshot` the U+FEFF entry in `.lib32` (a plain directory in
+  that image, not a subvolume, so the rule covers every directory entry: `hidden_name`), and
+  `btrfs_raid1_slack` dev2 the 50 MiB past its last device extent (dev1 quiet).
+- **Verified.** ruff; `uv run pytest` (1278 passed, nothing skipped, with the corpus and the
+  hide-and-seek images present); `sha256sum -c tests/fixtures/SHA256SUMS`; the fresh-clone proof
+  (`./setup.sh` in `images/scratch/`). The false-positive measurement is issue #53.
+
+## 2026-10-07 — M6b: free-space-tree forensics and the overwrite risk of recovered data
+
+- **Branch:** `feature/m6-free-space-tree` (from `main` at `4334698`; issue #50). New
+  `src/btrfska/substrate/freespace.py`, `src/btrfska/recover/space.py`, `tests/test_freespace.py`,
+  `tests/test_freespace_images.py`, `experiments/EXP-019.md`, `experiments/exp019.py`. Changed
+  `substrate/chunks.py` (`ChunkMap.logical_of`, `logical_ranges`), `recover/engine.py`,
+  `recover/cli.py` (`--discard`, a `free space:` line), `recover/maps.py` (`stored_map` public),
+  `catalog/schema.py` (version 9), `README.md`, `docs/evidence-db.md`, `docs/plan.md` (M6b),
+  `tests/test_recover.py`.
+- **Why.** Claim C2: no tool reports free-space-tree state. A recovered file is worth more when
+  the examiner knows whether its bytes are still held, free, or already given to something else,
+  how soon they could go, and when they were freed.
+- **What changed.** FREE_SPACE_INFO, FREE_SPACE_EXTENT and FREE_SPACE_BITMAP items are parsed as
+  the kernel loads them (bitmap runs carried across items, the extent count checked), hostile
+  items skipped and reported. The current state's free space tree is read from the database; a
+  filesystem without one (or with an untrusted one) gets free space derived from its extent tree
+  and block groups, and where both exist they are cross-checked. Every extent `recover` reads from
+  disk, and every tree block an artifact's items came from, is placed by the physical copy read,
+  mapped back through the current chunk map (btrfs_rmap_block): `in_use`, `free`, `allocated`,
+  `partial`, `no_block_group`. An ordinal overwrite-risk score (0 `none` to 4 `reallocated`)
+  follows kernel behaviour step by step: free space in a block group before new chunks, discard
+  per block-group kind, unused block groups, zoned reclaim; every rule cited and listed per
+  artifact. The discard mode is stated (`--discard`) or observed (`trimmed_metadata`,
+  `trimmed_data`, `not_trimmed`, `unknown`). The free space trees of older states date a free:
+  `freed_in` names the last state that held the bytes allocated and the first that held them
+  free. Schema 9: `artifacts.space_verdict`, `overwrite_risk`, `risk_reasons`, `space_source`;
+  `provenance.space_verdict`, `block_space`; `space` in `read_record`; `free_space` in the run
+  summary; the same in `manifest.jsonl`.
+- **Numbers** (EXP-019; 24 kept images, one run each, and 20 fresh builds on the i5-1335U host):
+  the free space tree and the derivation from the extent tree agree to the byte on all 23 opened
+  images and all 20 builds, and no item, current or older, is skipped or inconsistent; observed
+  mode `trimmed_metadata` on 5/5 `sync` builds, `not_trimmed` on 5/5 `none` and 5/5 `async`
+  (async with a quick unmount is not visible on the image, as EXP-002 found); on 7 `m4_deep`
+  images every recovered regular victim (10 per image) is dated by `freed_in.by` to exactly the
+  commit the guest log deleted it in; every complete file of the current state on every image is
+  `in_use` with score 0. Reallocated bytes appear only on `m5_reuse` and its control
+  `m5_reuse_same` (registered prediction partly wrong: the control reuses the same physical
+  bytes, so it shows them too); the registered "12 victims per build" was wrong, 10 survive.
+- **Verified.** 41 unit tests (every hostile item, the bitmap run carry, each verdict and risk
+  rule, the reverse mapping per profile against `copies()`, a fuzz of random items) and 22 image
+  tests (cross-check on 14 images, the trio's modes, `freed_in` against the log, stated modes,
+  the fallback giving the same placements). 1141 tests passed, none skipped (1177 after merging
+  `main` with M6f and the INODE_REF rule); ruff clean;
+  `sha256sum -c` OK.
+
+## 2026-10-07 — Renames within one directory proved through INODE_REF, and EXP-009 addendum B
+
+- **Branch:** `feature/timeline-inode-ref-renames` (from `main` at `4334698`; issue #84).
+  Changed `src/btrfska/timeline/build.py`, `tests/test_timeline.py`, `README.md` (`btrfska
+  timeline`), `docs/plan.md` (M5d fix, part 2; E-timeline status), `experiments/EXP-009.md`
+  (addendum B).
+- **Why.** The fix of issue #78 derives no name change from a version seen only through walks
+  with gaps. That cost EXP-009 two right renames (`moves/m_4.txt`, `moves/m_5.txt`, rename recall
+  0.870 → 0.783). A gap can hide a name but cannot invent one, and the names of an inode in one
+  directory are one INODE_REF item, keyed (inode, INODE_REF, directory); a name goes to an
+  INODE_EXTREF item only when that item cannot grow (fs/btrfs/inode-item.c:307-364 at v7.0).
+- **What changed.** A rename within one directory is derived when a version was seen only through
+  committed walks with gaps, if exactly one name went and one came, both in the same directory,
+  and no name the two versions show there comes from an INODE_EXTREF item. Moves, links,
+  unlinks and anything from fragments, lone leaves or a log tree without its base still need
+  whole walks.
+- **Numbers** (EXP-009 addendum B; five new builds, i5-1335U host, each measured by the code
+  before (`4334698`) and after (`94bc7a3`), predictions committed first): rename recall 0.783 →
+  **0.870** in every build, precision 1.0; recall within reach 0.952 (0.909–0.952); no `link` or
+  `move`; creates, deletes, `not_seen`, `order_assumed` (0) and `log_only` (16) unchanged. Each
+  build's timeline gains exactly two events, the renames of `m_4` and `m_5`. B1 and B2 held; B3
+  held for the comparison, but its restated create recall range (0.987 to 0.989) was off in one
+  build (0.992 under both versions).
+- **Verified.** Two new tests failed before the change and pass now: forged walks with gaps (the
+  rename is proved through the INODE_REF item, while a move, a link, a lone leaf and an
+  INODE_EXTREF name give none), and on `m4_deep` every logged rename whose two names committed
+  walks show is reported. The `pad/p2` test still passes. 1080 tests passed, none skipped; ruff
+  clean; `sha256sum -c` OK.
+## 2026-10-07 — M6f: foreign-FSID discovery, a reformat or an fsid change and what survives (EXP-018)
+
+- **Branch:** `feature/m6-foreign-fsid` (from `main` at `523be2b`; issue #54). New
+  `src/btrfska/scan/foreign.py`, `corpus/vm/scenarios/foreign.guest.sh`, `reformat.sh`,
+  `fsid_change.sh`, `tests/test_foreign.py`, `tests/test_foreign_images.py`,
+  `experiments/EXP-018.md`, `experiments/exp018.py`. Changed `cli.py` (`scan --foreign`),
+  `catalog/build.py` and `catalog/cli.py` (`catalog build --foreign`), `corpus/manifest.tsv`,
+  `corpus/vm/README.md`, `README.md`, `docs/evidence-db.md`, `docs/plan.md` (M6f). **No schema
+  change** (still version 8).
+- **Why.** The M2 prefilter keeps only blocks whose header carries the tree fsid, so the tree
+  blocks of a filesystem that was on the device before a reformat, and those this filesystem wrote
+  before `btrfstune -u`, were never candidates (the M2a review; README's scan limitation). M1
+  already reported a foreign superblock copy, but nothing looked for the trees behind it.
+- **What changed.** An optional second pass over the scan plan's regions. A census counts every
+  4096-byte aligned offset that looks like a tree-block header under its header fsid, in a
+  mergeable Misra-Gries summary of at most 1024 fsids. Every recurring fsid other than the tree
+  fsid and the superblock fsid (at most 8), and the fsid of every foreign superblock copy, is then
+  validated with its own context: the foreign superblock's geometry when one survives, otherwise
+  the (nodesize, csum type) under which most of its first 32 blocks verify; without a superblock
+  the generation check is not made. What it was: `fsid_change` when its chunk-tree leaves or
+  superblock name the current device uuid (`btrfstune -u` keeps it; btrfs-progs v6.6.3
+  tune/change-uuid.c:145-197), `reformat` when they name only other device uuids or when a
+  foreign generation is above the current superblock's, `undetermined` otherwise. A change through
+  metadata_uuid (`btrfstune -m`), which rewrites no header, is read from the superblock. `scan
+  --json` gains `foreign_node` and `foreign_filesystem` records; `catalog build --foreign` puts
+  the summary into `scan_runs.scan_summary` under `foreign` and its lines into `problems` (source
+  `foreign`), so the schema stays as it is. Four corpus images, built in the guest:
+  `m6_reformat` (same options, no second life), `m6_reformat_geometry` (crc32c 32 KiB to mixed
+  xxhash 4 KiB at 60 MiB, second life; the old mirror-1 superblock survives), `m6_fsid_u`,
+  `m6_fsid_m`.
+- **Numbers (EXP-018, N = 5 regenerations of each row, this host).** Old-fsid valid blocks,
+  median (range): `m6_reformat` 196 (196-196), `reformat` from the generations, context inferred
+  (16384, xxhash64); `m6_reformat_geometry` 218 (218-218), `reformat` from the device uuids,
+  context from the surviving superblock (32768, crc32c); `m6_fsid_u` 30 (30-32) plus 5 invalid
+  (mkfs's never-written blocks), `fsid_change` from 31 chunk-tree items naming the current device;
+  `m6_fsid_m` no foreign header, the metadata_uuid change reported, 5 of 5. No other foreign
+  filesystem in any build; on 24 control images (a 25th, `m1_unknown_incompat`, is refused by the gate) only `m1_foreign_mirror`'s transplanted
+  superblock, with no block. Hostile input, on sandbox copies whose 39 680-sector trailing gap is
+  all header-shaped: a random fsid per sector selects nothing at a 10.7 MiB peak heap (0.27 s);
+  one foreign fsid in every sector is validated, all invalid, at 2.1 MiB (2.9 s). Budget 16 MiB.
+- **Must know.** On a block device with discard, mkfs trims the whole device unless `-K`
+  (common/device-utils.c:270-278), so a reformat there may leave nothing; these images are files,
+  where mkfs trims nothing. A same-options reformat followed by a second life left 2 old blocks in
+  a pilot. Foreign blocks are found and validated, not yet read as a filesystem (its chunk map and
+  roots); they are not `nodes` rows. EXP-017's open point (a real reformat with its trees) is
+  answered by `m6_reformat_geometry`.
+- **Verified.** `ruff check`, `ruff format --check`, `sha256sum -c tests/fixtures/SHA256SUMS`;
+  fresh-clone proof: the branch cloned into `images/scratch/`, `./setup.sh` built all 28 corpus
+  rows including the four new ones and ran 1 109 tests, all passed, nothing skipped; the clone was
+  deleted. In the working checkout 1 108 passed and one test of EXP-009 skipped, because the
+  shared `m4_deep` there predates the event log EXP-009 added.
+
+## 2026-10-07 — The two wrong timeline events of EXP-009 fixed, and EXP-009 re-run
+
+- **Branch:** `fix/timeline-absence-verdicts` (from `main` at `bef52dd`; issue #78). Changed
+  `src/btrfska/timeline/build.py`, `tests/test_timeline.py`, `README.md` (`btrfska timeline`),
+  `docs/plan.md` (M5d fix; E-timeline status), `experiments/exp009.py` (`--first`, `--keep`, a
+  count of `not_seen` endings), `experiments/EXP-009.md` (addendum A).
+- **Why.** EXP-009 found two events drawn from absence alone: a `never_committed` for a file
+  committed in generation 10 whose commit survives only as a walk with gaps (or not at all), and a
+  `link` for `pad/p2` in every build, from versions seen through walks with gaps that do not reach
+  its INODE_REF.
+- **What changed.** `never_committed` now needs proof: every sighting is of the transaction that
+  created the file, and the tree as that transaction's commit left it (a root block of that
+  generation, named by a committed root tree) is walked without a gap and does not hold it. A
+  root tree written in the middle of the transaction does not count, because the fs-tree
+  ROOT_ITEMs are rewritten only during the commit (transaction.c:1471-1541 at v7.0). Otherwise
+  the ending is `not_seen` with a reason, and with `between` and `generations` null. Names are
+  compared only between versions seen in a whole walk: a version seen only through walks with
+  gaps, fragments, lone leaves or a log tree replayed without its base gives no `rename`, `move`,
+  `link` or `unlink`.
+- **Numbers** (EXP-009 addendum A; five new builds, i5-1335U host, each measured by the code
+  before and after the fix): delete precision 1.0 in every build (0.98 in one build before, the
+  same `m_1` event); `link` or `move` 0 per build (1 before); creates, `order_assumed` (0) and
+  `log_only` (16) unchanged; all 8 flash files still `never_committed`. **Rename recall 0.870 →
+  0.783**: the renames of `m_4` and `m_5` were right but rested on versions seen only through
+  walks with gaps, so the rule drops them. A refinement that would keep them (one INODE_REF item
+  holds every name of an inode in one directory) is described in the addendum and left to the
+  maintainer. The registered prediction that renames would not change was wrong and is reported so.
+- **Verified.** Three new tests failed before the fix and pass now: forged catalogs for each
+  `not_seen` reason and for the proof of `never_committed`; a forged walk with a gap and a lone
+  leaf that miss a name; on `m4_deep`, no `link`, `unlink` or `move` that the log does not hold.
+  The EXP-009 test now checks `never_committed` against the log too. 1002 tests passed, none
+  skipped (with `m4_deep` rebuilt by the current recipe); ruff clean; `sha256sum -c` OK.
+
 ## 2026-10-07 — M6a: recovered content verified against the data checksums (EXTENT_CSUM)
 
 - **Branch:** `feature/m6-extent-csum` (from `main` at `b918555`, rebased on `bef52dd`; issue
