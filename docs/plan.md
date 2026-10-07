@@ -2134,6 +2134,35 @@ one run of 15 (365/353/18/828), the async and sync rows never.
   - E-fp: discovery false-positive rate on forged images;
   - E-raid: RAID1, RAID1C3, RAID10 and RAID5/6 profiles;
   - E-csum; E-tiers (if C4 is claimed); E-perf; E-robust.
+- **G13 records: four numbers without a record** (planned 2026-10-07, branch
+  `feature/g13-records`, issue #56; `paper-draft.md` gap G13). Four numbers the
+  paper uses were deterministic results of tests or of a harness, with no EXP
+  record and no script that regenerates them as a table. Each gets a committed
+  script under `experiments/` and a record in the §7 template. EXP-009 to
+  EXP-012 are reserved for paper experiments and EXP-013 is taken by another
+  branch, so these are EXP-014 to EXP-017:
+  - EXP-014, LZO bit flips: `experiments/exp014.py` draws the bit-flip corpus
+    of `tests/oracle/lzo_hostile.py` (seeds 1–5, 300 streams per seed) and
+    reports, per seed and decoder (btrfska, lzallright, dissect.util pure
+    Python and native), how many flipped streams decode to wrong bytes without
+    an error, and on how many streams the decoders return the same bytes;
+  - EXP-015, the two orphan definitions on `sandbox.img`:
+    `experiments/exp015.py` cross-tabulates the reachability classes against
+    the prototype's generation rule and lists every block where they disagree;
+  - EXP-016, oracle file reads: `experiments/exp016.py` compares every file
+    read of every root set with dissect.btrfs on every corpus image, and
+    reports per image and codec the reads compared, equal and failed;
+  - EXP-017, the foreign mirror: `experiments/exp017.py` applies btrfska's
+    selection, generation alone and the kernel's mirror-0 rule to every
+    image's superblock copies, and replays the chunk-root read of the copy
+    generation alone would pick.
+
+  *Definition of done.* Four scripts and four records; each record states that
+  its images are fixed files, so one run is deterministic for the image hash;
+  every number that differs from what `paper-draft.md` or this plan says is
+  reported as found and the documents are corrected, never the reverse; the
+  scripts have tests that assert claims relative to the image read; the G13 row
+  of `paper-draft.md` and its traceability rows point to the records.
 - **Corpus statement.** Every record and the paper state the corpus size
   (images per cell and in total, sizes, regenerations) and point to each
   image's operations log in the manifest.
