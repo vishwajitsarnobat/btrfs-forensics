@@ -1687,9 +1687,12 @@ to an INODE_EXTREF item instead (inode-item.c:334-343 and 355-364). An item lies
 a walk that read the item read every name it holds. One rule is added:
 - **A rename within one directory is derived when one or both versions were seen only through
   committed walks with gaps**, if the names differ by exactly one gone and one come, both in the
-  same directory, and both come from INODE_REF items (none from an INODE_EXTREF item). The version
-  under the old name then holds that directory's INODE_REF item, which does not hold the new name,
-  and the version under the new name holds the item without the old name.
+  same directory, and no name the two versions show in that directory comes from an INODE_EXTREF
+  item. The version under the old name then holds that directory's INODE_REF item, which does not
+  hold the new name, and the version under the new name holds the item without the old name. A
+  name of that directory in an INODE_EXTREF item the walk did not reach is not excluded: that
+  needs an INODE_REF item that once could not grow (hundreds of names of one inode in one
+  directory), which no corpus scenario makes.
 - Everything else stays as above: a `move`, `link` or `unlink`, or a rename whose names sit in an
   INODE_EXTREF item, still needs both versions seen in a whole walk; versions seen only in
   fragments, lone leaves or a log tree replayed without its base give no name change at all.
@@ -1697,9 +1700,15 @@ a walk that read the item read every name it holds. One rule is added:
 *Definition of done.* Tests that fail before the change: a forged catalog whose walk with a gap
 reads a whole INODE_REF item gives the rename, and still no `link`, `unlink` or `move` from such
 a walk, and no rename when a name comes from an INODE_EXTREF item; on `m4_deep`, the renames of
-`moves/m_4.txt` and `moves/m_5.txt` are reported (when their old names survive at all) and still
-no `link` of `pad/p2`. README and this section describe the rule. EXP-009 addendum B (N = 5, with
-predictions committed before the builds) compares the code before and after on the same builds.
+`moves/m_4.txt` and `moves/m_5.txt` are reported (every logged rename whose two names committed
+walks show) and still no `link` of `pad/p2`. README and this section describe the rule. EXP-009
+addendum B (N = 5, with predictions committed before the builds) compares the code before and
+after on the same builds.
+
+**Status 2026-10-07: done** (catalog.md; EXP-009 addendum B). The forged test and the `m4_deep`
+test failed before the change. EXP-009 addendum B: rename recall 0.783 → 0.870 in each of five
+builds, precision 1.0, no `link` or `move`, every other count the same; the timeline gains
+exactly the renames of `m_4` and `m_5`.
 
 **M5 status 2026-09-21: the definition of done holds; three items of its scope are open.**
 Parts M5a (historical chunk maps, EXP-007), M5b (integrity and linkage), M5c-1 (the orphan graph,
@@ -2357,6 +2366,10 @@ one run of 15 (365/353/18/828), the async and sync rows never.
     unchanged; rename recall 0.870 → 0.783, because two right renames rested on versions seen
     only through walks with gaps. A refinement that would keep them is described there and left
     to the maintainer.
+  - **Re-run 2026-10-07 after the INODE_REF rule** (EXP-009, addendum B; issue #84). A rename
+    within one directory is derived from a walk with gaps that read the directory's INODE_REF
+    item. On five new builds, each measured before and after: rename recall 0.783 → 0.870,
+    precision 1.0, still no `link` or `move`, every other count unchanged.
 - **Minimum experiment set for paper 1** (EXP records, ≥ 5 regenerations
   where a guest runs; details in `paper-draft.md` §10):
   - E-rec: file-level recovery per source, on no-balance, aged and ≥ 8 GiB

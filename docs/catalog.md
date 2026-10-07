@@ -20,6 +20,35 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — Renames within one directory proved through INODE_REF, and EXP-009 addendum B
+
+- **Branch:** `feature/timeline-inode-ref-renames` (from `main` at `4334698`; issue #84).
+  Changed `src/btrfska/timeline/build.py`, `tests/test_timeline.py`, `README.md` (`btrfska
+  timeline`), `docs/plan.md` (M5d fix, part 2; E-timeline status), `experiments/EXP-009.md`
+  (addendum B).
+- **Why.** The fix of issue #78 derives no name change from a version seen only through walks
+  with gaps. That cost EXP-009 two right renames (`moves/m_4.txt`, `moves/m_5.txt`, rename recall
+  0.870 → 0.783). A gap can hide a name but cannot invent one, and the names of an inode in one
+  directory are one INODE_REF item, keyed (inode, INODE_REF, directory); a name goes to an
+  INODE_EXTREF item only when that item cannot grow (fs/btrfs/inode-item.c:307-364 at v7.0).
+- **What changed.** A rename within one directory is derived when a version was seen only through
+  committed walks with gaps, if exactly one name went and one came, both in the same directory,
+  and no name the two versions show there comes from an INODE_EXTREF item. Moves, links,
+  unlinks and anything from fragments, lone leaves or a log tree without its base still need
+  whole walks.
+- **Numbers** (EXP-009 addendum B; five new builds, i5-1335U host, each measured by the code
+  before (`4334698`) and after (`94bc7a3`), predictions committed first): rename recall 0.783 →
+  **0.870** in every build, precision 1.0; recall within reach 0.952 (0.909–0.952); no `link` or
+  `move`; creates, deletes, `not_seen`, `order_assumed` (0) and `log_only` (16) unchanged. Each
+  build's timeline gains exactly two events, the renames of `m_4` and `m_5`. B1 and B2 held; B3
+  held for the comparison, but its restated create recall range (0.987 to 0.989) was off in one
+  build (0.992 under both versions).
+- **Verified.** Two new tests failed before the change and pass now: forged walks with gaps (the
+  rename is proved through the INODE_REF item, while a move, a link, a lone leaf and an
+  INODE_EXTREF name give none), and on `m4_deep` every logged rename whose two names committed
+  walks show is reported. The `pad/p2` test still passes. 1080 tests passed, none skipped; ruff
+  clean; `sha256sum -c` OK.
+
 ## 2026-10-07 — The two wrong timeline events of EXP-009 fixed, and EXP-009 re-run
 
 - **Branch:** `fix/timeline-absence-verdicts` (from `main` at `bef52dd`; issue #78). Changed
