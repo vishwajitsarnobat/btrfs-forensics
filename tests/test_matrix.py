@@ -2,7 +2,8 @@
 its row claims, and its log is a consistent ground truth that agrees with the image.
 
 The matrix tier is built on request (`uv run python corpus/build.py --tier matrix`), not by
-./setup.sh or CI, so these tests skip when it is absent. Every claim is read from the image or its
+./setup.sh or CI, and the 100 GiB image of the large tier locally only (`--tier large`; hashing it
+takes minutes), so these tests skip when a tier is absent. Every claim is read from the image or its
 own log; none is a number from one guest run.
 """
 
@@ -34,8 +35,9 @@ def _load(name: str):
 
 
 build, matrix, groundtruth = _load("build"), _load("matrix"), _load("groundtruth")
-ROWS = {row["name"]: row for row in build.manifest_rows("matrix")}
-NOT_BUILT = "matrix tier not built here: uv run python corpus/build.py --tier matrix"
+TIER = {row["name"]: tier for tier in ("matrix", "large") for row in build.manifest_rows(tier)}
+ROWS = {row["name"]: row for tier in ("matrix", "large") for row in build.manifest_rows(tier)}
+NOT_BUILT = "{} tier not built here: uv run python corpus/build.py --tier {}"
 CSUM_TYPES = {"crc32c": csum.CRC32C, "xxhash": csum.XXHASH, "sha256": csum.SHA256,
               "blake2b": csum.BLAKE2}  # fmt: skip
 COMPRESSION = {"zlib": 1, "lzo": 2, "zstd": 3}  # BTRFS_COMPRESS_*, compression.h
@@ -46,14 +48,14 @@ DATA_TREE = 256  # subvolume `data`, the first subvolume the scenario creates
 def image(name: str):
     path = SCENARIOS / f"{name}.img"
     if not path.exists():
-        pytest.skip(NOT_BUILT)
+        pytest.skip(NOT_BUILT.format(TIER[name], TIER[name]))
     return path
 
 
 def truth(name: str):
     path = SCENARIOS / f"{name}.log"
     if not path.exists():
-        pytest.skip(NOT_BUILT)
+        pytest.skip(NOT_BUILT.format(TIER[name], TIER[name]))
     return groundtruth.parse(path.read_text(errors="replace"))
 
 
