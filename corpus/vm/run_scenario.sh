@@ -9,6 +9,10 @@
 #   DISCARD     if non-empty, the virtio disk gets discard=unmap, so guest
 #               TRIMs punch holes in the raw file (and btrfs auto-enables
 #               discard=async unless MOUNT_OPTS says otherwise)
+#   IMAGE2      a second image, attached as /dev/vdb (a two-device filesystem; mount it with
+#               device=/dev/vdb in MOUNT_OPTS)
+#   SCENARIO_ARGS  space-separated KEY=VALUE scenario parameters (KEY: lower-case letters and
+#               digits, VALUE without spaces); the guest scenario reads each as $sc_KEY
 #   TIMEOUT     seconds before the VM is killed (default 600)
 #   QEMU        the emulator (default: qemu-system-x86_64 from PATH; install the
 #               distro's QEMU package, any recent version)
@@ -25,6 +29,21 @@ IMG=$1
 case $(basename "$IMG") in sandbox.img) echo "refusing to mutate sandbox.img" >&2; exit 1;; esac
 SCENARIO=${SCENARIO:-s01}
 MOUNT_OPTS=${MOUNT_OPTS-compress=zstd,commit=5}
+ARGS=
+for arg in ${SCENARIO_ARGS:-}; do
+    case $arg in
+        *=*) ;;
+        *) echo "bad scenario argument (not KEY=VALUE): $arg" >&2; exit 1 ;;
+    esac
+    case ${arg%%=*} in ''|*[!a-z0-9]*) echo "bad scenario argument name: $arg" >&2; exit 1;; esac
+    ARGS="$ARGS sc_$arg"
+done
+# the second disk of a multi-device filesystem, refused on the same terms as the first
+set -- -drive "file=$IMG,format=raw,if=virtio${DISCARD:+,discard=unmap}"
+if [ -n "${IMAGE2:-}" ]; then
+    case $(basename "$IMAGE2") in sandbox.img) echo "refusing to mutate sandbox.img" >&2; exit 1;; esac
+    set -- "$@" -drive "file=$IMAGE2,format=raw,if=virtio${DISCARD:+,discard=unmap}"
+fi
 
 QEMU=${QEMU:-qemu-system-x86_64}
 command -v "$QEMU" >/dev/null || {
@@ -36,5 +55,5 @@ command -v "$QEMU" >/dev/null || {
 exec timeout "${TIMEOUT:-600}" "$QEMU" \
     -nic none -enable-kvm -cpu host -m 1024 -nographic -no-reboot \
     -kernel "$VM/kernel/boot/vmlinuz-$KVER" -initrd "$VM/initramfs.cpio.gz" \
-    -append "console=ttyS0 quiet panic=-1 scenario=$SCENARIO mountopts=$MOUNT_OPTS" \
-    -drive "file=$IMG,format=raw,if=virtio${DISCARD:+,discard=unmap}"
+    -append "console=ttyS0 quiet panic=-1 scenario=$SCENARIO mountopts=$MOUNT_OPTS$ARGS" \
+    "$@"

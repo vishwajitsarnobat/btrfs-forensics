@@ -1,0 +1,2 @@
+name	command	mkfs	guest_kernel	note
+mx_100g	SIZE=100G corpus/vm/scenarios/matrix.sh mx_100g	btrfs-progs v6.6.3 (pinned)	7.0.0-31-generic	one factor: a 100 GiB filesystem (sparse image; local only)

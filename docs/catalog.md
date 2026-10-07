@@ -20,6 +20,69 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — M7a: the corpus matrix, with every file state in its ground truth
+
+- **Branch:** `feature/m7-corpus-matrix` (from `main` at `503e3d9`, `main` merged in as it moved; issue
+  #58). New: `corpus/matrix.py`, `corpus/matrix.tsv`, `corpus/large.tsv`, `corpus/groundtruth.py`,
+  `corpus/vm/scenarios/matrix.sh`, `corpus/vm/scenarios/matrix.guest.sh`, `tests/test_matrix.py`,
+  `tests/test_corpus_groundtruth.py`. Changed: `corpus/build.py` (`--tier`), `corpus/vm/init`
+  (`sc_KEY=VALUE` parameters), `corpus/vm/run_scenario.sh` (`SCENARIO_ARGS`, `IMAGE2`),
+  `corpus/vm/make_image.sh` (`DEVICES`, `=== HOST-*` lines at the top of every log),
+  `tests/test_corpus_build.py`, `pyproject.toml` (marker `matrix`), `setup.sh` (comment only),
+  `README.md`, `corpus/vm/README.md`, `docs/plan.md` (M7a plan and definition of done).
+- **Why.** M7 needs a corpus that varies one thing at a time, and full factorials where an axis
+  interacts with recovery, with a ground truth that records every file state and not only the
+  last (Plum & Dewald's state recall needs it). The Bhat & Wani axes (#59) and the
+  beyond-4-generations variants (#60) are separate tickets.
+- **What changed.** One guest scenario with six operations (delete, overwrite, create/delete
+  stress, snapshot + delete, balance, defrag) after the same population; one host script that
+  turns the axes (size, compression, checksum, block-group tree, discard, reclaim, layout) into
+  mkfs arguments, mount options, the virtio discard setting and guest parameters. 46 images in
+  the `matrix` tier: discard × operation (30), block-group tree × balance (2 new cells), reclaim ×
+  discard (5 new cells), and one factor at a time from the base (3 compressions, 3 checksums,
+  8 GiB, MIXED_GROUPS at 256 MiB, two-device RAID1). The 100 GiB image is the `large` tier.
+  `./setup.sh` and CI still build only `corpus/manifest.tsv`, whose rows did not change because
+  several experiments take every manifest image as their set.
+  - The discard option is explicit in every row (`nodiscard`, `discard=async`, `discard=sync`):
+    without it the guest mounts with `discard=async` even when QEMU drops the discards (EXP-010).
+  - Reclaim is `bg_reclaim_threshold` 50 in `allocation/data` (v7.0 `sysfs.c:925-950`; the other
+    knobs `dynamic_reclaim` and `periodic_reclaim`, `:961-1016`, stay off).
+  - Two findings on the way. First, reclaim never ran in a trial build: a new data block group sits
+    on the unused list until the cleaner runs, and a group on that list cannot be queued for
+    reclaim (`block-group.c:1535-1548`); the cleaner wakes only once per commit interval, 300 s
+    here. Every image therefore settles twice (10 s at a 5 s interval) and reclaim then ran in all
+    five reclaim-on images (one 10 MiB block group each, in this build). Second, the first matrix
+    build showed the kernel committing on its own during the population of `mx_mixed` (space
+    flushing on the small mixed filesystem), so its files were created in generation 7 while the
+    log said 8. Each sync now logs `=== COMMIT GENERATION PREVIOUS`, and an event's generation is
+    exact when the window is one generation wide and a stated bound otherwise.
+- **Numbers (this host, Fedora 44, one build; guest runs are not bit-stable).**
+  - Matrix tier: 46 images (47 files with the second RAID1 device); guest build time 2115 s in all
+    (median 26 s per image, 21.5 s to 167 s, the seven idle rows being the long ones); 2.5 GiB on
+    disk, 31 GiB apparent (sparse). Wall time was 3 h 46 min because the shared build lock was
+    held by other branches' jobs.
+  - Ground truth: 7711 events over the 46 logs; 59 are bounds rather than exact, all in the
+    population of `mx_mixed`.
+  - Large tier: 1 image, `mx_100g`; guest build time 25.5 s, 51 MiB on disk, 100 GiB apparent;
+    hashing it (build record, test) takes about three minutes.
+  - Default tier (unchanged, `./setup.sh`): 40 images in a fresh clone, 218 s of build commands
+    in all, 1.2 GiB on disk, 21 GiB apparent.
+- **Verified.** `tests/test_matrix.py` (188 tests over the 47 matrix and large images: the csum type, block-group
+  tree flag, MIXED_GROUPS, device count, size, chunk profiles and file-extent compression each
+  row claims, read from the image; the mount options in effect carry the intended discard option;
+  every log parses, its history is consistent, and every file live at the end is in the current
+  tree with the logged inode, a creation generation inside the logged window and the logged
+  SHA-256); `tests/test_corpus_groundtruth.py` (parser, consistency check, hostile logs);
+  `tests/test_corpus_build.py` (tier files equal the generator's output, factorial blocks
+  complete, every axis value present). Fresh clone of the branch (at `dd97358`, `main`
+  merged): `./setup.sh` built the 40 default images and passed, 1309 tests passed and 188
+  skipped, every skip a matrix or large-tier test (`matrix tier not built here`); the clone was
+  then deleted. Here, with both tiers built: `uv run pytest` ran 1545 tests with none skipped;
+  two failed because this worktree's build record still held the hashes of `m4_deep` and
+  `m4_deep_lost_parent` from before the main checkout rebuilt them, and pass with the record
+  refreshed. `uv run ruff check .`, `uv run ruff format --check .` and
+  `sha256sum -c tests/fixtures/SHA256SUMS` pass.
+
 ## 2026-10-07 — M6c: confidence tiers for every recovered artifact
 
 - **Branch:** `feature/m6-confidence-tiers` (from `main` at `f1b211c`; issues #51 and #81). New
