@@ -1676,6 +1676,31 @@ re-run (N = 5) and the results added to EXP-009.md as an addendum, the original 
 `tests/test_timeline.py`; the three new tests failed before the fix (the m4_deep one by the
 `link` of `pad/p2`). EXP-009 re-run: no wrong event in five builds, rename recall 0.870 → 0.783.
 
+*M5d fix, part 2, 2026-10-07: renames within one directory through INODE_REF* (issue #84, branch
+`feature/timeline-inode-ref-renames`). The rule above cost EXP-009 two right renames
+(`moves/m_4.txt`, `moves/m_5.txt`): under the old name each was seen only through committed walks
+with gaps. A gap can hide a name but cannot invent one, and the names of an inode within one
+directory are one item: the key of an INODE_REF is (inode, INODE_REF, directory)
+(`btrfs_insert_inode_ref`, fs/btrfs/inode-item.c:307-309 at v7.0), a second name in the same
+directory extends that item (inode-item.c:318-333), and only when it cannot grow does the name go
+to an INODE_EXTREF item instead (inode-item.c:334-343 and 355-364). An item lies in one leaf, so
+a walk that read the item read every name it holds. One rule is added:
+- **A rename within one directory is derived when one or both versions were seen only through
+  committed walks with gaps**, if the names differ by exactly one gone and one come, both in the
+  same directory, and both come from INODE_REF items (none from an INODE_EXTREF item). The version
+  under the old name then holds that directory's INODE_REF item, which does not hold the new name,
+  and the version under the new name holds the item without the old name.
+- Everything else stays as above: a `move`, `link` or `unlink`, or a rename whose names sit in an
+  INODE_EXTREF item, still needs both versions seen in a whole walk; versions seen only in
+  fragments, lone leaves or a log tree replayed without its base give no name change at all.
+
+*Definition of done.* Tests that fail before the change: a forged catalog whose walk with a gap
+reads a whole INODE_REF item gives the rename, and still no `link`, `unlink` or `move` from such
+a walk, and no rename when a name comes from an INODE_EXTREF item; on `m4_deep`, the renames of
+`moves/m_4.txt` and `moves/m_5.txt` are reported (when their old names survive at all) and still
+no `link` of `pad/p2`. README and this section describe the rule. EXP-009 addendum B (N = 5, with
+predictions committed before the builds) compares the code before and after on the same builds.
+
 **M5 status 2026-09-21: the definition of done holds; three items of its scope are open.**
 Parts M5a (historical chunk maps, EXP-007), M5b (integrity and linkage), M5c-1 (the orphan graph,
 EXP-008) and M5d (timelines), after the prior-art re-run (research.md §11). Bullet by bullet:
