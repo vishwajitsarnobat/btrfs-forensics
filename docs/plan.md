@@ -1988,6 +1988,91 @@ are intact. The kernel zeroes the rest of that sector before it checksums it
 `tail_rewritten` (ten sectors on `m4_deep`). Only the sectors that hold the file's bytes are
 checked; an extent that lies wholly past the inode's size is not checked at all.
 
+**M6f: foreign-FSID discovery** (issue #54; design fixed 2026-10-07, before implementation).
+
+*What it is.* An optional mode, `btrfska scan --foreign` and `btrfska catalog build --foreign`,
+that finds the tree blocks of other filesystems on the device: a filesystem that was there before
+a reformat, or this filesystem before its fsid was changed. The M2 prefilter keeps only blocks
+whose header carries the tree fsid, so neither is a candidate today (README, scan limitations).
+1. **Census.** Every 4096-byte aligned offset of the scan plan's regions (the targeted plan, or
+   every range with `--full-sweep`) whose bytes look like a tree-block header is counted under its
+   header fsid. A header looks like one when its flags have WRITTEN set and no bit other than
+   WRITTEN and RELOC below the backref revision, the backref revision is 0 or 1 (btrfs_tree.h:765-766,
+   812-817), the level is below 8, and bytenr and generation are non-zero, bytenr a multiple of
+   4096. The alignment is 4096, not the current sectorsize, so a filesystem of a smaller
+   sectorsize is not missed. The count is bounded: a mergeable Misra-Gries summary holds at most
+   1024 fsids, so memory does not grow with the number of distinct fsids, and any fsid with more
+   than 1/1025 of the header-shaped offsets is kept. How much the summary may undercount is
+   reported.
+2. **Selection.** A *foreign fsid* is one that is neither the tree fsid nor the superblock fsid,
+   with at least 2 header-shaped blocks in the census; at most 8 are examined, the most frequent
+   first, and the summary says when more were left out. The tree fsid of every valid foreign
+   superblock copy (M1 `Selection.foreign`) is examined too, even with no block.
+3. **Context.** Each foreign fsid is validated with its own geometry: the nodesize, sectorsize,
+   csum type and generation of its foreign superblock copy when one survives (`context_source`
+   `superblock`). Otherwise the (nodesize, csum type) pair under which most of its first 32 blocks
+   pass their checksum, the current filesystem's pair tried first (`inferred`); the generation is
+   then unknown and the generation check is not made (`null`). When no pair verifies a single
+   block, the current geometry is used and every block is reported invalid (`none`).
+4. **Validation.** A second, exact pass finds every offset whose header carries that fsid (the
+   M2 prefilter with that fsid at 4096-byte alignment) and checks each block with `check_block`
+   in that context, without expectations, as `scan` does. Records stream; only counters are kept.
+5. **What it was.** The valid chunk-tree leaves (owner 3) of a foreign fsid name device uuids, in
+   DEV_ITEMs and in CHUNK_ITEM stripes; a foreign superblock copy names one in its dev_item. A
+   device uuid equal to the current superblock's dev_item uuid means the same device under a new
+   fsid: `fsid_change` (`btrfstune -u` keeps the device uuid; btrfs-progs v6.6.3
+   tune/change-uuid.c:145-197). Only other device uuids mean a new mkfs: `reformat`. Without a
+   device uuid, a foreign generation above the current superblock's also means `reformat`:
+   btrfstune leaves the generation alone, so blocks written before an fsid change are never newer
+   than the filesystem that carries on. Neither: `undetermined`. Separately, a current superblock with METADATA_UUID whose fsid
+   differs from metadata_uuid reports an fsid change made through metadata_uuid (`btrfstune -m`):
+   its tree blocks were never rewritten, so there are no foreign headers to find.
+6. **Records, no schema change.** `scan --json` adds `foreign_node` records (one per foreign
+   candidate, the `node` keys that make sense without the current chunk map, plus `fsid`) and one
+   `foreign_filesystem` record per fsid; the text summary adds one line per foreign filesystem.
+   `catalog build --foreign` keeps the evidence database at its schema: the summary goes into
+   `scan_runs.scan_summary` under `foreign`, and one `problems` row per finding with source
+   `foreign`. Foreign blocks are not `nodes` rows: they belong to another filesystem, and reading
+   them as one (its chunk map, its roots) is later work.
+
+*Hostile input.* A flood of header-shaped sectors, each with a new random fsid, must stay within
+the memory budget of the candidate-flood test (`tests/test_scan_hostile.py`) and select nothing;
+validation work is bounded by the offsets probed, as in `scan`, because each offset has one fsid.
+
+*Corpus.* Built in the guest by two host drivers around a new guest scenario `foreign` (files, a
+snapshot, churn with deletions; every file names the fsid it was written under):
+- `m6_reformat`: xxhash, nodesize 16 KiB, one life, then the pinned mkfs again with the same
+  options over the whole image, and no life after it;
+- `m6_reformat_geometry`: crc32c, nodesize 32 KiB, one life, then `mkfs --mixed -b 60M` with
+  xxhash (nodesize 4 KiB), and a second life. mkfs zeroes only the superblock copies inside its
+  size (btrfs-progs v6.6.3 common/device-utils.c:290-293), so the old mirror 1 at 64 MiB survives:
+  M1's foreign superblock, here from a real reformat instead of `corpus/mutate.py`;
+- `m6_fsid_u`: one life, `btrfstune -u`, a second life;
+- `m6_fsid_m`: one life, `btrfstune -m`, a second life.
+
+*Definition of done.*
+- on `m6_reformat` and `m6_reformat_geometry` the old fsid (from the scenario's log) is found,
+  validated in its own geometry (inferred on the first, from the foreign superblock on the
+  second: nodesize 32 KiB, crc32c), and reported as `reformat`;
+- on `m6_fsid_u` the pre-change fsid is found, its valid blocks are never live blocks of the
+  current filesystem, and it is reported as `fsid_change`; on `m6_fsid_m` no foreign fsid is
+  found and the metadata_uuid change is reported;
+- on `sandbox.img` and the clean corpus images the mode finds no foreign fsid (`m1_foreign_mirror`
+  reports its transplanted superblock with no blocks);
+- the random-fsid flood stays within the budget and selects nothing; a flood of one foreign fsid
+  is validated within the same budget;
+- README documents `--foreign` and every new key, evidence-db.md the `foreign` summary and
+  problems source; the fresh-clone proof builds the four images.
+
+**M6f status 2026-10-07: done** (catalog.md, M6f entry; `tests/test_foreign.py`,
+`tests/test_foreign_images.py`; EXP-018). Each bullet of the definition of done is a test, and
+EXP-018 measured the four rows over five regenerations: every reformat and fsid change was found
+and identified in every build. Two things the design did not foresee: a reformat with the same
+options leaves no old chunk-tree leaf (the new mkfs writes its chunk tree where the old one was),
+so `m6_reformat` is identified by its generations, not by a device uuid; and on a block device
+with discard, mkfs trims the whole device by default, so these file-backed images are the
+favourable case (EXP-018 §7).
+
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
 - Corpus generator = `corpus/vm/` scaled up (already in use since M1):
   scenario scripts × matrix below, per-image manifest (per-file SHA-256,

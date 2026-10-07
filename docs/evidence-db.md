@@ -64,7 +64,7 @@ listed here, and a test fails when one is not (`tests/test_catalog.py`).
 | `nodesize`, `sectorsize` | bytes |
 | `csum_type`, `csum_name` | 0 crc32c, 1 xxhash64, 2 sha256, 3 blake2b |
 | `incompat_flags`, `compat_ro_flags` | *u64* |
-| `scan_summary` | JSON: the counts `btrfska scan` prints, per class and per region |
+| `scan_summary` | JSON: the counts `btrfska scan` prints, per class and per region; with `--foreign`, the foreign-FSID summary under `foreign` (README, `btrfska scan` output) |
 
 ### `superblocks`: every copy the image could hold
 
@@ -86,7 +86,7 @@ listed here, and a test fails when one is not (`tests/test_catalog.py`).
 | Column | Meaning |
 |---|---|
 | `problem_id` | row id |
-| `source` | `superblock` (copies disagree), `chunk_map`, `scan_plan`, `walk`, or `roots` (more root-tree candidates than `--max-states`: the older ones are in `nodes` and `root_items` but not in `states`), or `chunk_maps` (more chunk-tree roots than the bound of 4096 historical maps: the roots a superblock slot names and then the newest were built) |
+| `source` | `superblock` (copies disagree), `chunk_map`, `scan_plan`, `walk`, or `roots` (more root-tree candidates than `--max-states`: the older ones are in `nodes` and `root_items` but not in `states`), or `chunk_maps` (more chunk-tree roots than the bound of 4096 historical maps: the roots a superblock slot names and then the newest were built), or `foreign` (with `--foreign`: the census, each foreign filesystem with its kind and evidence, and an fsid change through metadata_uuid, one line each as `scan --foreign` prints them) |
 | `detail` | the message |
 
 ### `chunk_maps`, `chunks` and `stripes`: the current chunk map and the historical ones

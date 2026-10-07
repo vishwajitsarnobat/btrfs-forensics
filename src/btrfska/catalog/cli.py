@@ -6,6 +6,7 @@ import sys
 
 from btrfska.catalog import db, query
 from btrfska.catalog.build import MAX_STATES, TABLES, build_catalog, row_counts
+from btrfska.scan.foreign import report_lines
 from btrfska.scan.kernel_numpy import MAX_WORKERS
 from btrfska.substrate.fs import NoValidSuperblock, UnsupportedFormat
 
@@ -34,6 +35,7 @@ def cmd_build(args: argparse.Namespace) -> int:
             allow_unsupported=args.allow_unsupported,
             rehash=not args.no_rehash,
             max_states=args.max_states,
+            foreign=args.foreign,
         )
     except NoValidSuperblock:
         _note("NO_VALID_SUPERBLOCK")
@@ -59,6 +61,8 @@ def cmd_build(args: argparse.Namespace) -> int:
     )
     print(f"root tree candidates: {built.root_tree_candidates} ({built.states} states evaluated)")
     print("rows: " + ", ".join(f"{name} {count}" for name, count in built.rows.items()))
+    for line in report_lines(summary["foreign"]) if "foreign" in summary else ():
+        print(line)
     return 0 if built.image_unchanged is not False else EXIT_ERROR
 
 
@@ -150,6 +154,12 @@ def add_parser(sub) -> None:
         metavar="N",
         help=f"evaluate at most the N newest root trees as states (default {MAX_STATES}); more "
         "candidates than that are reported in `problems`",
+    )
+    build.add_argument(
+        "--foreign",
+        action="store_true",
+        help="also look for tree blocks of other filesystems; findings go to `problems` and to "
+        "the scan summary",
     )
     build.add_argument(
         "--no-rehash",
