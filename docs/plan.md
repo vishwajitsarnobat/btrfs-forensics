@@ -1780,6 +1780,14 @@ newer map gives the address to another chunk. On `m5_reuse_same`: the address is
 map between two maps that place it identically. EXP-010 registered and committed before any
 file is read through any map, five builds per scenario, median and range, reported either way.
 
+**M5f status 2026-10-07: done** (catalog.md, M5f entry; EXP-010; `tests/test_reuse.py`). Every
+registered prediction held in 5 of 5 builds of each scenario, with no spread: on `m5_reuse` both
+full versions of `b.bin` read hash-exact through their own map and wrong, with every extent
+placed, through the merged map; outside `b.bin` the two readings agree on every artifact, and on
+`m5_reuse_same` on all of them. Two findings go on: a `duplicate` artifact does not repeat the
+reuse note of the artifact it points at, and an overwrite inside a chunk that survives (the
+control's `z.bin`) or under unchanged placement is invisible to every map, which leaves it to M6.
+
 ### M6 — Confidence, validation, hiding detection (~1–2 weeks)
 - EXTENT_CSUM (0x80) verification of recovered content where the csum tree
   (current or historical) survives.

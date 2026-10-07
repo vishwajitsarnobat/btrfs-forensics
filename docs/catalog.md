@@ -20,6 +20,42 @@ Maintenance rules:
 
 # Timeline (newest first)
 
+## 2026-10-07 — M5f: logical-range reuse, per-generation maps against a merged map (EXP-010)
+
+- **Branch:** `feature/exp010-range-reuse` (from `main` at `b918555`), issue #57. Added
+  `corpus/vm/scenarios/reuse.guest.sh`, `corpus/vm/scenarios/reuse_same.guest.sh`, two rows of
+  `corpus/manifest.tsv` (`m5_reuse`, `m5_reuse_same`), `experiments/EXP-010.md`,
+  `experiments/exp010.py`, `tests/test_reuse.py`, `tests/test_exp010.py`; changed
+  `corpus/vm/README.md`, `tests/test_vm_images.py`, `docs/plan.md`. Nothing under `src/`, no
+  schema change.
+- **Why.** C6 reads each state through the chunk map of its own time; `mbkn-btrfs-rescue` reads
+  every version through one map merged newest-wins per chunk start (research.md §12). The two
+  differ only where one logical range was held by two chunks on different physical bytes, and no
+  corpus image had such a range (issue #48). Without one, EXP-007 could not tell the designs apart.
+- **What changed.** Scenario `reuse` fills six 64 MiB data chunks of a 512 MiB image, deletes the
+  files of the topmost and of two lower adjacent ones, removes the three with `balance
+  -dusage=0`, and writes again: the new chunk starts at the topmost one's logical address
+  (`find_next_chunk`) and lands on the 128 MiB hole of the two lower ones. Scenario
+  `reuse_same`, the layout issue #48 proposed, is the control: there the new chunk lands back on
+  the removed chunk's own bytes. The first pilot showed why: a data chunk asks for a 1 GiB device
+  extent and, finding no such hole, takes the largest one (volumes.c:5529, 1883-1946 at v7.0),
+  not the first that fits as the issue #48 answer assumed. The merged map is an emulation in
+  `exp010.py`, not a `recover` option (plan.md M5f, decision 2): btrfska never merges maps, and a
+  reading known to be wrong in the case under test does not belong among the tool's choices.
+  Both scenarios mount with `nodiscard`: without `DISCARD` the virtio disk still offers discard,
+  so the kernel turns on `discard=async` (README note added).
+- **Numbers (EXP-010, N = 5 per scenario, no spread).** Layout as designed 5 of 5 in both. On
+  `reuse`: 2 full versions of `b.bin`, both hash-exact under `--maps own`, both `complete` with a
+  wrong SHA-256 under the merged map and under `--maps current`; both carry the reuse note; the
+  dev_extents map rejects the reused address; 0 of 86 other file artifacts differ between own and
+  merged. On `reuse_same`: 0 artifacts differ; `b.bin` is wrong in all readings with no note.
+  Not predicted: a `duplicate` artifact does not repeat its original's note; the control's
+  `z.bin` is overwritten inside a surviving chunk, invisible to every map.
+- **Verified.** Registration committed and pushed (`3bf711f`) before any file was read through a
+  map; ten fresh builds and the two corpus images measured, all unchanged; `ruff check`,
+  `ruff format --check`, the full `pytest` with nothing skipped, `sha256sum -c
+  tests/fixtures/SHA256SUMS`; a fresh clone of the branch ran `./setup.sh` to the end.
+
 ## 2026-10-07 — The mentor demo, tracked and runnable
 
 - **Branch:** `docs/demo` (from `main` at `1330f43`). Added `docs/demo/README.md`,
