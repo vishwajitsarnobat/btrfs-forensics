@@ -1833,6 +1833,92 @@ control's `z.bin`) or under unchanged placement is invisible to every map, which
     reports the hide-and-seek images' techniques;
   - false-positive rate measured on clean corpus images (EXP record).
 
+**M6 is built as features, the first being M6a** (issue #49), because the confidence tiers of M6c
+need its verdicts: the risk table says content is Confirmed only by a data-checksum match.
+
+**M6a: verify recovered content against EXTENT_CSUM** (design fixed 2026-10-07, before
+implementation).
+
+*What it is.* Every data extent that `recover` or `cat` reads from disk is checked, sector by
+sector, against the data checksums of a csum tree, and the outcome is recorded per extent and per
+artifact.
+1. **What is checked, as the kernel checks it.** The csum tree (tree 7) holds EXTENT_CSUM items,
+   key (EXTENT_CSUM_OBJECTID -10, 128, logical address), each an array of one checksum per sector
+   (btrfs_tree.h:104, :192, :1130), of the type the superblock names (all four: `csum.py`). A read
+   looks up one checksum per sector of the logical range it reads (file-item.c:346-485
+   `btrfs_lookup_bio_sums`, :277-339 `search_csum_tree`) and compares each sector
+   (inode.c:3538-3578 `btrfs_data_csum_ok`). An uncompressed extent is checked over the sectors it
+   supplies, `[disk_bytenr + offset, + num_bytes)`; a compressed one over its whole on-disk extent
+   before decoding (compression.c:527, the read of `disk_num_bytes`). An inode with the NODATASUM
+   flag (btrfs_tree.h:422) is not looked up (file-item.c:360). Inline extents, prealloc extents
+   and holes have no data checksum (their bytes are in a checksummed tree block, or are zeros).
+2. **Which csum tree.** The one of the state the file is recovered from, where it survives: the
+   tree 7 that the state's root tree names (`state_trees`), walked in the database. Then the
+   current one. A csum tree walked without a gap is *complete*: when it has no checksum for a
+   sector, that absence is final and no later tree is asked (a later tree may hold a checksum of
+   other data written to the same address). One with a gap, or one that is not there, passes the
+   sector on. A log tree is asked first for its own EXTENT_CSUM items (tree-log.c:5023
+   `log_extent_csums`; never complete, since it logs only what changed), then its base state's
+   tree, then the current one. A leaf or fragment without a state asks the oldest cataloged state
+   not older than its generation (the first commit that could hold the extent's checksums), then
+   the current one. `cat` uses the same rule through the image: the csum tree of the root set
+   asked for (a backup slot's `csum_root`, the current ROOT_ITEM 7), then the current one; a
+   `bytenr:` root asks the current one only. Every verdict names the trees that decided it.
+3. **Verdicts.** Per extent: `match` (every sector has a checksum and matches), `mismatch` (some
+   sector does not; their addresses are listed), `partial_match` (no sector fails, some have no
+   checksum), `no_csum` (no sector has one, and a complete tree says so; or the extent has none by
+   nature, with a `reason`: `inline`, `prealloc`, `hole`, `implicit_hole`, `nodatasum`),
+   `unavailable` (no sector has one and no complete tree was there to say there is none; or the
+   extent is misaligned, which the tree checker rejects). An extent that could not be read gets
+   none. Per artifact: `mismatch` when any data extent mismatches, `match` when every data extent
+   matches, `partial_match` when some match and others do not decide, then `unavailable`, then
+   `no_csum` (inline-only files included). `partial_match` is not in the ticket's list: a file
+   half covered by checksums is not confirmed, and calling it `match` would overstate.
+4. **Mirrors.** DUP and RAID1 copies are judged by the checksum per sector, as the kernel's read
+   repair does (bio.c:302-341 and :176-230): when the copy used fails and another copy matches,
+   that copy's sector is used and listed under `repaired`. When none matches, the first copy's
+   bytes stay and the sector is a mismatch.
+5. **Hostile input.** The csum size comes from the superblock's csum type. An EXTENT_CSUM item
+   whose key offset is not sector-aligned, whose size is not a multiple of the csum size or is
+   zero, or whose range overflows u64 is skipped and reported (tree-checker.c:365-405). Items that
+   overlap are kept: a sector with two different checksums is a `conflict`, and data matching
+   either counts as a match with the conflict reported. The index is built once per tree and
+   looked up by bisection; nothing is allocated from an item's claims beyond its own bytes.
+6. **Records.** Schema version 8: `artifacts.csum_verdict` and `artifacts.csum_sources`,
+   `provenance.csum_verdict`, and the full check (`csum` with sectors, matched, mismatched
+   addresses, repaired copies, sources) inside `provenance.read_record` and the `cat` extent
+   record. `manifest.jsonl` carries `csum_verdict` and `csum_sources`; the run summary counts
+   artifacts per source kind and verdict.
+
+*Corpus.* `m6_datacsum`: data and metadata DUP, crc32c; a regular file, an inline file, a prealloc
+file, and, after `mount -o remount,nodatasum`, a file without data checksums, each with its
+SHA-256 in the log. `m6_datacsum_flipped` (`corpus/mutate.py flip-data`): one byte inverted in the
+first sector of one file on one mirror (repairable), and of another file on both mirrors (a
+mismatch). The corpus scripts change, so a fresh clone runs `./setup.sh`.
+
+*Definition of done.*
+- on every corpus image of every csum type (crc32c, xxhash, sha256, blake2b) and compression (zlib,
+  lzo), every file of the current state that reads completely is `match`;
+- on `m6_datacsum`: the nodatasum file is `no_csum` with reason `nodatasum`, the inline and the
+  prealloc files `no_csum`; on `m6_datacsum_flipped` the one-mirror file is `match`, complete and
+  hash-exact, with its repaired sector listed, and the two-mirror file is `mismatch` naming that
+  sector;
+- synthetic: a forged mismatch, a divergent mirror picked by the checksum, a csum tree with a gap
+  (`unavailable`, then the fallback), a complete tree without the checksum (`no_csum`, no
+  fallback), hostile EXTENT_CSUM items (misaligned, bad size, overlapping, conflicting) without a
+  crash;
+- README and evidence-db.md document every new key and column; EXP-013 counts the verdicts per
+  source kind on the corpus, with a committed script and the prediction registered first.
+
+**M6a status 2026-10-07: done** (catalog.md, M6a entry; `tests/test_datacsum.py`,
+`tests/test_datacsum_images.py`; EXP-013). Each bullet of the definition of done is a test. One
+thing the design did not foresee: a sector that holds the end of a file can be written again past
+the end by a later file at the same address, and then fails its checksum while the file's bytes
+are intact. The kernel zeroes the rest of that sector before it checksums it
+(extent_io.c:1857-1858), so the sector is also tried with those bytes zeroed and reported as
+`tail_rewritten` (ten sectors on `m4_deep`). Only the sectors that hold the file's bytes are
+checked; an extent that lies wholly past the inode's size is not checked at all.
+
 ### M7 — Evaluation & corpus (~2 weeks, overlaps paper writing)
 - Corpus generator = `corpus/vm/` scaled up (already in use since M1):
   scenario scripts × matrix below, per-image manifest (per-file SHA-256,

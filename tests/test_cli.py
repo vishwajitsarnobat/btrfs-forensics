@@ -444,11 +444,15 @@ EXTENT_RECORD_KEYS = {
     "record", "root", "inode", "unsupported_format", "kind", "file_offset", "length", "leaf",
     "slot", "generation", "compression", "ram_bytes", "disk_bytenr", "disk_num_bytes", "offset",
     "num_bytes", "chunk_map", "ranges", "decoded_bytes", "sha256", "error_kind", "error_detail",
-    "problems",
+    "problems", "csum",
 }  # fmt: skip
 FILE_RECORD_KEYS = {
     "record", "root", "inode", "unsupported_format", "size", "complete", "extents", "errors",
-    "problems",
+    "problems", "csum", "csum_sources",
+}  # fmt: skip
+CSUM_KEYS = {
+    "verdict", "reason", "sources", "sectors", "matched", "mismatched", "uncovered",
+    "bad_sectors", "repaired", "repaired_count", "conflicts", "tail_rewritten",
 }  # fmt: skip
 RANGE_KEYS = {"logical", "length", "copies"}
 DATA_COPY_KEYS = {"mirror", "devid", "physical", "readable", "used", "matches"}
@@ -467,7 +471,10 @@ def test_cat_writes_only_file_bytes_to_stdout(sandbox_img, capsysbinary):
     assert (extent["leaf"], extent["compression"], extent["ranges"]) == (30785536, "none", [])
     assert file_record["record"] == "file" and file_record["complete"] is True
     assert file_record["size"] == 31
-    assert "btrfska cat: inode 257, 31 bytes, 1 extents" in captured.err.decode()
+    assert "btrfska cat: inode 257, 31 bytes, 1 extents, data checksums: no_csum" in (
+        captured.err.decode()
+    )
+    assert extent["csum"]["reason"] == "inline" and file_record["csum"] == "no_csum"
 
 
 @pytest.mark.sandbox
@@ -488,6 +495,11 @@ def test_cat_regular_extent_records_its_physical_copy(sandbox_img, capsysbinary)
         keys = EXTENT_RECORD_KEYS if record["record"] == "extent" else FILE_RECORD_KEYS
         assert set(record) == keys
     assert set(piece) == RANGE_KEYS and set(piece["copies"][0]) == DATA_COPY_KEYS
+    assert set(extent["csum"]) == CSUM_KEYS
+    # the 5 MiB file of backup:13, checked against that backup's csum tree
+    assert (extent["csum"]["verdict"], extent["csum"]["sources"]) == ("match", ["backup:13"])
+    assert extent["csum"]["matched"] == extent["csum"]["sectors"] == 5242880 // 4096
+    assert "data checksums: match" in captured.err.decode()
 
 
 @pytest.mark.sandbox
@@ -529,7 +541,7 @@ def test_cat_applies_the_incompat_gate(capsysbinary):
 def test_readme_documents_every_cat_key():
     readme = (Path(__file__).parents[1] / "README.md").read_text()
     section = readme.split("### `btrfska cat` output", 1)[1].split("\n## ", 1)[0]
-    keys = EXTENT_RECORD_KEYS | FILE_RECORD_KEYS | RANGE_KEYS | DATA_COPY_KEYS
+    keys = EXTENT_RECORD_KEYS | FILE_RECORD_KEYS | RANGE_KEYS | DATA_COPY_KEYS | CSUM_KEYS
     assert {key for key in keys if f"`{key}`" not in section} == set()
 
 

@@ -5,7 +5,7 @@ learned to one SQLite file. Everything after it (recovery, timelines, confidence
 queries that file and not the image. This document is the contract: every table and column is
 listed here, and a test fails when one is not (`tests/test_catalog.py`).
 
-- **Schema version: 7.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
+- **Schema version: 8.** `PRAGMA user_version` and `scan_runs.schema_version` hold it. A change to
   the DDL in `src/btrfska/catalog/schema.py` bumps it and adds a line to [Versions](#versions).
 - **One database, one image, one pass.** The path given to `--db` must not exist. A database is
   never overwritten; a rebuild is a new file. A pass that fails leaves no file. What the pass
@@ -404,7 +404,7 @@ and ATTACH. Rows are never deleted: a second recovery adds a second run.
 | `image_checked` | 1 when the image's SHA-256 was compared with `scan_runs.image_sha256_before` and matched (a mismatch stops the run before anything is written); 0 with `--no-rehash`. The size is always compared |
 | `output_dir` | the directory that was created |
 | `options` | JSON: `roots` (as given), `tree_id` (a number or `all`), `dedup`, `orphans`, `graph`, `logs`, `maps` (`own` or `current`) |
-| `summary` | JSON: `artifacts` (count per status), `by_source` (count per source kind and status), `orphan_leaves` (leaves no root tree leads to), `fragments` and `fragments_found` (fragments read with `--graph`, and how many there are; at most 4096 are read, newest first), `log_trees` (log trees read with `--logs`), `bytes_written`, `gaps` (per root and tree, the blocks the tree walk could not follow) |
+| `summary` | JSON: `artifacts` (count per status), `by_source` (count per source kind and status), `orphan_leaves` (leaves no root tree leads to), `fragments` and `fragments_found` (fragments read with `--graph`, and how many there are; at most 4096 are read, newest first), `log_trees` (log trees read with `--logs`), `bytes_written`, `gaps` (per root and tree, the blocks the tree walk could not follow), `by_csum` (count of artifacts per source kind and `csum_verdict`), `csum_trees` (per csum tree asked, by its name: `complete`, whether it was read without a gap; `items`, the EXTENT_CSUM items indexed; `problems`, the gaps and the items skipped as malformed, misaligned or overlapping) |
 
 ### `artifacts`: one row per inode that was recovered, recorded or refused
 
@@ -433,9 +433,11 @@ and ATTACH. Rows are never deleted: a second recovery adds a second run.
 | `extent_signature` | SHA-256 over `i_size` and every EXTENT_DATA item (offset and raw payload): equal signatures mean equal content without reading it |
 | `duplicate_of` | the artifact of this run that holds the same tree, inode, `inode_generation` and `extent_signature` |
 | `output_path` | relative to `output_dir`: `SOURCE/tree_ID/PATH`; NULL when nothing was written |
-| `chunk_maps` | JSON list of the chunk maps (`chunk_maps.name`) the file's extents were read through, in order of first use; empty when no extent was read from disk (inline data, holes, duplicates). With `--maps own`, a root whose chunk root is the current one is read through `current` alone; any other root through its own map (`states.map_id`; for a lone leaf the newest map not newer than the leaf), then, only for an extent that map does not place, through the newer maps, oldest first, and last through `dev_extents`. An extent is always placed by one map as a whole. `complete` still means that every byte was read: a range freed by a balance may have been overwritten or trimmed since, and only a data checksum (plan.md M6) or a known hash says whether the bytes are the file's |
+| `chunk_maps` | JSON list of the chunk maps (`chunk_maps.name`) the file's extents were read through, in order of first use; empty when no extent was read from disk (inline data, holes, duplicates). With `--maps own`, a root whose chunk root is the current one is read through `current` alone; any other root through its own map (`states.map_id`; for a lone leaf the newest map not newer than the leaf), then, only for an extent that map does not place, through the newer maps, oldest first, and last through `dev_extents`. An extent is always placed by one map as a whole. `complete` still means that every byte was read: a range freed by a balance may have been overwritten or trimmed since, and only a data checksum (`csum_verdict`) or a known hash says whether the bytes are the file's |
 | `joined` | JSON list of the joins the artifact rests on (`recover/graph.py`); empty unless `source_kind` is `orphan_graph`. Each has `kind` and `evidence` (the grounds, in words). `pointer`: `fragment_root`, `generation`, `level`, and the fragment's `leaves` and `gaps`; every block was reached through its parent's key pointer (address, generation, level, first key, owner), as in an anchored walk. `sibling`: `objectid` and the `leaves` (bytenr, generation), head first; the file's items continue in the next leaf of the same tree, the extents of all of them cover the file exactly, none is newer than the INODE_ITEM, no joined leaf was written before the INODE_ITEM's last change, and no other scanned leaf continues the file differently. `log_root`: `subvolume` and `log_root_leaf`; the ROOT_ITEM of a log root tree names this log tree, and its key offset is the subvolume. `log_replay`: `base` (the state, as the superblock names it or `state:ID`), `base_state`, `base_root`; the same inode number and creation generation in that state's tree of the subvolume, over which the logged extents were laid as the kernel's replay would (a logged extent replaces its range, the logged INODE_ITEM gives the size). Without `log_replay` the content comes from the log alone. `parent_path`: the directory `objectid`, its `name_hex` and `parent`, the `leaves` holding that name, and, for the file's own directory, `dir_index_names_this_file` (whether a DIR_INDEX of that directory names this file under this name); the number has exactly one name and one creation generation in the scanned leaves of the tree. A join that would be ambiguous is not made: the artifact stays as `--orphans` gives it, and `problems` says why (`not joined with another leaf: …`, `no path: …`) |
 | `missing` | JSON list of `[file offset, length, reason]`: an extent failure class of `substrate/extents.py` (`unmapped`, `unreadable`, a decode error, …), `overlap`, `short`, `not_logged` (in a log tree read without a base, a range no extent item covers: a fast fsync logs only what changed, so this is not a hole but unknown), `inode_item_older_than_extent` (the whole file: an extent's generation is above the INODE_ITEM's `transid`. A commit always updates the inode item, so no committed tree holds this; a leaf written within a transaction can, and then the data is the new one while size and times are the old ones. What was written is neither version, so it is not `complete`. The same reason is given, for orphan sources only, when the generations agree but an inline or regular extent reaches past the sector of the end of the file: within one transaction the inode item was written at an earlier moment than the extent), or `continues_elsewhere` (the last inode of a lone leaf: its remaining extent items may be in the next leaf, and with NO_HOLES a range without an item looks like a hole) |
+| `csum_verdict` | the file's data-checksum verdict (plan.md M6a), folded from its extents' checks in `provenance`: `mismatch` when any data extent has a sector that does not match its checksum; `match` when every data extent matches in every sector; `partial_match` when none fails and some sectors have no checksum; `unavailable` when no sector had a checksum and no csum tree read without a gap could say there is none; `no_csum` when there is none (a csum tree read without a gap has no item for the sectors, the inode has NODATASUM, or the file has only inline, prealloc and hole extents). NULL when nothing was checked: a file without extents, a duplicate, a refusal, a directory or symlink, or extents that could not be read. `status` `complete` with `mismatch` means every byte was read and the bytes are not the ones the filesystem checksummed |
+| `csum_sources` | JSON list of the csum trees that decided the sectors: a state's name (`current`, `backup:GEN`, `state:ID`) or a log tree (`log:BYTENR@GEN`, its own EXTENT_CSUM items). Asked in order: a log tree's own items; the tree 7 of the root's own state (for a lone leaf or a fragment, of the oldest state not older than its generation; for a log tree, of its base state); the current one. A tree read without a gap that has no checksum for a sector decides that it has none |
 | `problems` | JSON list: names that had to be changed, FT_ENCRYPTED on the directory entry, item payloads that did not parse, findings of the extent reader (at most 16 distinct ones; all are in `provenance.read_record`). Among them, for a read through a historical map: that the extent was not placed by the root's own map; that a newer map gives the same logical address to a different chunk (the address was reused); that a newer map has allocated the disk space read to another chunk, so the bytes may have been overwritten |
 
 ### `provenance`: the items each artifact was built from
@@ -456,7 +458,8 @@ the item, and for an extent `read_record` names every physical range and copy th
 | `file_offset`, `length` | for `extent_data`: the file range it supplied, after clipping to `i_size` |
 | `extent_sha256` | of the bytes it supplied; NULL for zeros (holes, prealloc) and failures |
 | `error_kind` | why it supplied nothing; NULL otherwise |
-| `read_record` | JSON: the extent reader's full record (kind, compression, addresses, `chunk_map`: the name of the map that placed the extent, the physical ranges with every copy and whether it matched, problems) |
+| `read_record` | JSON: the extent reader's full record (kind, compression, addresses, `chunk_map`: the name of the map that placed the extent, the physical ranges with every copy and whether it matched, problems, and `csum`: the data-checksum check with `verdict`, `reason`, `sources`, the sector counts, `bad_sectors`, `repaired`, `conflicts` and `tail_rewritten`, as README.md documents for `cat`) |
+| `csum_verdict` | for `extent_data`: `read_record.csum.verdict`, for queries; NULL when the extent was not checked (it could not be read) |
 
 ## Reverse queries
 
@@ -482,6 +485,11 @@ FROM contents c JOIN content_blocks b USING (content_id) WHERE c.slack_nonzero >
 -- after `recover --root all --orphans`: file versions that no cataloged root can give
 SELECT source, path, size, inode_generation, inode_transid FROM artifacts
 WHERE source_kind = 'orphan_node' AND kind = 'file' AND status = 'complete';
+
+-- after a recovery: data-checksum verdicts per source, and the sectors that failed
+SELECT source_kind, csum_verdict, COUNT(*) FROM artifacts WHERE kind = 'file' GROUP BY 1, 2;
+SELECT a.path, json_extract(p.read_record, '$.csum.bad_sectors') FROM provenance p
+JOIN artifacts a USING (artifact_id) WHERE p.csum_verdict = 'mismatch';
 
 -- orphans by class and by whether the current chunk map still places them
 SELECT status, outside_map, COUNT(*) FROM nodes WHERE orphan GROUP BY 1, 2;
@@ -525,7 +533,7 @@ SELECT slot, type_name, key_objectid, key_offset FROM items WHERE content_id = 1
 
 ## Not stored yet
 
-Confidence tiers on `artifacts` arrive with plan.md M6, and with them the decision whether a
+Confidence tiers on `artifacts` arrive with plan.md M6c (they will read `csum_verdict`), and with them the decision whether a
 block's slack content is tampering (`slack_class` only describes it). Log generations and the (owner,
 generation, level) groups that `btrfska roots` prints are one `GROUP BY` over `nodes`. Stripe orders
 are never guessed, so a striped chunk known only from DEV_EXTENTs stays rejected.
@@ -556,6 +564,12 @@ are never guessed, so a striped chunk known only from DEV_EXTENTs stays rejected
   `inode_item_older_than_extent`, which also applies to `--orphans`: such a file was `complete`
   before and is `partial` now; `graph`, `fragments` and `fragments_found` in `recovery_runs`.
   Nothing the scan writes changed. A version-5 database is refused; rebuild it from the image.
+- **8** (2026-10-07): data checksums (plan.md M6a). `artifacts.csum_verdict`, `artifacts.csum_sources`,
+  `provenance.csum_verdict`, index `artifacts_by_csum`; `csum` in `provenance.read_record`; `by_csum`
+  and `csum_trees` in `recovery_runs.summary`. When the first copy of a sector fails its checksum and
+  another copy matches, `recover` now writes that copy's bytes, so such a file's content can differ
+  from what version 7 wrote. Nothing the scan writes changed. A version-7 database is refused;
+  rebuild it from the image.
 - **7** (2026-09-21): `artifacts.in_current` is gone, as M4b announced. "Deleted since" is a
   `delete` event of `btrfska timeline` now, bounded by two states, for an identity of tree, inode
   number and creation generation; the flag compared one artifact with one tree. A timeline is a

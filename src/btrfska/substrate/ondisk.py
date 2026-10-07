@@ -245,6 +245,7 @@ _INODE_SPEC = [
     *_timespec("otime"),
 ]
 INODE_ITEM = Layout("btrfs_inode_item", _INODE_SPEC)
+INODE_NODATASUM = 1 << 0  # btrfs_inode_item.flags: no data checksums
 
 DIR_ITEM = Layout(
     "btrfs_dir_item",
@@ -346,6 +347,7 @@ ORPHAN_OBJECTID = _U64 - 5
 TREE_LOG_OBJECTID = _U64 - 6
 TREE_RELOC_OBJECTID = _U64 - 8
 DATA_RELOC_TREE_OBJECTID = _U64 - 9
+EXTENT_CSUM_OBJECTID = _U64 - 10
 FIRST_FREE_OBJECTID = 256
 LAST_FREE_OBJECTID = _U64 - 256
 FIRST_CHUNK_TREE_OBJECTID = 256

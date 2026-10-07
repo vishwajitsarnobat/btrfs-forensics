@@ -16,7 +16,9 @@ the kernel lists under ORPHAN_ITEM, each labelled with its source. M5 (reconstru
 timelines): the catalog keeps the chunk maps of superseded chunk-tree roots and `recover` reads
 a state from before a balance through the map of its own time; `recover --graph` joins orphan
 blocks where a join can be justified; `btrfska timeline` follows every inode through every
-cataloged state. The prototype that came first is the git tag `legacy-final`.
+cataloged state. M6a: every recovered data extent is checked against the data checksums of
+the csum tree of its own state, with a verdict per extent and per file. The prototype that came
+first is the git tag `legacy-final`.
 - `btrfska recover IMAGE --db DB --out DIR [--root current|backup:GEN|state:ID|all]... [--tree ID|all] [--orphans|--graph]`
   extracts the files of a tree as the current, a backup or a discovered root saw them, and with
   `--orphans` also from leaves that no root tree leads to, one extent at a time, with a
@@ -63,7 +65,8 @@ cataloged state. The prototype that came first is the git tag `legacy-final`.
   inline, regular and prealloc extents and holes, and zlib, zstd and LZO
   compression (LZO through btrfska's own bounds-checked decoder). The bytes
   go to stdout only when every extent reads, with a provenance record per
-  extent on stderr. Data checksums are not verified yet (M6).
+  extent on stderr. Every data extent is checked against the data checksums
+  of the csum tree, and the verdict is reported per extent and per file.
 
 **Licence:** Apache-2.0 (see `LICENSE`).
 
@@ -205,8 +208,9 @@ An `extent` record adds:
 - `ranges`: the logical ranges read, split at chunk ends and 64 KiB stripe
   boundaries. Each has `logical`, `length` and `copies`; each copy has
   `mirror`, `devid`, `physical`, `readable`, `used` (the copy whose bytes
-  were used, the first readable one) and `matches` (whether it equals the
-  used copy; `null` for the used copy and unreadable copies).
+  were used, the first readable one, except the sectors that `csum.repaired`
+  lists) and `matches` (whether it equals the used copy; `null` for the used
+  copy and unreadable copies).
 - `decoded_bytes`: the decompressor's output length. A compressed inline
   extent decodes a whole sector, more than `ram_bytes`.
 - `sha256`: of the bytes supplied (`null` for zeros and failures).
@@ -218,14 +222,51 @@ An `extent` record adds:
 - `problems`: findings that do not change the bytes, such as a divergent
   mirror, non-zero bytes after a compressed stream or past `ram_bytes`, or
   an extent reaching past the sector that holds the end of the file (it is
-  clipped to the inode size).
+  clipped to the inode size), sectors that fail their data checksum.
+- `csum`: the data-checksum check (plan.md M6a); `null` when the extent could
+  not be read. Its keys:
+  - `verdict`: `match` (every sector checked has a checksum and matches),
+    `mismatch` (some sector does not), `partial_match` (none fails, some have
+    no checksum), `no_csum` (no sector has one, and a csum tree read without a
+    gap says so; or the extent has none by nature), `unavailable` (no sector
+    has one, and no csum tree read without a gap was there to say there is
+    none; or the extent is not sector-aligned).
+  - `reason`: why nothing was looked up: `inline`, `prealloc`, `hole`,
+    `implicit_hole` (no data checksum by nature), `nodatasum` (the inode has
+    the NODATASUM flag), `misaligned`; `null` when the sectors were looked up.
+  - `sources`: the csum trees that decided the sectors (`current`,
+    `backup:GEN`).
+  - `sectors`, `matched`, `mismatched`, `uncovered` (no checksum): sector
+    counts. An uncompressed extent is checked over the sectors that hold the
+    file's bytes, a compressed one over its whole on-disk extent.
+  - `bad_sectors`: the logical addresses of the first 64 mismatched sectors.
+  - `repaired`, `repaired_count`: sectors whose first copy failed and that
+    another copy (DUP, RAID1) matched, as `[logical, mirror]` (the first 64),
+    and how many; those bytes were taken from that copy, as the kernel's read
+    repair does.
+  - `conflicts`: sectors two EXTENT_CSUM items gave different checksums (data
+    matching either counts as a match).
+  - `tail_rewritten`: 1 when the sector holding the end of the file matched
+    only with the bytes past the end zeroed (the kernel zeroes them before it
+    checksums a sector): the file's bytes match, and that sector was written
+    again past the end later.
 
 The `file` record adds `size` (the inode size, `null` without an
 INODE_ITEM), `complete`, `extents` (the number of extent records), `errors`
 (file-level failures: an unreadable tree, a missing inode, a directory,
-overlapping extents) and `problems` (such as gaps on a filesystem without
-NO_HOLES). Decoding success is not evidence of correct content: LZO has no
-checksum and data checksums are verified from M6 on.
+overlapping extents), `problems` (such as gaps on a filesystem without
+NO_HOLES, and what the csum trees' EXTENT_CSUM items got wrong), `csum` (the
+file's verdict: `mismatch` when any data extent mismatches, `match` when every
+data extent matches, `partial_match` when some match and others do not decide,
+else `unavailable` or `no_csum`; inline-only files are `no_csum`; `null` when no
+extent was checked) and `csum_sources`. The csum trees asked are the one of
+the root set read (a backup slot's `csum_root`, or the current ROOT_ITEM 7),
+then the current one; a tree read without a gap that has no checksum for a
+sector decides that the sector has none, and no later tree is asked. A
+`bytenr:` root asks the current csum tree only. Decoding success is not
+evidence of correct content: LZO has no checksum. A `mismatch` does not stop
+`cat`: the bytes are written as they are on disk, and the verdict says that
+they are not the bytes that were checksummed.
 
 `cat` currently holds the whole file in memory before writing it, with a
 peak of about twice the file size (explicit and implicit holes excepted).
@@ -627,7 +668,7 @@ skips the hash, and the run is recorded as not checked).
   root's own map, when a newer map gives the same address to a different chunk, and when a newer
   map has allocated the disk space again, so that the bytes may have been overwritten. `complete`
   still means that every byte was read: whether bytes from a freed chunk are the file's is for a
-  data checksum to say (plan.md M6). With `current`, only the current map is used, and such an
+  data checksum to say (`csum_verdict`, below). With `current`, only the current map is used, and such an
   extent fails as `unmapped`.
 - **`--orphans`: recovery without an anchor.** After the roots, every valid file-tree leaf that
   **no scanned root tree leads to** is read on its own (`source_kind` `orphan_node`): no
@@ -672,6 +713,22 @@ skips the hash, and the run is recorded as not checked).
   hole:** a fast fsync logs only what changed. Without a base such a range is `not_logged` and
   the file is `partial`; the lone log leaves of `--orphans` follow the same rule. An inode logged
   with generation 0 (the kernel's exists-only mode) is recorded, not written.
+- **Data checksums.** Every data extent read from disk is checked, sector by sector, against
+  the data checksums of a csum tree (tree 7, EXTENT_CSUM items), as `cat` does and with the same
+  verdicts (`match`, `mismatch`, `partial_match`, `no_csum`, `unavailable`). The csum tree is the
+  one of the state the file is recovered from, read from the database like any tree, then the
+  current one: a tree read without a gap that has no checksum for a sector decides that it has
+  none. A log tree is asked first for its own EXTENT_CSUM items (it logs the checksums of what
+  it logged), then its base state's tree, then the current one. A leaf or fragment without a
+  state asks the oldest cataloged state not older than its generation, then the current one.
+  When the first copy of a DUP or RAID1 sector fails and another copy matches, that copy's bytes
+  are written and the sector is listed under `repaired`. An inode with the NODATASUM flag is not
+  looked up (`no_csum`, reason `nodatasum`); inline extents, prealloc extents and holes have no
+  data checksum. `csum_verdict` and `csum_sources` give the file's verdict and the trees used;
+  the per-extent check is in `provenance.read_record`. **`complete` still means only that every
+  byte was read**: a `complete` file with `csum_verdict` `mismatch` holds bytes that are not the
+  ones the filesystem checksummed (overwritten, trimmed, or damaged). stdout ends with a
+  `data checksums:` line that counts the files per verdict.
 - **A file is not `complete` when one of its extents is newer than its INODE_ITEM** (`missing`
   reason `inode_item_older_than_extent`). A commit always updates the inode item, so no committed
   tree holds such a file; a leaf written in the middle of a transaction can, and then the data is
@@ -704,8 +761,9 @@ skips the hash, and the run is recorded as not checked).
   `state_id`, `tree_id`, `root_bytenr`, `root_generation`, `objectid`, `inode_generation`,
   `inode_transid`, `kind`, `path`, `attached`, `names`, `size`, `mode`, `xattrs`,
   `symlink_target`, `status`, `bytes_written`, `sha256`, `extent_signature`, `duplicate_of`,
-  `output_path`, `chunk_maps`, `joined`, `missing`, `problems`, and `inode` (the
-  whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
+  `output_path`, `chunk_maps`, `joined`, `missing`, `problems`, `csum_verdict` (`null` when
+  nothing was checked: no content, a duplicate, a refusal), `csum_sources` (a list), and `inode`
+  (the whole parsed INODE_ITEM: owner, link count, flags, the four timestamps).
 - Exit status 0 when every file is complete; 1 when any is `partial`, `refused_encrypted` or
   `failed`, or on an error (unknown root, wrong image, `DIR` exists); 2 for a refused format.
 
