@@ -2557,3 +2557,155 @@ December. The call says full papers are 10 pages, double-blind, and appear in th
 (FSI:DI). That is 18 days from today, with M5 to M7 not yet built. Whether to aim for it with a
 narrower paper or to take the next DFRWS deadline is the maintainer's decision; plan.md §8 and
 paper-draft.md record the date.
+
+## 12. Prior-art watch — 2026-10-03
+
+Procedure: §9, run against the
+state recorded in §11 (2026-09-21). Everything below was fetched on 2026-10-03 from the
+source named. Only what moves C1, C3, C6 or a cell of the capability matrix (paper-draft.md §5.3,
+Table T-1) is reported in detail; the negative results are listed at the end so the sweep can be
+checked.
+
+### 12.1 Headline
+
+**One new tool changes the positioning: `michal2229/mbkn-btrfs-rescue`** (created 2026-09-27).
+It sweeps the raw device for every checksum-valid btrfs tree block at every 4 KiB offset, with no
+reference to the current chunk map, keeps all generations in SQLite, keeps every CHUNK_ITEM it finds
+per (logical, generation), and reads older file versions through a chunk map merged from those
+records. That takes away the "nobody does this" form of C1 (orphan-node recovery) and C6 (keeping
+superseded chunk records and reading through them), and gives C3 a nearer comparison point than
+Beyond Carving or SecurityRonin. It does not do what the narrowed claims say (details below), so
+the claims survive, but their wording and the related-work section must change, and the tool
+belongs in the baseline set and the capability matrix.
+
+Nothing else found changes C1, C3, C6 or a matrix cell: no new btrfs paper, no Beyond Carving
+code or citation, no btrfs-progs release, and the other watched tools are unchanged.
+
+### 12.2 `michal2229/mbkn-btrfs-rescue` (new)
+
+Facts (GitHub API and source, read at commit `c2eddfb`, v0.4.0, 2026-09-27):
+
+- Python, GPL-3.0, 0 stars, single author; four commits, all on 2026-09-27 (v0.2.0 to v0.4.0)
+  (`gh api repos/michal2229/mbkn-btrfs-rescue`, `/commits`). Built for one real LUKS-encrypted
+  NVMe disk (docs/how-it-works.md, "Performance"). No paper.
+- **Scan:** reads the whole device sequentially and tests every sector-aligned offset with a
+  vectorised header filter, then verifies the block checksum with any of crc32c, xxhash64,
+  sha256, blake2b (docs/how-it-works.md "scan"; `src/mbkn_btrfs_rescue/scan.py`,
+  `checksum.py` `csum_function`). Valid blocks of any fsid are kept; blocks with a bad checksum
+  only for the current fsid. The scan uses no chunk map at all.
+- **Extract:** items from every leaf of every generation, "merged across generations": each item
+  is stored once with `gen_min..gen_max`, the leaf generations it was seen in; "Deleted files
+  survive as items that simply stop appearing in newer leaves" (docs/how-it-works.md "extract").
+  Items are keyed by (tree, inode number) (`model.py` `versions`, `extent_rows`).
+- **Chunk records:** every CHUNK_ITEM found in any chunk-tree leaf, plus the superblocks'
+  `sys_chunk_array`, is stored with primary key `(logical, gen)` (`db.py` l.33–37;
+  `extract.py` l.191–198, `INSERT OR IGNORE`). At read time `_load_chunks` collapses them into
+  **one** map: rows read in generation order, the newest record per chunk start wins
+  (`model.py` l.279–291); `map_logical` bisects on chunk start (`model.py` l.297–312).
+  Data extents of every version are read through that one map. A logical address no record
+  covers is reported `unmapped` (docs/how-it-works.md "verification").
+- **History:** `versions PATH` prints the distinct inode states seen (by `transid`: size, mtime)
+  and the extent write generations (`shell.py` `do_versions` l.298–316; `model.py` `versions`
+  l.582–591). `--at-gen N` / `history/gen-N/` show items first seen at or before N; the filter
+  has no upper bound on `gen_max` (`model.py` `extent_rows`, clause `egen <= ? AND gen_min <= ?`),
+  so it is "everything as it was up to generation N" (README), not the state at N. Renamed or
+  moved names are flagged "stale" (docs/how-it-works.md "the namespace"). No event list
+  (create, rename, delete with a generation) is produced. No ORPHAN_ITEM (0x30) handling: the
+  only mention of the orphan objectid is a name table (`ondisk.py` l.42).
+- **Per-file categories** intact / unverified / damaged / lost, from data checksums sector by
+  sector plus file-type plausibility heuristics (docs/how-it-works.md "categories").
+- **Copies:** DUP mirrors and other copies are used to replace bad sectors of *data*, matched by
+  expected checksum (docs/how-it-works.md "copies"). Tree blocks: each physical copy is found and
+  verified individually by the sweep (DUP "gives two chances per tree block",
+  docs/compatibility.md l.43); whether both copies are reported per block is not stated
+  (UNVERIFIED).
+- Profiles: single and DUP; one copy of RAID1/1C3/1C4; no RAID0/10/5/6, no raid-stripe-tree, no
+  extent-tree-v2 (README "Compatibility").
+
+What it does to each claim:
+
+- **C1 (orphan sources): narrower.** Recovery from whole superseded tree blocks that no current
+  tree references, found by a checksum-validated sweep of the whole device (inside and outside
+  the current chunk map), now exists in a public tool. `ghost-recover` (§11.2) was
+  only a slice; this is the full form. What C1 can still claim: kernel ORPHAN_ITEM resurrection
+  (mbkn does none); recovery labelled by source and by reachability class, per state; and items
+  tied to the block and state they came from rather than merged into one `gen_min..gen_max` row
+  per (tree, inode), which conflates a reused inode number (the `sandbox.img` inode 257 pitfall,
+  §11.2). plan.md §1's C1 "beats prior art how" column must cite mbkn alongside
+  Beyond Carving and SecurityRonin.
+- **C3 (timelines): narrower, not taken.** mbkn gives a per-inode version list (inode states by
+  `transid`, extent write generations), cumulative views up to a generation, and stale-name
+  flags for renames. That is a per-inode history, which is more than the existence-only diffs
+  plan.md §1 compares C3 against. It still has no ordered events (create, modify, rename, move,
+  delete placed between two states), no true per-state view (deleted items stay visible at later
+  generations), and no tree or inode-reuse separation. C3's wording should name mbkn's version
+  history as the nearest prior art and rest on events between reconstructed states, not on
+  "per-inode history" alone.
+- **C6 (historical chunk maps): narrower, the core survives.** §11.3 says no tool
+  keeps superseded chunk records and reads an older state through them. mbkn now does both,
+  in a merged form: it stores every CHUNK_ITEM per generation and reads every version through
+  one newest-per-start map. What it does not do: a map per chunk-tree generation, chosen by the
+  generation of the state being read. The difference matters when a logical range is reused.
+  The kernel allocates a new chunk at the end of the highest chunk in the current mapping
+  (`fs/btrfs/volumes.c` `find_next_chunk`, l.2000–2016 at v7.0), so after the highest chunk is
+  removed, the next chunk can take the same logical start with a different physical place; a
+  newest-wins merge then reads an older state's addresses through the newer record. That this
+  happens on our corpus is UNVERIFIED (EXP-007 records no such case). C6 should be worded as
+  "per-generation chunk maps selected by state", with mbkn cited as the merged-map prior art, and
+  a test image with a reused logical range would turn the difference into a measured one.
+- **Capability matrix (T-1): add a column.** Cells from the source above:
+  historical roots beyond the four backups: not as roots; it indexes ROOT_ITEMs of all root-tree
+  leaves but walks only the newest root of each subvolume for `current/` (docs/how-it-works.md
+  "current state") (partial); scans outside the current chunk map: ✓ (whole-device sweep); all
+  four csum types validated: ✓ (`checksum.py`); every mirror copy validated and reported: ✓ for
+  validation of each tree-block copy, reporting UNVERIFIED; completeness and missing-block
+  classes per state: ✗ (a `current_missing` count for the current tree only); file-level
+  deleted-file recovery: ✓; timelines: partial (per-inode version list, no events); confidence
+  tiers with provenance: partial (per-file categories from data checksums, `PATCHED.tsv` source
+  per reconstruction; no evidence rules).
+- **Baselines (G2, M7):** a candidate. It runs rootless on an image file only if the device path
+  can be a file (UNVERIFIED; its scripts assume a block device and `sudo` for access,
+  `scripts/device-access.sh`), and it needs Python ≥ 3.14 (README "Requirements").
+
+### 12.3 Watched items with no change to C1, C3, C6 or the matrix
+
+| Item | State on 2026-10-03 | Source |
+|---|---|---|
+| Beyond Carving (Pandey et al., IEEE Access, DOI 10.1109/ACCESS.2026.3713173) | 0 citations (OpenAlex `W7168240764` and `filter=cites:` empty; Crossref `is-referenced-by-count` 0; Semantic Scholar `citationCount` 0) | api.openalex.org, api.crossref.org, api.semanticscholar.org |
+| `Vikaran101/btrfs-beyond-carving` | still empty (HTTP 409 "Git Repository is empty"), last push 2026-07-08; no other new repository on the account | GitHub API |
+| `SecurityRonin/btrfs-forensic` | no commit after `d58e436` (2026-09-21 05:29 UTC, INODE_REF hard links), which §11.2 already covers; crates.io unchanged (`btrfs-forensic` 0.1.3, `btrfs-core` 0.1.5, `state-history-forensic` 0.2.2) | GitHub API `/commits?since=2026-09-20`; crates.io API |
+| `cblichmann/btrfscue` | v0.7 (2026-07-04) is still the newest release; last push 2026-07-04 | GitHub API |
+| `nkbeast/ghost-recover` | HEAD still `9ab2673` (2026-09-13), the commit §11.2 read | GitHub API |
+| btrfs-progs | no release after v7.1 (2026-07-14). `devel` since 2026-09-21: five commits, two of which change `restore` (inline extents larger than 4 KiB, `ffa4ef4`; compressed inline extent filling a block, `09d5e01`, both 2026-09-30). These are read fixes for the M7 baseline, not a new capability; pin the baseline commit when M7 builds it | GitHub API `kdave/btrfs-progs` tags, releases, `/commits?sha=devel` |
+| The Sleuth Kit | 4.15.0 still the newest release; no commit touching `tsk/fs/btrfs.cpp` on `develop` since 2025-04-04; PR #3466 (btrfs memory fixes) still open | GitHub API |
+| `fox-it/dissect.btrfs` | 1.10 on PyPI, last push 2026-03-19 | PyPI JSON, GitHub API |
+| `xbqt/forefst` (ReFS) | v1.13.0 (2026-09-22) and v1.13.1 (2026-09-25): correctness fixes after an external audit, a full integrity check and a prior-version carve that discloses zero-filled ranges. ReFS only; touches the C4 analog, not C1, C3 or C6 | GitHub releases |
+| `akivajp/btrfs-timeline` (new, 2026-09-22, MIT) | browses file versions across existing snapshots on a mounted system (README). Not forensic and not a source of deleted state; no change to C3 | GitHub API, README |
+| Kernel format | no commit to `include/uapi/linux/btrfs_tree.h` since 2026-09-15; newest tag v7.3-rc5 | GitHub API `torvalds/linux` |
+
+### 12.4 Literature sweeps (negative unless stated)
+
+- Crossref, `query.bibliographic` with `from-created-date:2026-09-15`: "btrfs" returns nothing;
+  "copy-on-write file system forensic", "ZFS forensic", "APFS forensic", "chunk tree recovery",
+  "deleted file recovery file system" return nothing on file-system forensics. "bcachefs" returned
+  an empty body twice (not checked).
+- FSI:DI (ISSN 2666-2817), records created since 2026-09-15: two, Scalpel3 (302199, already in
+  §11.1) and a Windows shortcut-file paper (302215). No file-system paper (api.crossref.org,
+  `journals/2666-2817/works`).
+- OpenAlex `search=btrfs`, publications from 2026-08-01: the only btrfs work is Toolan &
+  Humphries (already cited); it has 0 citing works.
+- arXiv `all:btrfs`: newest entry still 2024.
+- Peripheral, content UNVERIFIED (no abstract deposited): "Timelance: A Comprehensive Offline
+  Framework for Forensic Timeline Reconstruction and Knowledge Graph Analysis", ICSCST 2026, DOI
+  10.1109/ICSCST70031.2026.11709806; "Effectiveness of Forensic in Linux Environments: A
+  Systematic Review", LNNS, DOI 10.1007/978-3-032-38797-4_1. Neither title names btrfs or a
+  copy-on-write file system; read them only if the related-work section needs a generic
+  timeline or Linux-forensics citation.
+- Not run this time: the per-author OpenAlex feeds of §11.1 and the DFRWS APAC program (already
+  re-checked on 2026-09-21; the conference is 19–22 October).
+
+### 12.5 Applied
+
+plan.md §1 (C1, C3 and C6 rows) cites the tool and narrows the claims as above;
+paper-draft.md §5.3 has a bullet for it and a column in Table T-1; the M7 baseline list carries
+it, and EXP-010 is the experiment that turns the C6 difference into a measured one.
